@@ -218,3 +218,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Node / React
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# Local databases
+*.db
+*.sqlite3
+postgres_data/
+
+# Environment files (keep examples)
+.env
+.env.*
+!.env.example
+
+# Build output
+coverage/
+
+data/
