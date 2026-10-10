@@ -29,6 +29,7 @@ from app.schemas import (
     GoalResponse,
     HoldingCreate,
     HoldingCreateResponse,
+    HoldingUpdate,
     LoginRequest,
     MarketDataStatusResponse,
     MarketRefreshResponse,
@@ -49,6 +50,8 @@ from app.services import (
     create_goal,
     create_holding,
     dashboard,
+    delete_account,
+    delete_holding,
     get_policy_response,
     get_profile,
     list_accounts,
@@ -64,6 +67,7 @@ from app.services import (
     register_user,
     search_market_symbols,
     update_fixed_shares,
+    update_holding,
     update_policy,
     update_profile,
 )
@@ -196,6 +200,15 @@ def create_app(
     ) -> AccountSummary:
         return create_account(session, current_user.id, payload)
 
+    @app.delete("/api/accounts/{account_id}", status_code=204)
+    def remove_account(
+        account_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        delete_account(session, current_user.id, account_id)
+        return None
+
     @app.get(
         "/api/market/status",
         response_model=MarketDataStatusResponse,
@@ -228,6 +241,25 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> HoldingCreateResponse:
         return await create_holding(session, current_user.id, payload)
+
+    @app.put("/api/holdings/{holding_id}", status_code=204)
+    def put_holding(
+        holding_id: UUID,
+        payload: HoldingUpdate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        update_holding(session, current_user.id, holding_id, payload)
+        return None
+
+    @app.delete("/api/holdings/{holding_id}", status_code=204)
+    def remove_holding(
+        holding_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        delete_holding(session, current_user.id, holding_id)
+        return None
 
     @app.get("/api/goals", response_model=list[GoalResponse])
     def get_goals(

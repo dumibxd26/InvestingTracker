@@ -68,12 +68,14 @@ export interface ProfileUpdatePayload {
 }
 
 export interface HoldingSummary {
+  id: string;
   symbol: string;
   name: string;
   account_name: string;
   asset_class: AssetClass;
   instrument_type: "STOCK" | "ETF";
   quantity: string;
+  average_cost: string;
   price: string;
   price_currency: Currency;
   quote_source: string;
@@ -123,6 +125,11 @@ export interface HoldingCreatePayload {
   mic_code: string | null;
   exchange: string;
   instrument_type: "STOCK" | "ETF";
+  quantity: string;
+  average_cost: string;
+}
+
+export interface HoldingUpdatePayload {
   quantity: string;
   average_cost: string;
 }

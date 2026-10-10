@@ -88,9 +88,11 @@ API tests use isolated SQLite temporary databases; the Docker stack uses Postgre
 | `GET /api/profile` / `PUT /api/profile` | Read or update display name, base currency, and optional manual FX reference |
 | `GET /api/dashboard?currency=EUR` | Signed-in user's aggregated snapshot |
 | `GET /api/accounts` / `POST /api/accounts` | List or add the signed-in user's manual financial accounts |
+| `DELETE /api/accounts/{id}` | Remove an account and its balance/assets from the tracker while preserving linked cash-flow history |
 | `GET /api/market/status` | Check whether provider-backed market data is configured |
 | `GET /api/market/search?q=MSFT` | Search provider listings for stocks and ETFs |
 | `POST /api/holdings` | Add a selected stock/ETF listing and record its initial quote |
+| `PUT /api/holdings/{id}` / `DELETE /api/holdings/{id}` | Update share quantity and average cost, or remove a tracked position |
 | `POST /api/market/refresh` | Manually refresh held symbols and EUR/USD/RON FX rates |
 | `GET /api/goals` / `POST /api/goals` | List or add a goal |
 | `PUT /api/goals/funding-shares` | Save fixed goal shares |
@@ -130,6 +132,7 @@ The default Compose port bindings are loopback-only. Do not expose this service 
 - Goal progress is entered independently and is **not linked to positions**; it must not be interpreted as a reconciled account balance.
 - Cash-flow schedules create dated forecasts only. They never confirm a receipt, change account balances, or become investable cash; occurrences are generated deterministically within the requested horizon.
 - Manual account creation stores account metadata and opening cash directly, not as a complete double-entry transaction ledger. It does not connect to the institution or import holdings.
+- Removing a manual account from the tracker deletes its linked holdings and fixed deposits, removes its tracked cash balance, and preserves cash-flow history with the account link cleared. It does not close or modify any real bank or broker account.
 - Recording extra received cash atomically increments the selected liquid account and creates a confirmed cash-flow record. It is a cash receipt, not broker reconciliation.
 - The prototype’s “unrealized gain” uses one average-cost figure and the latest cached quote/FX mark, not tax lots or historical acquisition FX.
 - Allocation previews are asset-class-level, long-only, buy-only, and require user judgement. They do not select individual securities or submit orders.

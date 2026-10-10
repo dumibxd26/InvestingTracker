@@ -73,6 +73,7 @@ from app.schemas import (
     HoldingCreate,
     HoldingCreateResponse,
     HoldingSummary,
+    HoldingUpdate,
     LoginRequest,
     MarketDataStatusResponse,
     MarketFXRateSummary,
@@ -359,6 +360,35 @@ async def create_holding(
     )
 
 
+def update_holding(
+    session: Session, user_id: uuid.UUID, holding_id: uuid.UUID, payload: HoldingUpdate
+) -> None:
+    _get_user(session, user_id)
+    holding = session.scalar(
+        select(Holding)
+        .where(Holding.id == holding_id, Holding.user_id == user_id)
+        .with_for_update()
+    )
+    if holding is None:
+        raise HTTPException(status_code=404, detail="Holding was not found")
+    holding.quantity = payload.quantity
+    holding.average_cost = payload.average_cost
+    session.commit()
+
+
+def delete_holding(session: Session, user_id: uuid.UUID, holding_id: uuid.UUID) -> None:
+    _get_user(session, user_id)
+    holding = session.scalar(
+        select(Holding)
+        .where(Holding.id == holding_id, Holding.user_id == user_id)
+        .with_for_update()
+    )
+    if holding is None:
+        raise HTTPException(status_code=404, detail="Holding was not found")
+    session.delete(holding)
+    session.commit()
+
+
 def _save_market_fx_quote(session: Session, quote: ExchangeRateQuote) -> None:
     canonical_pairs = {
         frozenset((Currency.EUR, Currency.USD)): (Currency.EUR, Currency.USD),
@@ -605,6 +635,21 @@ def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate)
         position_count=0,
         is_sample=False,
     )
+
+
+def delete_account(session: Session, user_id: uuid.UUID, account_id: uuid.UUID) -> None:
+    _get_user(session, user_id)
+    account = session.scalar(
+        select(BrokerAccount)
+        .where(BrokerAccount.id == account_id, BrokerAccount.user_id == user_id)
+        .with_for_update()
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account was not found")
+    if account.provider_code == "SAMPLE":
+        raise HTTPException(status_code=409, detail="Legacy sample accounts cannot be deleted")
+    session.delete(account)
+    session.commit()
 
 
 def register_user(session: Session, payload: RegisterRequest, session_days: int) -> AuthResponse:
@@ -1231,12 +1276,14 @@ def dashboard(
         )
         holdings.append(
             HoldingSummary(
+                id=holding.id,
                 symbol=instrument.symbol,
                 name=instrument.name,
                 account_name=account.display_name,
                 asset_class=instrument.asset_class,
                 instrument_type=instrument.instrument_type,
                 quantity=holding.quantity,
+                average_cost=holding.average_cost,
                 price=quote.price,
                 price_currency=quote.currency,
                 quote_source=quote.source,

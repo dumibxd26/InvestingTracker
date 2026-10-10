@@ -336,12 +336,14 @@ class GoalSummary(BaseModel):
 
 
 class HoldingSummary(BaseModel):
+    id: UUID
     symbol: str
     name: str
     account_name: str
     asset_class: AssetClass
     instrument_type: Literal["STOCK", "ETF"]
     quantity: Decimal
+    average_cost: Decimal
     price: Decimal
     price_currency: Currency
     quote_source: str
@@ -374,6 +376,11 @@ class HoldingCreate(BaseModel):
     mic_code: str | None = Field(default=None, max_length=8)
     exchange: str | None = Field(default=None, max_length=80)
     instrument_type: Literal["STOCK", "ETF"]
+    quantity: Decimal = Field(gt=0, le=Decimal("1000000000"))
+    average_cost: Decimal = Field(gt=0, le=Decimal("100000000"))
+
+
+class HoldingUpdate(BaseModel):
     quantity: Decimal = Field(gt=0, le=Decimal("1000000000"))
     average_cost: Decimal = Field(gt=0, le=Decimal("100000000"))
 

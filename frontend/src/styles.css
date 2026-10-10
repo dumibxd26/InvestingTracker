@@ -1400,6 +1400,21 @@ a:focus-visible {
   justify-items: end;
 }
 
+.account-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.account-delete-button {
+  color: #a34e46;
+}
+
+.account-delete-button:hover:not(:disabled) {
+  border-color: #e8c9c5;
+  background: #fff4f2;
+}
+
 .account-card-balance strong {
   color: #44634d;
   font-size: 10px;
@@ -3795,7 +3810,7 @@ a:focus-visible {
     grid-template-columns: 31px minmax(0, 1fr) auto;
   }
 
-  .account-card .status-pill {
+  .account-card-actions {
     grid-column: 2;
     grid-row: 2;
     justify-self: start;
@@ -4628,6 +4643,24 @@ html[data-theme="dark"] .market-search-result:hover {
   background: #26382b;
 }
 
+html[data-theme="dark"] .holding-row-actions .holding-delete-button {
+  color: #e3aaa0;
+}
+
+html[data-theme="dark"] .holding-row-actions .holding-delete-button:hover:not(:disabled) {
+  border-color: #673d39;
+  background: #382321;
+}
+
+html[data-theme="dark"] .account-delete-button {
+  color: #e3aaa0;
+}
+
+html[data-theme="dark"] .account-delete-button:hover:not(:disabled) {
+  border-color: #673d39;
+  background: #382321;
+}
+
 html[data-theme="dark"] .account-storage-note,
 html[data-theme="dark"] .simulator-safety {
   border-color: #334438;
@@ -4860,6 +4893,27 @@ html[data-theme="dark"] .page-footer {
 
 .spin-icon {
   animation: spin 1s linear infinite;
+}
+
+.holding-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.holding-row-actions .icon-button {
+  width: 27px;
+  height: 27px;
+}
+
+.holding-row-actions .holding-delete-button {
+  color: #a34e46;
+}
+
+.holding-row-actions .holding-delete-button:hover:not(:disabled) {
+  border-color: #e8c9c5;
+  background: #fff4f2;
 }
 
 @keyframes spin {

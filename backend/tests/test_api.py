@@ -12,7 +12,18 @@ from app.config import Settings
 from app.database import Base, make_engine
 from app.main import create_app
 from app.market_data import ExchangeRateQuote, MarketQuote, MarketSymbol
-from app.models import Currency, MarketFXRate, User
+from app.models import (
+    AssetClass,
+    CashFlow,
+    CompoundingFrequency,
+    Currency,
+    FixedDeposit,
+    Holding,
+    Instrument,
+    MarketFXRate,
+    RateBasis,
+    User,
+)
 
 
 @contextmanager
@@ -81,10 +92,16 @@ def test_personal_financial_endpoints_require_a_valid_application_session(tmp_pa
             client.get("/api/policy"),
             client.get("/api/cash-flows"),
             client.get("/api/cash-flow-schedules"),
+            client.delete(f"/api/accounts/{uuid4()}"),
             client.get("/api/market/status"),
             client.get("/api/market/search?q=MSFT"),
             client.post("/api/market/refresh"),
             client.post("/api/holdings"),
+            client.put(
+                f"/api/holdings/{uuid4()}",
+                json={"quantity": "1", "average_cost": "100"},
+            ),
+            client.delete(f"/api/holdings/{uuid4()}"),
         ]
 
     assert [response.status_code for response in responses] == [401] * len(responses)
@@ -155,6 +172,7 @@ def test_users_cannot_see_each_others_accounts_or_goals(tmp_path) -> None:
             },
         )
         assert created.status_code == 201, created.text
+        first_account_id = created.json()["id"]
         first_balance = client.get("/api/dashboard").json()["totals"]["available_cash"]
 
         second = client.post(
@@ -167,6 +185,7 @@ def test_users_cannot_see_each_others_accounts_or_goals(tmp_path) -> None:
         )
         assert second.status_code == 201, second.text
         client.headers.update({"Authorization": f"Bearer {second.json()['access_token']}"})
+        foreign_account_delete = client.delete(f"/api/accounts/{first_account_id}")
         second_dashboard = client.get("/api/dashboard").json()
 
         client.headers.update({"Authorization": f"Bearer {first.json()['access_token']}"})
@@ -177,6 +196,7 @@ def test_users_cannot_see_each_others_accounts_or_goals(tmp_path) -> None:
     assert second_dashboard["accounts"] == []
     assert Decimal(second_dashboard["totals"]["available_cash"]) == 0
     assert second_dashboard["goals"] == []
+    assert foreign_account_delete.status_code == 404
     assert [account["display_name"] for account in first_accounts] == ["First owner bank"]
 
 
@@ -364,6 +384,34 @@ def test_search_and_add_holding_use_provider_results_and_quote_fx(monkeypatch, t
             },
         )
         dashboard = client.get("/api/dashboard")
+        holding_id = dashboard.json()["holdings"][0]["id"]
+        update = client.put(
+            f"/api/holdings/{holding_id}",
+            json={"quantity": "3", "average_cost": "350"},
+        )
+        updated_dashboard = client.get("/api/dashboard")
+
+        owner_authorization = client.headers["Authorization"]
+        second_user = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"other_owner_{uuid4().hex[:8]}",
+                "password": "another-long-test-passphrase",
+                "base_currency": "EUR",
+            },
+        )
+        client.headers.update(
+            {"Authorization": f"Bearer {second_user.json()['access_token']}"}
+        )
+        other_user_update = client.put(
+            f"/api/holdings/{holding_id}",
+            json={"quantity": "9", "average_cost": "100"},
+        )
+        other_user_delete = client.delete(f"/api/holdings/{holding_id}")
+        missing_holding_delete = client.delete(f"/api/holdings/{uuid4()}")
+        client.headers.update({"Authorization": owner_authorization})
+        delete = client.delete(f"/api/holdings/{holding_id}")
+        deleted_dashboard = client.get("/api/dashboard")
 
     assert search.status_code == 200, search.text
     assert search.json()["results"][0]["symbol"] == "MSFT"
@@ -371,6 +419,15 @@ def test_search_and_add_holding_use_provider_results_and_quote_fx(monkeypatch, t
     assert added.status_code == 201, added.text
     assert Decimal(dashboard.json()["holdings"][0]["market_value"]) == Decimal("640.00")
     assert dashboard.json()["holdings"][0]["quote_source"] == "TWELVE_DATA"
+    assert update.status_code == 204, update.text
+    assert Decimal(updated_dashboard.json()["holdings"][0]["quantity"]) == Decimal("3")
+    assert Decimal(updated_dashboard.json()["holdings"][0]["average_cost"]) == Decimal("350")
+    assert Decimal(updated_dashboard.json()["holdings"][0]["market_value"]) == Decimal("960.00")
+    assert other_user_update.status_code == 404
+    assert other_user_delete.status_code == 404
+    assert missing_holding_delete.status_code == 404
+    assert delete.status_code == 204, delete.text
+    assert deleted_dashboard.json()["holdings"] == []
 
 
 def test_foreign_currency_goal_schedule_and_fx_removal_need_a_manual_rate(tmp_path) -> None:
@@ -584,6 +641,89 @@ def test_creating_an_account_persists_cash_and_rejects_duplicate_names(tmp_path)
     assert any(row["id"] == account["id"] for row in accounts)
     assert Decimal(dashboard["totals"]["available_cash"]) == initial_balance + Decimal("1250.50")
     assert duplicate.status_code == 409
+
+
+def test_deleting_account_removes_attached_assets_but_preserves_cash_flow_history(tmp_path) -> None:
+    with create_test_client(tmp_path) as client:
+        user_id = UUID(client.get("/api/auth/me").json()["id"])
+        account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Savings to remove",
+                "provider_code": "MANUAL",
+                "account_type": "SAVINGS",
+                "currency": "EUR",
+                "opening_cash": "100",
+            },
+        )
+        assert account.status_code == 201, account.text
+        account_id = UUID(account.json()["id"])
+        cash_flow = client.post(
+            "/api/cash-flows/extra-cash",
+            json={
+                "account_id": str(account_id),
+                "source": "Old transfer",
+                "amount": "25",
+                "received_date": date.today().isoformat(),
+                "idempotency_key": str(uuid4()),
+            },
+        )
+        assert cash_flow.status_code == 201, cash_flow.text
+
+        with client.app.state.session_factory() as session:
+            instrument = Instrument(
+                symbol=f"DEL{uuid4().hex[:8].upper()}",
+                name="Test security",
+                asset_class=AssetClass.EQUITIES,
+                currency=Currency.EUR,
+                mic="XNAS",
+                estimated_annual_yield=Decimal("0"),
+                is_demo=False,
+            )
+            session.add(instrument)
+            session.flush()
+            holding = Holding(
+                user_id=user_id,
+                account_id=account_id,
+                instrument_id=instrument.id,
+                quantity=Decimal("2"),
+                average_cost=Decimal("10"),
+            )
+            deposit = FixedDeposit(
+                user_id=user_id,
+                account_id=account_id,
+                name="Linked term deposit",
+                principal=Decimal("500"),
+                currency=Currency.EUR,
+                annual_rate=Decimal("0.03"),
+                rate_basis=RateBasis.NOMINAL_APR,
+                compounding=CompoundingFrequency.MONTHLY,
+                start_date=date.today(),
+                maturity_date=date.today() + timedelta(days=90),
+            )
+            session.add_all([holding, deposit])
+            session.flush()
+            holding_id = holding.id
+            deposit_id = deposit.id
+            session.commit()
+
+        deleted = client.delete(f"/api/accounts/{account_id}")
+        dashboard = client.get("/api/dashboard").json()
+        with client.app.state.session_factory() as session:
+            history = session.get(CashFlow, UUID(cash_flow.json()["id"]))
+            remaining_holding = session.get(Holding, holding_id)
+            remaining_deposit = session.get(FixedDeposit, deposit_id)
+
+    assert deleted.status_code == 204, deleted.text
+    assert dashboard["accounts"] == []
+    assert dashboard["holdings"] == []
+    assert Decimal(dashboard["totals"]["available_cash"]) == 0
+    assert Decimal(dashboard["totals"]["fixed_deposits"]) == 0
+    assert any(flow["id"] == cash_flow.json()["id"] for flow in dashboard["cash_flows"])
+    assert history is not None
+    assert history.account_id is None
+    assert remaining_holding is None
+    assert remaining_deposit is None
 
 
 def test_recording_extra_cash_updates_account_once_and_is_a_confirmed_inflow(

@@ -1,10 +1,20 @@
 import { useState } from "react";
-import { ArrowUpRight, Building2, Clock3, Info, Plus, RefreshCw } from "lucide-react";
+import {
+  ArrowUpRight,
+  Building2,
+  Clock3,
+  Info,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import { ApiError, api } from "../api";
 import { AccountDialog } from "./AccountDialog";
 import { AddHoldingDialog } from "./AddHoldingDialog";
+import { EditHoldingDialog } from "./EditHoldingDialog";
 import { amount, assetLabel, number } from "../format";
-import type { Currency, Dashboard } from "../types";
+import type { Currency, Dashboard, HoldingSummary } from "../types";
 
 interface PortfolioViewProps {
   data: Dashboard;
@@ -44,9 +54,16 @@ function timestamp(value: string): string {
 export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [holdingDialogOpen, setHoldingDialogOpen] = useState(false);
+  const [editingHolding, setEditingHolding] = useState<HoldingSummary | null>(null);
+  const [mutatingHoldingId, setMutatingHoldingId] = useState<string | null>(null);
+  const [mutatingAccountId, setMutatingAccountId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [marketError, setMarketError] = useState("");
   const [marketMessage, setMarketMessage] = useState("");
+  const [holdingError, setHoldingError] = useState("");
+  const [holdingMessage, setHoldingMessage] = useState("");
+  const [accountError, setAccountError] = useState("");
+  const [accountMessage, setAccountMessage] = useState("");
 
   async function refreshMarketData() {
     setRefreshing(true);
@@ -65,6 +82,55 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
       );
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  async function deleteHolding(holding: HoldingSummary) {
+    if (
+      !window.confirm(
+        `Remove ${holding.quantity} shares of ${holding.symbol} from ${holding.account_name}? This does not affect your actual brokerage account.`,
+      )
+    ) {
+      return;
+    }
+    setMutatingHoldingId(holding.id);
+    setHoldingError("");
+    setHoldingMessage("");
+    try {
+      await api.deleteHolding(holding.id);
+      await onSaved();
+      setHoldingMessage(`${holding.symbol} position removed from this tracker.`);
+    } catch (cause) {
+      setHoldingError(
+        cause instanceof ApiError ? cause.message : "The holding could not be deleted.",
+      );
+    } finally {
+      setMutatingHoldingId(null);
+    }
+  }
+
+  async function deleteAccount(account: Dashboard["accounts"][number]) {
+    if (account.is_sample) return;
+    if (
+      !window.confirm(
+        `Remove "${account.display_name}" (${account.account_type}) and its ${amount(account.cash_balance, account.currency, 2)} balance from Northstar?\n\nAny stocks/ETFs and fixed deposits attached to it will also be removed from this tracker. Cash-flow history will be kept but detached from this account. This does not change your actual bank or broker account.`,
+      )
+    ) {
+      return;
+    }
+    setMutatingAccountId(account.id);
+    setAccountError("");
+    setAccountMessage("");
+    try {
+      await api.deleteAccount(account.id);
+      await onSaved();
+      setAccountMessage(`"${account.display_name}" was removed from this tracker.`);
+    } catch (cause) {
+      setAccountError(
+        cause instanceof ApiError ? cause.message : "The account could not be deleted.",
+      );
+    } finally {
+      setMutatingAccountId(null);
     }
   }
 
@@ -145,6 +211,10 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
       </section>
       {marketMessage && <div className="market-feedback" role="status">{marketMessage}</div>}
       {marketError && <div className="inline-error market-feedback" role="alert">{marketError}</div>}
+      {holdingMessage && <div className="market-feedback" role="status">{holdingMessage}</div>}
+      {holdingError && <div className="inline-error market-feedback" role="alert">{holdingError}</div>}
+      {accountMessage && <div className="market-feedback" role="status">{accountMessage}</div>}
+      {accountError && <div className="inline-error market-feedback" role="alert">{accountError}</div>}
 
       <section className="panel account-list-panel">
         <div className="panel-heading">
@@ -172,8 +242,24 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                   <strong>{amount(account.cash_balance, account.currency, 2)}</strong>
                   <small>Cash balance · {account.position_count} positions</small>
                 </span>
-                <span className={`status-pill ${account.is_sample ? "status-planned" : "status-confirmed"}`}>
-                  {account.is_sample ? "Sample" : "Manual"}
+                <span className="account-card-actions">
+                  <span className={`status-pill ${account.is_sample ? "status-planned" : "status-confirmed"}`}>
+                    {account.is_sample ? "Sample" : "Manual"}
+                  </span>
+                  <button
+                    className="icon-button small account-delete-button"
+                    type="button"
+                    aria-label={`Remove ${account.display_name}`}
+                    title={
+                      account.is_sample
+                        ? "Legacy sample accounts cannot be deleted"
+                        : "Remove this account from Northstar"
+                    }
+                    onClick={() => void deleteAccount(account)}
+                    disabled={account.is_sample || mutatingAccountId === account.id}
+                  >
+                    <Trash2 size={14} />
+                  </button>
                 </span>
               </article>
             ))}
@@ -233,11 +319,12 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                 <th className="align-right">Market value</th>
                 <th className="align-right">Since refresh</th>
                 <th className="align-right">Gain vs. cost</th>
+                <th><span className="sr-only">Position actions</span></th>
               </tr>
             </thead>
             <tbody>
-              {data.holdings.map((holding, index) => (
-                <tr key={`${holding.symbol}-${holding.account_name}-${index}`}>
+              {data.holdings.map((holding) => (
+                <tr key={holding.id}>
                   <td>
                     <div className="instrument-cell">
                       <span className={`ticker-avatar ticker-${holding.asset_class}`}>{holding.symbol.slice(0, 2)}</span>
@@ -266,6 +353,28 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                   </td>
                   <td className={`align-right tabular ${Number(holding.change_percent) >= 0 ? "positive-text" : "negative-text"}`}>
                     {Number(holding.change_percent) >= 0 ? "+" : ""}{Number(holding.change_percent).toFixed(1)}%
+                  </td>
+                  <td className="holding-row-actions">
+                    <button
+                      className="icon-button small"
+                      type="button"
+                      aria-label={`Edit ${holding.symbol} position`}
+                      title="Edit position"
+                      onClick={() => setEditingHolding(holding)}
+                      disabled={mutatingHoldingId === holding.id}
+                    >
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      className="icon-button small holding-delete-button"
+                      type="button"
+                      aria-label={`Delete ${holding.symbol} position`}
+                      title="Delete position"
+                      onClick={() => void deleteHolding(holding)}
+                      disabled={mutatingHoldingId === holding.id}
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -310,6 +419,13 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
           marketDataConfigured={data.market_data_provider_configured}
           onClose={() => setHoldingDialogOpen(false)}
           onCreated={onSaved}
+        />
+      )}
+      {editingHolding && (
+        <EditHoldingDialog
+          holding={editingHolding}
+          onClose={() => setEditingHolding(null)}
+          onSaved={onSaved}
         />
       )}
     </div>

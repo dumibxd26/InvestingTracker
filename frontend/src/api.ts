@@ -5,6 +5,7 @@ import type {
   Currency,
   HoldingCreatePayload,
   HoldingCreated,
+  HoldingUpdatePayload,
   CashReceiptPayload,
   CashFlowSchedule,
   CashFlowSchedulePayload,
@@ -141,6 +142,9 @@ export const api = {
   createAccount: (payload: AccountCreatePayload) =>
     request<AccountSummary>("/accounts", { method: "POST", body: JSON.stringify(payload) }),
 
+  deleteAccount: (accountId: string) =>
+    request<void>(`/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" }),
+
   marketDataStatus: () => request<MarketDataStatus>("/market/status"),
 
   searchSymbols: (query: string, signal?: AbortSignal) =>
@@ -154,6 +158,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  updateHolding: (holdingId: string, payload: HoldingUpdatePayload) =>
+    request<void>(`/holdings/${encodeURIComponent(holdingId)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteHolding: (holdingId: string) =>
+    request<void>(`/holdings/${encodeURIComponent(holdingId)}`, { method: "DELETE" }),
 
   refreshMarketData: () =>
     request<MarketRefreshResult>("/market/refresh", { method: "POST" }),
