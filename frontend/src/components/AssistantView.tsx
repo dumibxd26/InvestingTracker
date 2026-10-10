@@ -7,7 +7,7 @@ import { amount } from "../format";
 const suggestedQuestions = [
   "What does my available cash include?",
   "Explain my current investment mix.",
-  "How would a €1,000 contribution be split?",
+  "How would a new contribution be split?",
 ];
 
 export function AssistantView({ data, currency }: { data: Dashboard; currency: Currency }) {

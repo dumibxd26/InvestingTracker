@@ -18,7 +18,7 @@ function localDateValue(): string {
 const flowKinds: { value: FlowKind; label: string }[] = [
   { value: "salary", label: "Salary · income" },
   { value: "bonus", label: "Bonus · income" },
-  { value: "windfall", label: "Windfall · income" },
+  { value: "windfall", label: "Extra cash · forecast" },
   { value: "dividend", label: "Dividend · income" },
   { value: "interest", label: "Interest · income" },
   { value: "bill", label: "Bill · expense" },
@@ -86,7 +86,7 @@ export function CashFlowDialog({ currency, onClose, onCreated }: CashFlowDialogP
             </label>
             <label className="form-field">
               <span>Amount</span>
-              <input name="amount" type="number" required min="0.01" max="100000000" step="0.01" placeholder="5200" />
+              <input name="amount" type="number" required min="0.01" max="100000000" step="0.01" placeholder="Enter amount" />
             </label>
           </div>
           <div className="form-row">
@@ -95,6 +95,7 @@ export function CashFlowDialog({ currency, onClose, onCreated }: CashFlowDialogP
               <select name="currency" defaultValue={currency}>
                 <option value="EUR">EUR · Euro</option>
                 <option value="USD">USD · US dollar</option>
+                <option value="RON">RON · Romanian leu</option>
               </select>
             </label>
             <label className="form-field">

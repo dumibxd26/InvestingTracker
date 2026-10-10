@@ -29,7 +29,9 @@ function percentageRatio(value: string): string {
 }
 
 export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps) {
-  const [fundingRule, setFundingRule] = useState<FundingRule>(data.policy.funding_rule);
+  const [fundingRule, setFundingRule] = useState<FundingRule | "">(
+    data.policy.funding_rule ?? "",
+  );
   const [reserve, setReserve] = useState(data.policy.emergency_reserve);
   const [weights, setWeights] = useState<Record<AssetClass, string>>({
     equities: String(Number(data.policy.target_weights.equities) * 100),
@@ -42,7 +44,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
   const [error, setError] = useState("");
 
   useEffect(() => {
-    setFundingRule(data.policy.funding_rule);
+    setFundingRule(data.policy.funding_rule ?? "");
     setReserve(data.policy.emergency_reserve);
     setWeights({
       equities: String(Number(data.policy.target_weights.equities) * 100),
@@ -71,6 +73,10 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
     setMessage("");
     if (targetTotalUnits !== 10000n) {
       setError("Asset-class target weights must add up to 100%.");
+      return;
+    }
+    if (!fundingRule) {
+      setError("Choose how you want available cash divided between goals.");
       return;
     }
     if (fundingRule === "fixed_percentages" && shareTotalUnits !== 10000n) {
@@ -175,6 +181,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
           <label className="form-field">
             <span>When new money is available</span>
             <select value={fundingRule} onChange={(event) => setFundingRule(event.target.value as FundingRule)}>
+              <option value="" disabled>Choose a funding rule</option>
               <option value="priority_first">Fund higher-priority goals first</option>
               <option value="proportional">Divide by monthly contribution needs</option>
               <option value="fixed_percentages">Use fixed percentages I set</option>

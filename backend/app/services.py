@@ -7,10 +7,10 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.calculations import (
-    convert_currency,
     fixed_deposit_value,
     goal_progress,
     rebalance_with_contribution,
@@ -19,6 +19,12 @@ from app.calculations import (
 )
 from app.cash_flow_logic import add_months, occurrence_dates
 from app.config import get_settings
+from app.market_data import (
+    PROVIDER_NAME,
+    ExchangeRateQuote,
+    MarketDataProviderError,
+    TwelveDataClient,
+)
 from app.models import (
     AccountType,
     AllocationPolicy,
@@ -32,11 +38,12 @@ from app.models import (
     FlowKind,
     FlowStatus,
     FundingRule,
-    FXRate,
     Goal,
     GoalType,
     Holding,
     Instrument,
+    LoginSession,
+    MarketFXRate,
     MarketPriceCache,
     Recommendation,
     RiskLevel,
@@ -47,10 +54,14 @@ from app.models import (
     VestingTranche,
 )
 from app.schemas import (
+    AccountCreate,
+    AccountSummary,
     AllocationSummary,
+    AuthResponse,
     BucketAllocation,
     CashFlowScheduleCreate,
     CashFlowScheduleResponse,
+    CashReceiptCreate,
     ChartPoint,
     DepositSummary,
     FixedSharesUpdate,
@@ -59,24 +70,34 @@ from app.schemas import (
     GoalCreate,
     GoalResponse,
     GoalSummary,
+    HoldingCreate,
+    HoldingCreateResponse,
     HoldingSummary,
+    LoginRequest,
+    MarketDataStatusResponse,
+    MarketFXRateSummary,
+    MarketRefreshResponse,
+    MarketSymbolSearchResult,
     PolicyResponse,
     PolicyUpdate,
+    ProfileUpdate,
     RecommendationRequest,
     RecommendationResponse,
+    RegisterRequest,
+    UserProfileResponse,
     VestingSummary,
 )
+from app.security import create_access_token, digest_access_token, hash_password, verify_password
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
 CENT = Decimal("0.01")
-USER_ID = uuid.UUID(get_settings().demo_user_id)
 
 
-def _get_user(session: Session) -> User:
-    user = session.get(User, USER_ID)
+def _get_user(session: Session, user_id: uuid.UUID) -> User:
+    user = session.get(User, user_id)
     if user is None:
-        raise HTTPException(status_code=503, detail="Demo profile is not initialized")
+        raise HTTPException(status_code=401, detail="Application account is unavailable")
     return user
 
 
@@ -87,42 +108,664 @@ def _get_policy(session: Session, user_id: uuid.UUID) -> AllocationPolicy:
     return policy
 
 
-def _eur_per_usd(session: Session) -> Decimal:
-    rate = session.scalar(
-        select(FXRate)
-        .where(
-            FXRate.base_currency == Currency.EUR,
-            FXRate.quote_currency == Currency.USD,
+def _to_base(
+    amount: Decimal,
+    from_currency: Currency,
+    to_currency: Currency,
+    usd_per_eur: Decimal | None,
+    fx_rates: dict[tuple[Currency, Currency], Decimal] | None = None,
+) -> Decimal:
+    if amount == ZERO:
+        return ZERO
+    if from_currency == to_currency:
+        return amount
+    rates = dict(fx_rates or {})
+    if usd_per_eur is not None:
+        rates.setdefault((Currency.EUR, Currency.USD), usd_per_eur)
+        rates.setdefault((Currency.USD, Currency.EUR), ONE / usd_per_eur)
+    if not rates:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh market data or set a manual USD-per-EUR reference rate "
+                "to value currencies."
+            ),
         )
-        .order_by(FXRate.observed_at.desc())
+    frontier: list[tuple[Currency, Decimal]] = [(from_currency, ONE)]
+    visited = {from_currency}
+    while frontier:
+        current, current_rate = frontier.pop(0)
+        for (base, quote), rate in rates.items():
+            if base != current or quote in visited:
+                continue
+            converted_rate = current_rate * rate
+            if quote == to_currency:
+                return amount * converted_rate
+            visited.add(quote)
+            frontier.append((quote, converted_rate))
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"No cached FX path converts {from_currency.value} to {to_currency.value}. "
+            "Refresh market data to retrieve current FX rates."
+        ),
+    )
+
+
+def _market_fx_matrix(session: Session) -> dict[tuple[Currency, Currency], Decimal]:
+    rates: dict[tuple[Currency, Currency], Decimal] = {}
+    for quote in session.scalars(
+        select(MarketFXRate).order_by(MarketFXRate.received_at.desc(), MarketFXRate.id.desc())
+    ):
+        pair = (quote.base_currency, quote.quote_currency)
+        rates.setdefault(pair, quote.rate)
+        rates.setdefault((quote.quote_currency, quote.base_currency), ONE / quote.rate)
+    return rates
+
+
+def _fx_matrix(session: Session, user: User) -> dict[tuple[Currency, Currency], Decimal]:
+    rates = _market_fx_matrix(session)
+    if user.usd_per_eur is not None:
+        rates.setdefault((Currency.EUR, Currency.USD), user.usd_per_eur)
+        rates.setdefault((Currency.USD, Currency.EUR), ONE / user.usd_per_eur)
+    return rates
+
+
+def _market_fx_summaries(session: Session) -> list[MarketFXRateSummary]:
+    latest_by_pair: dict[tuple[Currency, Currency], MarketFXRate] = {}
+    for quote in session.scalars(
+        select(MarketFXRate).order_by(MarketFXRate.received_at.desc(), MarketFXRate.id.desc())
+    ):
+        latest_by_pair.setdefault((quote.base_currency, quote.quote_currency), quote)
+    return [
+        MarketFXRateSummary(
+            base_currency=quote.base_currency,
+            quote_currency=quote.quote_currency,
+            rate=quote.rate,
+            provider=quote.provider,
+            observed_at=quote.observed_at,
+            change_percent=(
+                (quote.rate - quote.previous_rate) * Decimal(100) / quote.previous_rate
+                if quote.previous_rate
+                else None
+            ),
+        )
+        for quote in latest_by_pair.values()
+    ]
+
+
+def _market_client() -> TwelveDataClient:
+    settings = get_settings()
+    try:
+        return TwelveDataClient(
+            settings.twelve_data_api_key,
+            timeout_seconds=settings.market_data_timeout_seconds,
+        )
+    except MarketDataProviderError as error:
+        raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+
+
+def _raise_provider_error(error: MarketDataProviderError) -> None:
+    raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+
+
+def market_data_status() -> MarketDataStatusResponse:
+    return MarketDataStatusResponse(
+        provider=PROVIDER_NAME,
+        provider_configured=bool(get_settings().twelve_data_api_key.strip()),
+    )
+
+
+async def search_market_symbols(query: str) -> list[MarketSymbolSearchResult]:
+    client = _market_client()
+    try:
+        results = await client.search_symbols(query.strip())
+    except MarketDataProviderError as error:
+        _raise_provider_error(error)
+    return [
+        MarketSymbolSearchResult(
+            symbol=result.symbol,
+            name=result.name,
+            exchange=result.exchange,
+            mic_code=result.mic_code,
+            currency=result.currency,
+            instrument_type=result.instrument_type,
+            country=result.country,
+        )
+        for result in results
+    ]
+
+
+async def create_holding(
+    session: Session, user_id: uuid.UUID, payload: HoldingCreate
+) -> HoldingCreateResponse:
+    user = _get_user(session, user_id)
+    account = session.scalar(
+        select(BrokerAccount).where(
+            BrokerAccount.id == payload.account_id,
+            BrokerAccount.user_id == user.id,
+        )
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Selected investment account was not found")
+    if account.account_type not in {AccountType.BROKERAGE, AccountType.EMPLOYER_PLAN}:
+        raise HTTPException(
+            status_code=422,
+            detail="Stocks and ETFs can only be added to brokerage or employer-plan accounts",
+        )
+
+    client = _market_client()
+    try:
+        quote = await client.quote(payload.symbol, payload.mic_code, payload.exchange)
+    except MarketDataProviderError as error:
+        _raise_provider_error(error)
+
+    fx_rates = _fx_matrix(session, user)
+    if not _can_convert(quote.currency, user.base_currency, fx_rates, user.usd_per_eur):
+        try:
+            fx_quote = await client.exchange_rate(
+                f"{quote.currency.value}/{user.base_currency.value}"
+            )
+        except MarketDataProviderError as error:
+            _raise_provider_error(error)
+        _save_market_fx_quote(session, fx_quote)
+
+    symbol = quote.symbol.upper()
+    mic = (quote.mic_code or payload.mic_code or "UNKNOWN").upper()
+    exchange = quote.exchange or payload.exchange or ""
+    instrument = session.scalar(
+        select(Instrument).where(Instrument.symbol == symbol, Instrument.mic == mic)
+    )
+    if instrument is None:
+        instrument = Instrument(
+            symbol=symbol,
+            name=quote.name,
+            asset_class=AssetClass.EQUITIES,
+            currency=quote.currency,
+            mic=mic,
+            exchange=exchange,
+            instrument_type=payload.instrument_type,
+            estimated_annual_yield=ZERO,
+            is_demo=False,
+        )
+        session.add(instrument)
+        session.flush()
+    elif (
+        instrument.currency != quote.currency
+        or (instrument.exchange and exchange and instrument.exchange != exchange)
+        or instrument.instrument_type != payload.instrument_type
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{symbol} is already tracked using a different listing. "
+                "Select its existing exchange listing or use a distinct ticker."
+            ),
+        )
+    else:
+        instrument.name = quote.name
+        instrument.exchange = exchange or instrument.exchange
+        instrument.is_demo = False
+
+    holding = session.scalar(
+        select(Holding).where(
+            Holding.user_id == user.id,
+            Holding.account_id == account.id,
+            Holding.instrument_id == instrument.id,
+        )
+    )
+    if holding is None:
+        holding = Holding(
+            user_id=user.id,
+            account_id=account.id,
+            instrument_id=instrument.id,
+            quantity=payload.quantity,
+            average_cost=payload.average_cost,
+        )
+        session.add(holding)
+        total_quantity = payload.quantity
+    else:
+        total_quantity = holding.quantity + payload.quantity
+        holding.average_cost = (
+            holding.quantity * holding.average_cost + payload.quantity * payload.average_cost
+        ) / total_quantity
+        holding.quantity = total_quantity
+
+    session.add(
+        MarketPriceCache(
+            instrument_id=instrument.id,
+            price=quote.price,
+            currency=quote.currency,
+            source="TWELVE_DATA",
+            feed_type="QUOTE",
+            observed_at=quote.observed_at,
+            is_market_open=quote.is_market_open,
+        )
+    )
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The holding could not be saved because its listing already exists.",
+        ) from error
+    return HoldingCreateResponse(
+        symbol=instrument.symbol,
+        account_name=account.display_name,
+        quantity=total_quantity,
+        quote_price=quote.price,
+        quote_currency=quote.currency,
+    )
+
+
+def _save_market_fx_quote(session: Session, quote: ExchangeRateQuote) -> None:
+    canonical_pairs = {
+        frozenset((Currency.EUR, Currency.USD)): (Currency.EUR, Currency.USD),
+        frozenset((Currency.EUR, Currency.RON)): (Currency.EUR, Currency.RON),
+        frozenset((Currency.USD, Currency.RON)): (Currency.USD, Currency.RON),
+    }
+    canonical_pair = canonical_pairs[frozenset((quote.base_currency, quote.quote_currency))]
+    if (quote.base_currency, quote.quote_currency) != canonical_pair:
+        quote = ExchangeRateQuote(
+            base_currency=canonical_pair[0],
+            quote_currency=canonical_pair[1],
+            rate=ONE / quote.rate,
+            observed_at=quote.observed_at,
+        )
+    existing = session.scalar(
+        select(MarketFXRate).where(
+            MarketFXRate.base_currency == quote.base_currency,
+            MarketFXRate.quote_currency == quote.quote_currency,
+            MarketFXRate.provider == PROVIDER_NAME,
+            MarketFXRate.observed_at == quote.observed_at,
+        )
+    )
+    if existing is not None:
+        existing.rate = quote.rate
+        return
+    previous = session.scalar(
+        select(MarketFXRate)
+        .where(
+            MarketFXRate.base_currency == quote.base_currency,
+            MarketFXRate.quote_currency == quote.quote_currency,
+            MarketFXRate.provider == PROVIDER_NAME,
+        )
+        .order_by(MarketFXRate.received_at.desc(), MarketFXRate.id.desc())
         .limit(1)
     )
-    if rate is None or rate.rate <= ZERO:
-        raise HTTPException(status_code=503, detail="No EUR/USD reference rate is available")
-    return rate.rate
+    session.add(
+        MarketFXRate(
+            base_currency=quote.base_currency,
+            quote_currency=quote.quote_currency,
+            rate=quote.rate,
+            provider=PROVIDER_NAME,
+            observed_at=quote.observed_at,
+            previous_rate=previous.rate if previous is not None else None,
+        )
+    )
 
 
-def _to_base(
-    amount: Decimal, from_currency: Currency, to_currency: Currency, eur_per_usd: Decimal
-) -> Decimal:
+async def refresh_market_data(
+    session: Session, user_id: uuid.UUID
+) -> MarketRefreshResponse:
+    user = _get_user(session, user_id)
+    settings = get_settings()
+    client = _market_client()
+    instruments = list(
+        session.scalars(
+            select(Instrument)
+            .join(Holding, Holding.instrument_id == Instrument.id)
+            .where(Holding.user_id == user.id)
+            .distinct()
+            .order_by(Instrument.symbol)
+        )
+    )
+    if len(instruments) > settings.market_data_max_symbols:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"This profile has {len(instruments)} different holdings; "
+                f"the manual refresh limit is {settings.market_data_max_symbols}."
+            ),
+        )
+
+    updated_symbols: list[str] = []
+    updated_fx_pairs: list[str] = []
+    errors: list[str] = []
+    rate_limited = False
+    for instrument in instruments:
+        try:
+            quote = await client.quote(
+                instrument.symbol,
+                instrument.mic if instrument.mic != "UNKNOWN" else None,
+                instrument.exchange or None,
+            )
+        except MarketDataProviderError as error:
+            errors.append(f"{instrument.symbol}: {error.detail}")
+            if error.status_code == 429:
+                rate_limited = True
+                break
+            continue
+        if quote.currency != instrument.currency:
+            errors.append(
+                f"{instrument.symbol}: provider quote currency changed from "
+                f"{instrument.currency.value} to {quote.currency.value}; mark not updated."
+            )
+            continue
+        session.add(
+            MarketPriceCache(
+                instrument_id=instrument.id,
+                price=quote.price,
+                currency=quote.currency,
+                source="TWELVE_DATA",
+                feed_type="QUOTE",
+                observed_at=quote.observed_at,
+                is_market_open=quote.is_market_open,
+            )
+        )
+        updated_symbols.append(instrument.symbol)
+
+    if rate_limited:
+        errors.append("Remaining quotes and FX pairs were skipped after the provider rate limit.")
+    else:
+        for pair in ("EUR/USD", "EUR/RON", "USD/RON"):
+            try:
+                quote = await client.exchange_rate(pair)
+            except MarketDataProviderError as error:
+                errors.append(f"{pair}: {error.detail}")
+                if error.status_code == 429:
+                    break
+                continue
+            _save_market_fx_quote(session, quote)
+            updated_fx_pairs.append(pair)
+
+    if not updated_symbols and not updated_fx_pairs:
+        session.rollback()
+        detail = errors[0] if errors else "No held symbols or supported FX pairs were refreshed."
+        raise HTTPException(status_code=502, detail=detail)
+    session.commit()
+    return MarketRefreshResponse(
+        updated_symbols=updated_symbols,
+        updated_fx_pairs=updated_fx_pairs,
+        errors=errors,
+    )
+
+
+def _can_convert(
+    from_currency: Currency,
+    to_currency: Currency,
+    rates: dict[tuple[Currency, Currency], Decimal],
+    usd_per_eur: Decimal | None = None,
+) -> bool:
     try:
-        return convert_currency(amount, from_currency.value, to_currency.value, eur_per_usd)
-    except ValueError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+        _to_base(ONE, from_currency, to_currency, usd_per_eur, rates)
+    except HTTPException as error:
+        if error.status_code != 409:
+            raise
+        return False
+    return True
 
 
 def _target_weights(policy: AllocationPolicy) -> dict[str, Decimal]:
-    return {key: Decimal(str(value)) for key, value in policy.target_weights.items()}
+    return {
+        asset_class.value: Decimal(str(policy.target_weights.get(asset_class.value, "0")))
+        for asset_class in AssetClass
+    }
 
 
-def get_policy_response(session: Session) -> PolicyResponse:
-    user = _get_user(session)
+def _profile_response(user: User) -> UserProfileResponse:
+    return UserProfileResponse(
+        id=user.id,
+        username=user.username or "",
+        display_name=user.display_name,
+        base_currency=user.base_currency,
+        usd_per_eur=user.usd_per_eur,
+    )
+
+
+def get_policy_response(session: Session, user_id: uuid.UUID) -> PolicyResponse:
+    user = _get_user(session, user_id)
     policy = _get_policy(session, user.id)
     return PolicyResponse(
         funding_rule=policy.funding_rule,
         emergency_reserve=policy.emergency_reserve,
         target_weights=_target_weights(policy),
     )
+
+
+def list_accounts(session: Session, user_id: uuid.UUID) -> list[AccountSummary]:
+    user = _get_user(session, user_id)
+    accounts = list(
+        session.scalars(
+            select(BrokerAccount)
+            .where(BrokerAccount.user_id == user.id)
+            .order_by(BrokerAccount.account_type, BrokerAccount.display_name)
+        )
+    )
+    position_counts = dict(
+        session.execute(
+            select(Holding.account_id, func.count(Holding.id))
+            .where(Holding.user_id == user.id)
+            .group_by(Holding.account_id)
+        ).all()
+    )
+    return [
+        AccountSummary(
+            id=account.id,
+            display_name=account.display_name,
+            provider_code=account.provider_code,
+            account_type=account.account_type,
+            currency=account.currency,
+            cash_balance=account.cash_balance,
+            position_count=position_counts.get(account.id, 0),
+            is_sample=account.provider_code == "SAMPLE",
+        )
+        for account in accounts
+    ]
+
+
+def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate) -> AccountSummary:
+    user = _get_user(session, user_id)
+    if not _can_convert(
+        payload.currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh market data or set a manual USD-per-EUR reference rate before "
+                "adding an account in another currency."
+            ),
+        )
+    account = BrokerAccount(
+        user_id=user.id,
+        provider_code=payload.provider_code,
+        display_name=payload.display_name,
+        account_type=payload.account_type,
+        currency=payload.currency,
+        cash_balance=payload.opening_cash,
+    )
+    session.add(account)
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="An account with that name already exists in this profile",
+        ) from error
+    session.refresh(account)
+    return AccountSummary(
+        id=account.id,
+        display_name=account.display_name,
+        provider_code=account.provider_code,
+        account_type=account.account_type,
+        currency=account.currency,
+        cash_balance=account.cash_balance,
+        position_count=0,
+        is_sample=False,
+    )
+
+
+def register_user(session: Session, payload: RegisterRequest, session_days: int) -> AuthResponse:
+    username = payload.username
+    user = User(
+        id=uuid.uuid4(),
+        username=username,
+        password_hash=hash_password(payload.password),
+        display_name=payload.display_name or username,
+        base_currency=payload.base_currency,
+        usd_per_eur=payload.usd_per_eur,
+    )
+    access_token = create_access_token()
+    expires_at = datetime.now(UTC) + timedelta(days=session_days)
+    session.add(user)
+    try:
+        session.flush()
+        session.add(
+            AllocationPolicy(
+                user_id=user.id,
+                funding_rule=None,
+                emergency_reserve=ZERO,
+                target_weights={},
+            )
+        )
+        session.add(
+            LoginSession(
+                user_id=user.id,
+                token_digest=digest_access_token(access_token),
+                expires_at=expires_at,
+            )
+        )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409, detail="That username is already registered"
+        ) from error
+    return AuthResponse(
+        access_token=access_token,
+        expires_at=expires_at,
+        user=_profile_response(user),
+    )
+
+
+def login_user(session: Session, payload: LoginRequest, session_days: int) -> AuthResponse:
+    user = session.scalar(select(User).where(User.username == payload.username))
+    password_matches = verify_password(
+        payload.password, user.password_hash if user is not None else None
+    )
+    if user is None or not password_matches:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    access_token = create_access_token()
+    expires_at = datetime.now(UTC) + timedelta(days=session_days)
+    session.add(
+        LoginSession(
+            user_id=user.id,
+            token_digest=digest_access_token(access_token),
+            expires_at=expires_at,
+        )
+    )
+    session.commit()
+    return AuthResponse(
+        access_token=access_token,
+        expires_at=expires_at,
+        user=_profile_response(user),
+    )
+
+
+def authenticate_token(session: Session, access_token: str | None) -> User:
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Sign in to access your application account")
+    login_session = session.scalar(
+        select(LoginSession).where(
+            LoginSession.token_digest == digest_access_token(access_token),
+            LoginSession.expires_at > datetime.now(UTC),
+        )
+    )
+    if login_session is None:
+        raise HTTPException(status_code=401, detail="Application session is invalid or expired")
+    user = _get_user(session, login_session.user_id)
+    if user.username is None or user.password_hash is None:
+        raise HTTPException(status_code=401, detail="Application session is invalid or expired")
+    return user
+
+
+def logout_user(session: Session, user_id: uuid.UUID, access_token: str | None) -> None:
+    if not access_token:
+        return
+    login_session = session.scalar(
+        select(LoginSession).where(
+            LoginSession.user_id == user_id,
+            LoginSession.token_digest == digest_access_token(access_token),
+        )
+    )
+    if login_session is not None:
+        session.delete(login_session)
+        session.commit()
+
+
+def get_profile(session: Session, user_id: uuid.UUID) -> UserProfileResponse:
+    return _profile_response(_get_user(session, user_id))
+
+
+def update_profile(
+    session: Session, user_id: uuid.UUID, payload: ProfileUpdate
+) -> UserProfileResponse:
+    user = _get_user(session, user_id)
+    rates = _market_fx_matrix(session)
+    if payload.usd_per_eur is not None:
+        rates[(Currency.EUR, Currency.USD)] = payload.usd_per_eur
+        rates[(Currency.USD, Currency.EUR)] = ONE / payload.usd_per_eur
+    if _has_unconvertible_currency_data(
+        session, user.id, payload.base_currency, rates, payload.usd_per_eur
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh market data or keep a manual FX reference while your profile contains "
+                "data in another currency."
+            ),
+        )
+    user.display_name = payload.display_name
+    user.base_currency = payload.base_currency
+    user.usd_per_eur = payload.usd_per_eur
+    session.commit()
+    session.refresh(user)
+    return _profile_response(user)
+
+
+def _has_unconvertible_currency_data(
+    session: Session,
+    user_id: uuid.UUID,
+    base_currency: Currency,
+    rates: dict[tuple[Currency, Currency], Decimal],
+    usd_per_eur: Decimal | None,
+) -> bool:
+    statements = [
+        select(BrokerAccount.currency).where(BrokerAccount.user_id == user_id),
+        select(Goal.target_currency).where(Goal.user_id == user_id),
+        select(CashFlow.currency).where(CashFlow.user_id == user_id),
+        select(CashFlowSchedule.currency).where(CashFlowSchedule.user_id == user_id),
+        select(FixedDeposit.currency).where(FixedDeposit.user_id == user_id),
+        select(Instrument.currency)
+        .select_from(Holding)
+        .join(Instrument, Instrument.id == Holding.instrument_id)
+        .where(Holding.user_id == user_id),
+        select(Instrument.currency)
+        .select_from(VestingGrant)
+        .join(Instrument, Instrument.id == VestingGrant.instrument_id)
+        .where(VestingGrant.user_id == user_id),
+        select(ValuationSnapshot.currency).where(ValuationSnapshot.user_id == user_id),
+    ]
+    for statement in statements:
+        for currency in session.scalars(statement):
+            if currency != base_currency and not _can_convert(
+                currency, base_currency, rates, usd_per_eur
+            ):
+                return True
+    return False
 
 
 def _flow_direction(kind: FlowKind) -> FlowDirection:
@@ -133,8 +776,10 @@ def _flow_direction(kind: FlowKind) -> FlowDirection:
     return FlowDirection.INFLOW
 
 
-def list_cash_flow_schedules(session: Session) -> list[CashFlowScheduleResponse]:
-    user = _get_user(session)
+def list_cash_flow_schedules(
+    session: Session, user_id: uuid.UUID
+) -> list[CashFlowScheduleResponse]:
+    user = _get_user(session, user_id)
     schedules = session.scalars(
         select(CashFlowSchedule)
         .where(CashFlowSchedule.user_id == user.id, CashFlowSchedule.is_active.is_(True))
@@ -144,9 +789,19 @@ def list_cash_flow_schedules(session: Session) -> list[CashFlowScheduleResponse]
 
 
 def create_cash_flow_schedule(
-    session: Session, payload: CashFlowScheduleCreate
+    session: Session, user_id: uuid.UUID, payload: CashFlowScheduleCreate
 ) -> CashFlowScheduleResponse:
-    user = _get_user(session)
+    user = _get_user(session, user_id)
+    if not _can_convert(
+        payload.currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh market data or set a manual USD-per-EUR reference rate before "
+                "adding a forecast in another currency."
+            ),
+        )
     active_count = session.scalar(
         select(func.count())
         .select_from(CashFlowSchedule)
@@ -163,10 +818,121 @@ def create_cash_flow_schedule(
     return CashFlowScheduleResponse.model_validate(schedule)
 
 
+def _cash_receipt_response(
+    flow: CashFlow,
+    usd_per_eur: Decimal | None,
+    base_currency: Currency,
+    fx_rates: dict[tuple[Currency, Currency], Decimal],
+) -> FlowResponse:
+    return FlowResponse(
+        id=flow.id,
+        label=flow.label,
+        kind=flow.kind,
+        direction=FlowDirection.INFLOW,
+        status=flow.status,
+        amount=flow.amount,
+        currency=flow.currency,
+        expected_date=flow.expected_date,
+        occurred_at=flow.occurred_at,
+        reporting_amount=round_money(
+            _to_base(flow.amount, flow.currency, base_currency, usd_per_eur, fx_rates)
+        ),
+        reporting_currency=base_currency,
+        schedule_id=None,
+        recurrence=None,
+    )
+
+
+def record_extra_cash(
+    session: Session, user_id: uuid.UUID, payload: CashReceiptCreate
+) -> FlowResponse:
+    user = _get_user(session, user_id)
+    event_id = str(payload.idempotency_key)
+    existing = session.scalar(
+        select(CashFlow).where(
+            CashFlow.user_id == user.id,
+            CashFlow.source_system == "USER_ENTRY",
+            CashFlow.source_event_id == event_id,
+        )
+    )
+    if existing is not None:
+        same_receipt = (
+            existing.account_id == payload.account_id
+            and existing.amount == payload.amount
+            and existing.label == f"Extra cash · {payload.source}"
+            and existing.expected_date == payload.received_date
+        )
+        if not same_receipt:
+            raise HTTPException(
+                status_code=409,
+                detail="This receipt idempotency key was already used for different data",
+            )
+        return _cash_receipt_response(
+            existing, user.usd_per_eur, user.base_currency, _fx_matrix(session, user)
+        )
+
+    account = session.scalar(
+        select(BrokerAccount)
+        .where(
+            BrokerAccount.id == payload.account_id,
+            BrokerAccount.user_id == user.id,
+        )
+        .with_for_update()
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Cash-receiving account was not found")
+    if account.account_type == AccountType.EMPLOYER_PLAN:
+        raise HTTPException(
+            status_code=422,
+            detail="Extra cash receipts must go to a liquid bank, savings, or brokerage account",
+        )
+    if not _can_convert(
+        account.currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh market data or set a manual USD-per-EUR reference rate before "
+                "recording cash in another currency."
+            ),
+        )
+
+    occurred_at = datetime.combine(
+        payload.received_date, datetime.min.time(), tzinfo=UTC
+    ) + timedelta(hours=12)
+    flow = CashFlow(
+        user_id=user.id,
+        account_id=account.id,
+        label=f"Extra cash · {payload.source}",
+        kind=FlowKind.WINDFALL,
+        status=FlowStatus.CONFIRMED,
+        amount=payload.amount,
+        currency=account.currency,
+        expected_date=payload.received_date,
+        occurred_at=occurred_at,
+        source_system="USER_ENTRY",
+        source_event_id=event_id,
+    )
+    account.cash_balance += payload.amount
+    session.add(flow)
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This receipt was already recorded; refresh the cash-flow list.",
+        ) from error
+    session.refresh(flow)
+    return _cash_receipt_response(
+        flow, user.usd_per_eur, user.base_currency, _fx_matrix(session, user)
+    )
+
+
 def archive_cash_flow_schedule(
-    session: Session, schedule_id: uuid.UUID
+    session: Session, user_id: uuid.UUID, schedule_id: uuid.UUID
 ) -> CashFlowScheduleResponse:
-    user = _get_user(session)
+    user = _get_user(session, user_id)
     schedule = session.scalar(
         select(CashFlowSchedule).where(
             CashFlowSchedule.id == schedule_id,
@@ -186,7 +952,8 @@ def _project_cash_flows(
     session: Session,
     user_id: uuid.UUID,
     base_currency: Currency,
-    usd_per_eur: Decimal,
+    usd_per_eur: Decimal | None,
+    fx_rates: dict[tuple[Currency, Currency], Decimal],
     months: int,
 ) -> list[FlowResponse]:
     today = date.today()
@@ -219,7 +986,7 @@ def _project_cash_flows(
                 expected_date=flow.expected_date,
                 occurred_at=flow.occurred_at,
                 reporting_amount=round_money(
-                    _to_base(flow.amount, flow.currency, base_currency, usd_per_eur)
+                    _to_base(flow.amount, flow.currency, base_currency, usd_per_eur, fx_rates)
                 ),
                 reporting_currency=base_currency,
             )
@@ -256,6 +1023,7 @@ def _project_cash_flows(
                             schedule.currency,
                             base_currency,
                             usd_per_eur,
+                            fx_rates,
                         )
                     ),
                     reporting_currency=base_currency,
@@ -275,8 +1043,8 @@ def _project_cash_flows(
     return entries
 
 
-def update_policy(session: Session, payload: PolicyUpdate) -> PolicyResponse:
-    user = _get_user(session)
+def update_policy(session: Session, user_id: uuid.UUID, payload: PolicyUpdate) -> PolicyResponse:
+    user = _get_user(session, user_id)
     policy = _get_policy(session, user.id)
     active_goals = list(
         session.scalars(select(Goal).where(Goal.user_id == user.id, Goal.is_active.is_(True)))
@@ -306,16 +1074,26 @@ def update_policy(session: Session, payload: PolicyUpdate) -> PolicyResponse:
     )
 
 
-def list_goals(session: Session) -> list[GoalResponse]:
-    user = _get_user(session)
+def list_goals(session: Session, user_id: uuid.UUID) -> list[GoalResponse]:
+    user = _get_user(session, user_id)
     goals = session.scalars(
         select(Goal).where(Goal.user_id == user.id).order_by(Goal.priority, Goal.name)
     )
     return [GoalResponse.model_validate(goal) for goal in goals]
 
 
-def create_goal(session: Session, payload: GoalCreate) -> GoalResponse:
-    user = _get_user(session)
+def create_goal(session: Session, user_id: uuid.UUID, payload: GoalCreate) -> GoalResponse:
+    user = _get_user(session, user_id)
+    if not _can_convert(
+        payload.target_currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh market data or set a manual USD-per-EUR reference rate before "
+                "adding a goal in another currency."
+            ),
+        )
     policy = _get_policy(session, user.id)
     if policy.funding_rule == FundingRule.FIXED_PERCENTAGES:
         current_total = sum(
@@ -340,8 +1118,10 @@ def create_goal(session: Session, payload: GoalCreate) -> GoalResponse:
     return GoalResponse.model_validate(goal)
 
 
-def update_fixed_shares(session: Session, payload: FixedSharesUpdate) -> dict[str, Decimal]:
-    user = _get_user(session)
+def update_fixed_shares(
+    session: Session, user_id: uuid.UUID, payload: FixedSharesUpdate
+) -> dict[str, Decimal]:
+    user = _get_user(session, user_id)
     goals = list(
         session.scalars(select(Goal).where(Goal.user_id == user.id, Goal.is_active.is_(True)))
     )
@@ -360,20 +1140,36 @@ def update_fixed_shares(session: Session, payload: FixedSharesUpdate) -> dict[st
     return {str(goal_id): percentage for goal_id, percentage in requested.items()}
 
 
-def dashboard(session: Session, requested_currency: Currency | None = None) -> dict[str, Any]:
-    user = _get_user(session)
+def dashboard(
+    session: Session, user_id: uuid.UUID, requested_currency: Currency | None = None
+) -> dict[str, Any]:
+    user = _get_user(session, user_id)
     base_currency = requested_currency or user.base_currency
-    eur_per_usd = _eur_per_usd(session)
+    usd_per_eur = user.usd_per_eur
+    fx_rates = _fx_matrix(session, user)
     policy = _get_policy(session, user.id)
     now = datetime.now(UTC)
     today = date.today()
 
-    quote_rows = session.scalars(
-        select(MarketPriceCache).order_by(MarketPriceCache.observed_at.desc())
+    quote_rows = list(
+        session.scalars(
+            select(MarketPriceCache).order_by(
+                MarketPriceCache.received_at.desc(), MarketPriceCache.id.desc()
+            )
+        )
     )
     latest_quotes: dict[uuid.UUID, MarketPriceCache] = {}
+    previous_quotes: dict[uuid.UUID, MarketPriceCache] = {}
     for quote in quote_rows:
-        latest_quotes.setdefault(quote.instrument_id, quote)
+        latest = latest_quotes.get(quote.instrument_id)
+        if latest is None:
+            latest_quotes[quote.instrument_id] = quote
+        elif (
+            quote.source == latest.source
+            and quote.feed_type == latest.feed_type
+            and quote.source == "TWELVE_DATA"
+        ):
+            previous_quotes.setdefault(quote.instrument_id, quote)
 
     holding_rows = session.execute(
         select(Holding, Instrument, BrokerAccount)
@@ -384,20 +1180,25 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
 
     holdings: list[HoldingSummary] = []
     values_by_class = {asset_class.value: ZERO for asset_class in AssetClass}
+    position_counts: dict[uuid.UUID, int] = {}
     annual_dividend_income = ZERO
     unrealized_pnl = ZERO
-    sample_data = True
-    warnings = [
-        (
-            "Illustrative demo records only. No broker is connected and no live market "
-            "or FX feed is configured."
-        ),
-        (
-            "Demo positions, cost basis, goal earmarks, and history are synthetic; "
-            "tax lots, realized P&L, and account reconciliation are not implemented."
-        ),
-    ]
+    sample_data = bool(holding_rows) and all(
+        instrument.is_demo for _, instrument, _ in holding_rows
+    )
+    warnings: list[str] = []
+    if sample_data:
+        warnings.extend(
+            [
+                "Illustrative demo holdings and marks are not live market data.",
+                (
+                    "Demo cost basis and performance history are synthetic and are not "
+                    "tax-lot accounting."
+                ),
+            ]
+        )
     for holding, instrument, account in holding_rows:
+        position_counts[account.id] = position_counts.get(account.id, 0) + 1
         quote = latest_quotes.get(instrument.id)
         if quote is None:
             warnings.append(
@@ -406,12 +1207,13 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
             sample_data = False
             continue
         native_value = holding.quantity * quote.price
-        current_value = _to_base(native_value, quote.currency, base_currency, eur_per_usd)
+        current_value = _to_base(native_value, quote.currency, base_currency, usd_per_eur, fx_rates)
         cost_value = _to_base(
             holding.quantity * holding.average_cost,
             instrument.currency,
             base_currency,
-            eur_per_usd,
+            usd_per_eur,
+            fx_rates,
         )
         unrealized_pnl += current_value - cost_value
         values_by_class[instrument.asset_class.value] += current_value
@@ -419,23 +1221,37 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
             native_value * instrument.estimated_annual_yield,
             quote.currency,
             base_currency,
-            eur_per_usd,
+            usd_per_eur,
+            fx_rates,
         )
         change_percent = (
             (quote.price - holding.average_cost) * Decimal(100) / holding.average_cost
             if holding.average_cost
             else ZERO
         )
-        sample_data = sample_data and instrument.is_demo and quote.feed_type == "SAMPLE"
         holdings.append(
             HoldingSummary(
                 symbol=instrument.symbol,
                 name=instrument.name,
                 account_name=account.display_name,
                 asset_class=instrument.asset_class,
+                instrument_type=instrument.instrument_type,
                 quantity=holding.quantity,
                 price=quote.price,
                 price_currency=quote.currency,
+                quote_source=quote.source,
+                quote_observed_at=quote.observed_at,
+                is_market_open=quote.is_market_open,
+                change_since_refresh_percent=(
+                    (
+                        (quote.price - previous_quotes[instrument.id].price)
+                        * Decimal(100)
+                        / previous_quotes[instrument.id].price
+                    ).quantize(Decimal("0.01"))
+                    if instrument.id in previous_quotes
+                    and previous_quotes[instrument.id].price
+                    else None
+                ),
                 market_value=round_money(current_value),
                 base_currency=base_currency,
                 change_percent=change_percent.quantize(Decimal("0.01")),
@@ -444,9 +1260,22 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
         )
 
     accounts = list(session.scalars(select(BrokerAccount).where(BrokerAccount.user_id == user.id)))
+    account_summaries = [
+        AccountSummary(
+            id=account.id,
+            display_name=account.display_name,
+            provider_code=account.provider_code,
+            account_type=account.account_type,
+            currency=account.currency,
+            cash_balance=account.cash_balance,
+            position_count=position_counts.get(account.id, 0),
+            is_sample=account.provider_code == "SAMPLE",
+        )
+        for account in accounts
+    ]
     available_cash = sum(
         (
-            _to_base(account.cash_balance, account.currency, base_currency, eur_per_usd)
+            _to_base(account.cash_balance, account.currency, base_currency, usd_per_eur, fx_rates)
             for account in accounts
             if account.account_type
             in {AccountType.BROKERAGE, AccountType.BANK, AccountType.SAVINGS}
@@ -469,12 +1298,15 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
             deposit.rate_basis,
         )
         accrued_interest = max(ZERO, accrued_value - deposit.principal)
-        deposit_value += _to_base(accrued_value, deposit.currency, base_currency, eur_per_usd)
+        deposit_value += _to_base(
+            accrued_value, deposit.currency, base_currency, usd_per_eur, fx_rates
+        )
         annual_interest_income += _to_base(
             deposit.principal * deposit.annual_rate,
             deposit.currency,
             base_currency,
-            eur_per_usd,
+            usd_per_eur,
+            fx_rates,
         )
         deposits.append(
             DepositSummary(
@@ -519,7 +1351,7 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
             intrinsic_value = units * max(quote.price - (grant.strike_price or ZERO), ZERO)
         else:
             intrinsic_value = units * quote.price
-        gross = _to_base(intrinsic_value, quote.currency, base_currency, eur_per_usd)
+        gross = _to_base(intrinsic_value, quote.currency, base_currency, usd_per_eur, fx_rates)
         net = gross * (ONE - grant.tax_rate_assumption)
         unvested_gross += gross
         unvested_net += net
@@ -556,18 +1388,26 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
     )
     for goal in goal_rows:
         current_amount = _to_base(
-            goal.current_amount, goal.target_currency, base_currency, eur_per_usd
+            goal.current_amount, goal.target_currency, base_currency, usd_per_eur, fx_rates
         )
         current_annual_income = _to_base(
-            goal.current_annual_income, goal.target_currency, base_currency, eur_per_usd
+            goal.current_annual_income, goal.target_currency, base_currency, usd_per_eur, fx_rates
         )
         target_amount = (
-            _to_base(goal.target_amount, goal.target_currency, base_currency, eur_per_usd)
+            _to_base(
+                goal.target_amount, goal.target_currency, base_currency, usd_per_eur, fx_rates
+            )
             if goal.target_amount is not None
             else None
         )
         target_annual_income = (
-            _to_base(goal.target_annual_income, goal.target_currency, base_currency, eur_per_usd)
+            _to_base(
+                goal.target_annual_income,
+                goal.target_currency,
+                base_currency,
+                usd_per_eur,
+                fx_rates,
+            )
             if goal.target_annual_income is not None
             else None
         )
@@ -599,9 +1439,9 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
         )
 
     cash_flow_responses = _project_cash_flows(
-        session, user.id, base_currency, eur_per_usd, months=12
+        session, user.id, base_currency, usd_per_eur, fx_rates, months=12
     )[:8]
-    cash_flow_schedules = list_cash_flow_schedules(session)
+    cash_flow_schedules = list_cash_flow_schedules(session, user.id)
 
     snapshot_rows = list(
         session.scalars(
@@ -615,7 +1455,13 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
             label=snapshot.observed_at.strftime("%b"),
             date=snapshot.observed_at.date(),
             value=round_money(
-                _to_base(snapshot.total_value, snapshot.currency, base_currency, eur_per_usd)
+                _to_base(
+                    snapshot.total_value,
+                    snapshot.currency,
+                    base_currency,
+                    usd_per_eur,
+                    fx_rates,
+                )
             ),
         )
         for snapshot in snapshot_rows
@@ -645,8 +1491,10 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
 
     return {
         "base_currency": base_currency,
+        "profile": _profile_response(user),
         "as_of": now,
         "sample_data": sample_data,
+        "market_data_provider_configured": bool(get_settings().twelve_data_api_key.strip()),
         "totals": {
             "net_worth": round_money(net_worth),
             "invested_assets": round_money(total_invested),
@@ -664,7 +1512,8 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
                         policy.emergency_reserve,
                         user.base_currency,
                         base_currency,
-                        eur_per_usd,
+                        usd_per_eur,
+                        fx_rates,
                     )
                     - available_cash,
                 )
@@ -674,7 +1523,9 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
         "six_month_change_percent": six_month_change_percent.quantize(Decimal("0.01")),
         "allocation": current_allocation,
         "chart": chart,
+        "accounts": account_summaries,
         "holdings": holdings,
+        "market_fx_rates": _market_fx_summaries(session),
         "goals": goals,
         "cash_flows": cash_flow_responses,
         "cash_flow_schedules": cash_flow_schedules,
@@ -684,30 +1535,43 @@ def dashboard(session: Session, requested_currency: Currency | None = None) -> d
         "policy": PolicyResponse(
             funding_rule=policy.funding_rule,
             emergency_reserve=_to_base(
-                policy.emergency_reserve, user.base_currency, base_currency, eur_per_usd
+                policy.emergency_reserve,
+                user.base_currency,
+                base_currency,
+                usd_per_eur,
+                fx_rates,
             ),
             target_weights=_target_weights(policy),
         ),
     }
 
 
-def list_cash_flows(session: Session, months: int = 12) -> list[FlowResponse]:
-    user = _get_user(session)
-    eur_per_usd = _eur_per_usd(session)
-    return _project_cash_flows(session, user.id, user.base_currency, eur_per_usd, months)
+def list_cash_flows(session: Session, user_id: uuid.UUID, months: int = 12) -> list[FlowResponse]:
+    user = _get_user(session, user_id)
+    return _project_cash_flows(
+        session, user.id, user.base_currency, user.usd_per_eur, _fx_matrix(session, user), months
+    )
 
 
 def preview_recommendation(
-    session: Session, request: RecommendationRequest
+    session: Session, user_id: uuid.UUID, request: RecommendationRequest
 ) -> RecommendationResponse:
-    user = _get_user(session)
+    user = _get_user(session, user_id)
     policy = _get_policy(session, user.id)
-    fx = _eur_per_usd(session)
+    if policy.funding_rule is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Choose a goal-funding rule and asset-class targets in Goals & plan first.",
+        )
+    fx = user.usd_per_eur
+    fx_rates = _fx_matrix(session, user)
     now = datetime.now(UTC)
     base_currency = user.base_currency
-    input_base = _to_base(request.amount, request.currency, base_currency, fx)
-    available_cash_base = dashboard(session, base_currency)["totals"]["available_cash"]
-    reserve_base = _to_base(policy.emergency_reserve, user.base_currency, base_currency, fx)
+    input_base = _to_base(request.amount, request.currency, base_currency, fx, fx_rates)
+    available_cash_base = dashboard(session, user.id, base_currency)["totals"]["available_cash"]
+    reserve_base = _to_base(
+        policy.emergency_reserve, user.base_currency, base_currency, fx, fx_rates
+    )
     reserve_top_up = min(input_base, max(ZERO, reserve_base - available_cash_base))
     deployable = max(ZERO, input_base - reserve_top_up)
 
@@ -783,7 +1647,7 @@ def preview_recommendation(
             continue
         native_value = holding.quantity * quote.price
         current_values[instrument.asset_class.value] += _to_base(
-            native_value, quote.currency, base_currency, fx
+            native_value, quote.currency, base_currency, fx, fx_rates
         )
 
     target_weights = _target_weights(policy)
@@ -825,12 +1689,18 @@ def preview_recommendation(
     passive_goals = [goal for goal in goals if goal.goal_type == GoalType.PASSIVE_INCOME]
     passive_income_target = max(
         (
-            _to_base(goal.target_annual_income or ZERO, goal.target_currency, base_currency, fx)
+            _to_base(
+                goal.target_annual_income or ZERO,
+                goal.target_currency,
+                base_currency,
+                fx,
+                fx_rates,
+            )
             for goal in passive_goals
         ),
         default=ZERO,
     )
-    estimated_current_income = dashboard(session, base_currency)["totals"][
+    estimated_current_income = dashboard(session, user.id, base_currency)["totals"][
         "estimated_monthly_income"
     ] * Decimal(12)
     passive_income_gap = max(ZERO, passive_income_target - estimated_current_income)

@@ -6,10 +6,10 @@ import {
   Settings2,
   Sparkles,
   Target,
-  WalletCards,
   type LucideIcon,
 } from "lucide-react";
 import type { View } from "../App";
+import type { UserProfile } from "../types";
 
 interface NavigationItem {
   label: string;
@@ -31,14 +31,17 @@ const mobileItems: NavigationItem[] = [
   { label: "Goals", view: "goals", icon: Target },
   { label: "Cash flow", view: "cashflow", icon: ArrowLeftRight },
   { label: "Assistant", view: "assistant", icon: Sparkles },
+  { label: "Settings", view: "settings", icon: Settings2 },
 ];
 
 interface SidebarProps {
   activeView: View;
   onNavigate: (view: View) => void;
+  profile: UserProfile;
+  onLogout: () => void;
 }
 
-export function Sidebar({ activeView, onNavigate }: SidebarProps) {
+export function Sidebar({ activeView, onNavigate, profile, onLogout }: SidebarProps) {
   return (
     <aside className="sidebar">
       <a className="brand" href="#" aria-label="Northstar home" onClick={(event) => {
@@ -76,12 +79,9 @@ export function Sidebar({ activeView, onNavigate }: SidebarProps) {
           <span>AI assistant</span>
           <span className="nav-new">NEW</span>
         </button>
-        <button
-          className={`nav-item ${activeView === "goals" ? "active" : ""}`}
-          onClick={() => onNavigate("goals")}
-        >
-          <WalletCards size={18} strokeWidth={1.8} />
-          <span>Financial plan</span>
+        <button className={`nav-item ${activeView === "settings" ? "active" : ""}`} onClick={() => onNavigate("settings")}>
+          <Settings2 size={18} strokeWidth={1.8} />
+          <span>Profile settings</span>
         </button>
       </nav>
 
@@ -108,13 +108,13 @@ export function Sidebar({ activeView, onNavigate }: SidebarProps) {
           <span>Your goals, your rules.</span>
         </div>
       </div>
-      <button className="profile-button" type="button" onClick={() => onNavigate("overview")}>
-        <span className="profile-avatar">DP</span>
+      <button className="profile-button" type="button" onClick={onLogout} aria-label={`Sign out ${profile.username}`}>
+        <span className="profile-avatar">{profile.username.slice(0, 2).toUpperCase()}</span>
         <span className="profile-copy">
-          <strong>Demo portfolio</strong>
-          <span>Personal workspace</span>
+          <strong>{profile.display_name}</strong>
+          <span>@{profile.username} · Sign out</span>
         </span>
-        <span className="profile-status" aria-label="Demo environment" />
+        <span className="profile-status" aria-label="Signed in" />
       </button>
     </aside>
   );

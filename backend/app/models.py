@@ -32,6 +32,7 @@ def enum_values(enum_cls: type[StrEnum]) -> list[str]:
 class Currency(StrEnum):
     EUR = "EUR"
     USD = "USD"
+    RON = "RON"
 
 
 class AccountType(StrEnum):
@@ -128,10 +129,28 @@ class User(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     display_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    username: Mapped[str | None] = mapped_column(String(32), nullable=True, unique=True, index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
     base_currency: Mapped[Currency] = mapped_column(
         SqlEnum(Currency, values_callable=enum_values, name="currency_code"),
-        default=Currency.EUR,
         nullable=False,
+    )
+    usd_per_eur: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+class LoginSession(Base):
+    __tablename__ = "login_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_digest: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
@@ -160,9 +179,10 @@ class BrokerAccount(Base):
 
 class Instrument(Base):
     __tablename__ = "instruments"
+    __table_args__ = (UniqueConstraint("symbol", "mic", name="uq_instruments_symbol_mic"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    symbol: Mapped[str] = mapped_column(String(24), nullable=False, unique=True)
+    symbol: Mapped[str] = mapped_column(String(24), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     asset_class: Mapped[AssetClass] = mapped_column(
         SqlEnum(AssetClass, values_callable=enum_values, name="asset_class"), nullable=False
@@ -171,6 +191,10 @@ class Instrument(Base):
         SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
     )
     mic: Mapped[str] = mapped_column(String(8), default="XNAS", nullable=False)
+    exchange: Mapped[str] = mapped_column(String(80), default="", nullable=False)
+    instrument_type: Mapped[str] = mapped_column(
+        String(16), default="STOCK", server_default="STOCK", nullable=False
+    )
     estimated_annual_yield: Mapped[Decimal] = mapped_column(
         Numeric(12, 8), default=Decimal("0"), nullable=False
     )
@@ -214,6 +238,7 @@ class MarketPriceCache(Base):
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
+    is_market_open: Mapped[bool | None] = mapped_column(Boolean)
 
 
 class FXRate(Base):
@@ -230,6 +255,32 @@ class FXRate(Base):
     rate: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False)
     source: Mapped[str] = mapped_column(String(40), nullable=False)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+class MarketFXRate(Base):
+    __tablename__ = "market_fx_rates"
+    __table_args__ = (
+        UniqueConstraint("base_currency", "quote_currency", "provider", "observed_at"),
+        Index("ix_market_fx_latest", "base_currency", "quote_currency", "received_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    base_currency: Mapped[Currency] = mapped_column(
+        SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
+    )
+    quote_currency: Mapped[Currency] = mapped_column(
+        SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
+    )
+    rate: Mapped[Decimal] = mapped_column(Numeric(24, 12), nullable=False)
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    previous_rate: Mapped[Decimal | None] = mapped_column(Numeric(24, 12))
 
 
 class Goal(Base):
@@ -278,7 +329,7 @@ class AllocationPolicy(Base):
         ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
     )
     funding_rule: Mapped[FundingRule] = mapped_column(
-        SqlEnum(FundingRule, values_callable=enum_values, name="funding_rule"), nullable=False
+        SqlEnum(FundingRule, values_callable=enum_values, name="funding_rule"), nullable=True
     )
     emergency_reserve: Mapped[Decimal] = mapped_column(
         Numeric(20, 4), default=Decimal("0"), nullable=False

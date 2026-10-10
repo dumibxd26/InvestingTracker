@@ -1,6 +1,5 @@
 import json
-from collections.abc import AsyncIterator, Generator
-from contextlib import asynccontextmanager
+from collections.abc import Generator
 from datetime import UTC
 from typing import Annotated
 from uuid import UUID
@@ -8,14 +7,19 @@ from uuid import UUID
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
-from app.database import Base, SessionFactory, engine, get_session
-from app.models import Currency
+from app.database import SessionFactory, get_session
+from app.models import Currency, User
 from app.schemas import (
+    AccountCreate,
+    AccountSummary,
+    AuthResponse,
     CashFlowScheduleCreate,
     CashFlowScheduleResponse,
+    CashReceiptCreate,
     ChatRequest,
     ChatResponse,
     DashboardResponse,
@@ -23,28 +27,49 @@ from app.schemas import (
     FlowResponse,
     GoalCreate,
     GoalResponse,
+    HoldingCreate,
+    HoldingCreateResponse,
+    LoginRequest,
+    MarketDataStatusResponse,
+    MarketRefreshResponse,
+    MarketSymbolSearchResponse,
     PolicyResponse,
     PolicyUpdate,
+    ProfileUpdate,
     RecommendationRequest,
     RecommendationResponse,
+    RegisterRequest,
+    UserProfileResponse,
 )
-from app.seed import seed_demo_data
 from app.services import (
-    USER_ID,
     archive_cash_flow_schedule,
+    authenticate_token,
+    create_account,
     create_cash_flow_schedule,
     create_goal,
+    create_holding,
     dashboard,
     get_policy_response,
+    get_profile,
+    list_accounts,
     list_cash_flow_schedules,
     list_cash_flows,
     list_goals,
+    login_user,
+    logout_user,
+    market_data_status,
     preview_recommendation,
+    record_extra_cash,
+    refresh_market_data,
+    register_user,
+    search_market_symbols,
     update_fixed_shares,
     update_policy,
+    update_profile,
 )
 
 settings = get_settings()
+bearer_scheme = HTTPBearer(auto_error=False)
 SYSTEM_PROMPT = (
     "You are a read-only assistant inside a personal wealth tracker. Explain the supplied "
     "portfolio snapshot and help users understand calculations. Use only the provided context; "
@@ -58,34 +83,23 @@ SYSTEM_PROMPT = (
 
 def create_app(
     session_factory: sessionmaker[Session] = SessionFactory,
-    db_engine=engine,
-    seed_demo: bool | None = None,
 ) -> FastAPI:
-    should_seed = settings.seed_demo_data if seed_demo is None else seed_demo
-
-    @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        Base.metadata.create_all(bind=db_engine)
-        if should_seed:
-            with session_factory() as session:
-                seed_demo_data(session, USER_ID)
-        yield
-
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
         description=(
-            "Local-first personal wealth tracking prototype. Demo data only; "
-            "not intended for public deployment or real financial records."
+            "Local personal wealth tracking with username/password accounts. "
+            "Broker connections are not enabled. Optional Twelve Data market quotes and FX "
+            "are fetched only after explicit search or refresh requests."
         ),
-        lifespan=lifespan,
     )
+    app.state.session_factory = session_factory
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
         allow_credentials=False,
         allow_methods=["DELETE", "GET", "POST", "PUT", "OPTIONS"],
-        allow_headers=["Content-Type", "X-Provider-API-Key"],
+        allow_headers=["Authorization", "Content-Type", "X-Provider-API-Key"],
     )
 
     def session_dependency() -> Generator[Session, None, None]:
@@ -94,59 +108,188 @@ def create_app(
 
     app.dependency_overrides[get_session] = session_dependency
 
+    def get_current_user(
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> User:
+        if credentials is None or credentials.scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=401,
+                detail="Sign in to access your application account",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return authenticate_token(session, credentials.credentials)
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "service": "northstar-api"}
 
+    @app.post("/api/auth/register", response_model=AuthResponse, status_code=201)
+    def post_register(
+        payload: RegisterRequest,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> AuthResponse:
+        return register_user(session, payload, settings.login_session_days)
+
+    @app.post("/api/auth/login", response_model=AuthResponse)
+    def post_login(
+        payload: LoginRequest,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> AuthResponse:
+        return login_user(session, payload, settings.login_session_days)
+
+    @app.post("/api/auth/logout", status_code=204)
+    def post_logout(
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        logout_user(
+            session,
+            current_user.id,
+            credentials.credentials if credentials else None,
+        )
+        return None
+
+    @app.get("/api/auth/me", response_model=UserProfileResponse)
+    def get_current_profile(
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> UserProfileResponse:
+        return get_profile(session, current_user.id)
+
+    @app.get("/api/profile", response_model=UserProfileResponse)
+    def get_profile_route(
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> UserProfileResponse:
+        return get_profile(session, current_user.id)
+
+    @app.put("/api/profile", response_model=UserProfileResponse)
+    def put_profile_route(
+        payload: ProfileUpdate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> UserProfileResponse:
+        return update_profile(session, current_user.id, payload)
+
     @app.get("/api/dashboard", response_model=DashboardResponse)
     def get_dashboard(
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
         currency: Currency | None = None,
     ) -> dict:
-        return dashboard(session, currency)
+        return dashboard(session, current_user.id, currency)
+
+    @app.get("/api/accounts", response_model=list[AccountSummary])
+    def get_accounts(
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> list[AccountSummary]:
+        return list_accounts(session, current_user.id)
+
+    @app.post("/api/accounts", response_model=AccountSummary, status_code=201)
+    def post_account(
+        payload: AccountCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> AccountSummary:
+        return create_account(session, current_user.id, payload)
+
+    @app.get(
+        "/api/market/status",
+        response_model=MarketDataStatusResponse,
+        dependencies=[Depends(get_current_user)],
+    )
+    def get_market_status() -> MarketDataStatusResponse:
+        return market_data_status()
+
+    @app.get(
+        "/api/market/search",
+        response_model=MarketSymbolSearchResponse,
+        dependencies=[Depends(get_current_user)],
+    )
+    async def get_market_search(
+        query: Annotated[str, Query(min_length=2, max_length=80, alias="q")],
+    ) -> MarketSymbolSearchResponse:
+        return MarketSymbolSearchResponse(results=await search_market_symbols(query))
+
+    @app.post("/api/market/refresh", response_model=MarketRefreshResponse)
+    async def post_market_refresh(
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> MarketRefreshResponse:
+        return await refresh_market_data(session, current_user.id)
+
+    @app.post("/api/holdings", response_model=HoldingCreateResponse, status_code=201)
+    async def post_holding(
+        payload: HoldingCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> HoldingCreateResponse:
+        return await create_holding(session, current_user.id, payload)
 
     @app.get("/api/goals", response_model=list[GoalResponse])
-    def get_goals(session: Annotated[Session, Depends(get_session)]) -> list[GoalResponse]:
-        return list_goals(session)
+    def get_goals(
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> list[GoalResponse]:
+        return list_goals(session, current_user.id)
 
     @app.post("/api/goals", response_model=GoalResponse, status_code=201)
     def post_goal(
         payload: GoalCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
     ) -> GoalResponse:
-        return create_goal(session, payload)
+        return create_goal(session, current_user.id, payload)
 
     @app.put("/api/goals/funding-shares")
     def put_goal_funding_shares(
         payload: FixedSharesUpdate,
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
     ) -> dict[str, dict[str, str]]:
-        shares = update_fixed_shares(session, payload)
+        shares = update_fixed_shares(session, current_user.id, payload)
         return {"shares": {goal_id: str(weight) for goal_id, weight in shares.items()}}
 
     @app.get("/api/policy", response_model=PolicyResponse)
-    def get_policy(session: Annotated[Session, Depends(get_session)]) -> PolicyResponse:
-        return get_policy_response(session)
+    def get_policy(
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> PolicyResponse:
+        return get_policy_response(session, current_user.id)
 
     @app.put("/api/policy", response_model=PolicyResponse)
     def put_policy(
         payload: PolicyUpdate,
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
     ) -> PolicyResponse:
-        return update_policy(session, payload)
+        return update_policy(session, current_user.id, payload)
 
     @app.get("/api/cash-flows", response_model=list[FlowResponse])
     def get_cash_flows(
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
         months: int = Query(default=12, ge=1, le=24),
     ) -> list[FlowResponse]:
-        return list_cash_flows(session, months)
+        return list_cash_flows(session, current_user.id, months)
+
+    @app.post("/api/cash-flows/extra-cash", response_model=FlowResponse, status_code=201)
+    def post_extra_cash(
+        payload: CashReceiptCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> FlowResponse:
+        return record_extra_cash(session, current_user.id, payload)
 
     @app.get("/api/cash-flow-schedules", response_model=list[CashFlowScheduleResponse])
     def get_cash_flow_schedules(
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
     ) -> list[CashFlowScheduleResponse]:
-        return list_cash_flow_schedules(session)
+        return list_cash_flow_schedules(session, current_user.id)
 
     @app.post(
         "/api/cash-flow-schedules",
@@ -155,9 +298,10 @@ def create_app(
     )
     def post_cash_flow_schedule(
         payload: CashFlowScheduleCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
     ) -> CashFlowScheduleResponse:
-        return create_cash_flow_schedule(session, payload)
+        return create_cash_flow_schedule(session, current_user.id, payload)
 
     @app.delete(
         "/api/cash-flow-schedules/{schedule_id}",
@@ -165,9 +309,10 @@ def create_app(
     )
     def delete_cash_flow_schedule(
         schedule_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
     ) -> CashFlowScheduleResponse:
-        return archive_cash_flow_schedule(session, schedule_id)
+        return archive_cash_flow_schedule(session, current_user.id, schedule_id)
 
     @app.post(
         "/api/recommendations/preview",
@@ -175,13 +320,15 @@ def create_app(
     )
     def post_recommendation_preview(
         payload: RecommendationRequest,
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
     ) -> RecommendationResponse:
-        return preview_recommendation(session, payload)
+        return preview_recommendation(session, current_user.id, payload)
 
     @app.post("/api/chat", response_model=ChatResponse)
     async def post_chat(
         payload: ChatRequest,
+        current_user: Annotated[User, Depends(get_current_user)],
         session: Annotated[Session, Depends(get_session)],
         provider_key: Annotated[str | None, Header(alias="X-Provider-API-Key")] = None,
     ) -> ChatResponse:
@@ -192,8 +339,13 @@ def create_app(
             )
         if len(provider_key) > 512:
             raise HTTPException(status_code=422, detail="Provider API key is too long")
+        if not settings.ai_model.strip():
+            raise HTTPException(
+                status_code=503,
+                detail="AI_MODEL is not configured. Set a model name in your local .env first.",
+            )
 
-        snapshot = dashboard(session)
+        snapshot = dashboard(session, current_user.id)
         context = {
             "as_of": snapshot["as_of"].astimezone(UTC).isoformat(),
             "sample_data": snapshot["sample_data"],
@@ -207,6 +359,33 @@ def create_app(
                     "target_percent": str(item.target_percentage),
                 }
                 for item in snapshot["allocation"]
+            ],
+            "holdings": [
+                {
+                    "symbol": item.symbol,
+                    "name": item.name,
+                    "instrument_type": item.instrument_type,
+                    "quantity": str(item.quantity),
+                    "latest_price": str(item.price),
+                    "price_currency": item.price_currency.value,
+                    "market_value": str(item.market_value),
+                    "quote_source": item.quote_source,
+                    "quote_observed_at": item.quote_observed_at.astimezone(UTC).isoformat(),
+                    "market_open": item.is_market_open,
+                }
+                for item in sorted(
+                    snapshot["holdings"], key=lambda holding: holding.market_value, reverse=True
+                )[:50]
+            ],
+            "market_fx_rates": [
+                {
+                    "base_currency": item.base_currency.value,
+                    "quote_currency": item.quote_currency.value,
+                    "rate": str(item.rate),
+                    "provider": item.provider,
+                    "observed_at": item.observed_at.astimezone(UTC).isoformat(),
+                }
+                for item in snapshot["market_fx_rates"]
             ],
             "goals": [
                 {
@@ -284,6 +463,8 @@ def create_app(
             data_as_of=snapshot["as_of"],
             used_context=[
                 "Portfolio and cash totals",
+                "Tracked holdings and latest quote timestamps",
+                "Cached EUR/USD/RON FX rates",
                 "Asset allocation targets",
                 "Goal progress",
                 "Data-quality warnings",

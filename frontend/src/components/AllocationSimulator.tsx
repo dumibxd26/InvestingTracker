@@ -10,7 +10,7 @@ interface AllocationSimulatorProps {
 }
 
 export function AllocationSimulator({ currency, onClose }: AllocationSimulatorProps) {
-  const [cashAmount, setCashAmount] = useState("1000");
+  const [cashAmount, setCashAmount] = useState("");
   const [preview, setPreview] = useState<RecommendationPreview | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -54,6 +54,7 @@ export function AllocationSimulator({ currency, onClose }: AllocationSimulatorPr
                 max="100000000"
                 step="0.01"
                 required
+                placeholder="Enter available cash"
                 value={cashAmount}
                 onChange={(event) => setCashAmount(event.target.value)}
               />

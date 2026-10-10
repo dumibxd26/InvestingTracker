@@ -10,7 +10,8 @@ interface GoalDialogProps {
 }
 
 export function GoalDialog({ currency, onClose, onCreated }: GoalDialogProps) {
-  const [goalType, setGoalType] = useState<GoalType>("wealth");
+  const [goalType, setGoalType] = useState<GoalType | "">("");
+  const [targetCurrency, setTargetCurrency] = useState<Currency>(currency);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -22,16 +23,27 @@ export function GoalDialog({ currency, onClose, onCreated }: GoalDialogProps) {
     const name = String(form.get("name") ?? "").trim();
     const target = String(form.get("target") ?? "");
     const targetDate = String(form.get("targetDate") ?? "");
+    const priority = String(form.get("priority") ?? "");
+    const riskLevel = String(form.get("riskLevel") ?? "");
+    const flexibility = String(form.get("flexibility") ?? "");
+    if (!goalType || !priority || !riskLevel || !flexibility) {
+      setError("Choose a goal type, priority, risk comfort, and deadline flexibility.");
+      setSaving(false);
+      return;
+    }
     const payload: GoalCreatePayload = {
       name,
       goal_type: goalType,
-      target_currency: currency,
-      priority: Number(form.get("priority")),
-      risk_level: String(form.get("riskLevel")) as GoalCreatePayload["risk_level"],
+      target_currency: targetCurrency,
+      priority: Number(priority),
+      risk_level: riskLevel as GoalCreatePayload["risk_level"],
       monthly_contribution: String(form.get("monthlyContribution") || "0"),
-      fixed_percent: String(Number(form.get("fixedPercent") || 0) / 100),
-      flexibility: String(form.get("flexibility")) as GoalCreatePayload["flexibility"],
+      flexibility: flexibility as GoalCreatePayload["flexibility"],
     };
+    const fixedPercent = String(form.get("fixedPercent") ?? "").trim();
+    if (fixedPercent) {
+      payload.fixed_percent = String(Number(fixedPercent) / 100);
+    }
     if (goalType === "passive_income") {
       payload.target_annual_income = target;
     } else {
@@ -75,7 +87,8 @@ export function GoalDialog({ currency, onClose, onCreated }: GoalDialogProps) {
           <div className="form-row">
             <label className="form-field">
               <span>Purpose</span>
-              <select value={goalType} onChange={(event) => setGoalType(event.target.value as GoalType)}>
+              <select value={goalType} required onChange={(event) => setGoalType(event.target.value as GoalType | "")}>
+                <option value="" disabled>Choose a goal</option>
                 <option value="wealth">Long-term wealth</option>
                 <option value="retirement">Retirement</option>
                 <option value="passive_income">Passive income</option>
@@ -86,24 +99,40 @@ export function GoalDialog({ currency, onClose, onCreated }: GoalDialogProps) {
               </select>
             </label>
             <label className="form-field">
-              <span>{goalType === "passive_income" ? "Annual income target" : "Target amount"} ({currency})</span>
-              <input name="target" type="number" required min="1" step="0.01" placeholder={goalType === "passive_income" ? "12000" : "65000"} />
+              <span>{goalType === "passive_income" ? "Annual income target" : "Target amount"}</span>
+              <input
+                name="target"
+                type="number"
+                required
+                min="1"
+                step="0.01"
+                placeholder={goalType === "passive_income" ? "Your annual income target" : "Your target amount"}
+              />
             </label>
           </div>
           <div className="form-row">
+            <label className="form-field">
+              <span>Goal currency</span>
+              <select value={targetCurrency} onChange={(event) => setTargetCurrency(event.target.value as Currency)}>
+                <option value="EUR">EUR · Euro</option>
+                <option value="USD">USD · US dollar</option>
+                <option value="RON">RON · Romanian leu</option>
+              </select>
+            </label>
             <label className="form-field">
               <span>Target date <small>optional</small></span>
               <input name="targetDate" type="date" />
             </label>
             <label className="form-field">
-              <span>Monthly contribution ({currency})</span>
-              <input name="monthlyContribution" type="number" min="0" step="0.01" defaultValue="0" />
+              <span>Monthly contribution ({targetCurrency}) <small>optional</small></span>
+              <input name="monthlyContribution" type="number" min="0" step="0.01" placeholder="Leave blank if not planned" />
             </label>
           </div>
           <div className="form-row">
             <label className="form-field">
               <span>Priority</span>
-              <select name="priority" defaultValue="3">
+              <select name="priority" required defaultValue="">
+                <option value="" disabled>Choose priority</option>
                 <option value="1">1 · Highest</option>
                 <option value="2">2</option>
                 <option value="3">3 · Standard</option>
@@ -113,7 +142,8 @@ export function GoalDialog({ currency, onClose, onCreated }: GoalDialogProps) {
             </label>
             <label className="form-field">
               <span>Risk comfort</span>
-              <select name="riskLevel" defaultValue="moderate">
+              <select name="riskLevel" required defaultValue="">
+                <option value="" disabled>Choose risk comfort</option>
                 <option value="low">Lower</option>
                 <option value="moderate">Moderate</option>
                 <option value="high">Higher</option>
@@ -123,7 +153,8 @@ export function GoalDialog({ currency, onClose, onCreated }: GoalDialogProps) {
           <div className="form-row">
             <label className="form-field">
               <span>Deadline flexibility</span>
-              <select name="flexibility" defaultValue="flexible">
+              <select name="flexibility" required defaultValue="">
+                <option value="" disabled>Choose flexibility</option>
                 <option value="essential">Essential date</option>
                 <option value="flexible">Can move if needed</option>
               </select>
@@ -131,7 +162,7 @@ export function GoalDialog({ currency, onClose, onCreated }: GoalDialogProps) {
             <label className="form-field">
               <span>Fixed funding share <small>for that rule</small></span>
               <div className="input-suffix">
-                <input name="fixedPercent" type="number" min="0" max="100" step="1" defaultValue="0" />
+                <input name="fixedPercent" type="number" min="0" max="100" step="1" placeholder="Optional" />
                 <span>%</span>
               </div>
             </label>

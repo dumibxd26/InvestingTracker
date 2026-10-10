@@ -14,6 +14,7 @@ import {
 import { amount, dateLabel } from "../format";
 import type { CashFlowSchedule, Currency, Dashboard, Recurrence } from "../types";
 import { CashFlowDialog } from "./CashFlowDialog";
+import { ExtraCashDialog } from "./ExtraCashDialog";
 
 interface CashFlowViewProps {
   data: Dashboard;
@@ -38,6 +39,7 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
     .filter((flow) => flow.direction === "outflow")
     .reduce((sum, flow) => sum + Number(flow.reporting_amount ?? "0"), 0);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [extraCashDialogOpen, setExtraCashDialogOpen] = useState(false);
   const [archivingId, setArchivingId] = useState<string | null>(null);
   const [error, setError] = useState("");
 
@@ -63,9 +65,28 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
           <h1>Cash flow.</h1>
           <p>Keep scheduled income distinct from cash that has actually arrived.</p>
         </div>
-        <button className="button button-secondary" type="button" onClick={() => setDialogOpen(true)}>
-          <CalendarDays size={16} /> Add a forecast
-        </button>
+        <div className="cashflow-intro-actions">
+          <button
+            className="button button-secondary"
+            type="button"
+            onClick={() => setDialogOpen(true)}
+          >
+            <CalendarDays size={16} /> Add a forecast
+          </button>
+          <button
+            className="button button-primary"
+            type="button"
+            onClick={() => setExtraCashDialogOpen(true)}
+            disabled={!data.accounts.some((account) => account.account_type !== "EMPLOYER_PLAN")}
+            title={
+              data.accounts.some((account) => account.account_type !== "EMPLOYER_PLAN")
+                ? "Record extra cash you have received"
+                : "Add a bank, savings, or brokerage account first"
+            }
+          >
+            <CircleDollarSign size={16} /> Record extra cash
+          </button>
+        </div>
       </div>
       <div className="metric-grid portfolio-metrics">
         <Metric label="Available cash" value={amount(data.totals.available_cash, currency)} detail="Forecasts are excluded" />
@@ -97,7 +118,7 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
                     <FlowIcon size={17} />
                   </span>
                   <span className="cashflow-copy">
-                    <strong>{flow.label}</strong>
+                    <strong>{flow.kind === "windfall" ? flow.label.replace("Extra cash · ", "") : flow.label}</strong>
                     <small>
                       {isForecast ? `Expected ${dateLabel(flow.expected_date)}` : `Received ${dateLabel(flow.occurred_at)}`}
                       {flow.recurrence ? ` · ${recurrenceLabel[flow.recurrence]}` : ""}
@@ -138,7 +159,7 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
               <div className="deposit-interest">Accrued interest <strong>{amount(deposit.accrued_interest, deposit.currency, 2)}</strong></div>
             </section>
           ))}
-          <div className="privacy-note"><Info size={15} /><span>This timeline is synthetic sample data—not linked to payroll or a bank.</span></div>
+          <div className="privacy-note"><Info size={15} /><span>Seeded events are samples. Your forecasts are stored locally; payroll and bank sync are not connected.</span></div>
         </aside>
       </div>
       <section className="panel schedule-panel">
@@ -182,6 +203,14 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
           currency={currency}
           onClose={() => setDialogOpen(false)}
           onCreated={onChanged}
+        />
+      )}
+      {extraCashDialogOpen && (
+        <ExtraCashDialog
+          accounts={data.accounts}
+          baseCurrency={currency}
+          onClose={() => setExtraCashDialogOpen(false)}
+          onSaved={onChanged}
         />
       )}
     </div>

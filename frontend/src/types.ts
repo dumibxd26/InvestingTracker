@@ -1,6 +1,7 @@
-export type Currency = "EUR" | "USD";
+export type Currency = "EUR" | "USD" | "RON";
 export type AssetClass = "equities" | "fixed_income" | "satellite";
 export type FundingRule = "priority_first" | "proportional" | "fixed_percentages";
+export type AccountType = "BROKERAGE" | "BANK" | "SAVINGS" | "EMPLOYER_PLAN";
 export type Recurrence = "one_time" | "monthly" | "quarterly" | "annual";
 export type FlowKind =
   | "salary"
@@ -37,18 +38,112 @@ export interface GoalSummary {
   flexibility: "essential" | "flexible";
 }
 
+export interface UserProfile {
+  id: string;
+  username: string;
+  display_name: string;
+  base_currency: Currency;
+  usd_per_eur: string | null;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: "bearer";
+  expires_at: string;
+  user: UserProfile;
+}
+
+export interface RegisterPayload {
+  username: string;
+  password: string;
+  display_name?: string;
+  base_currency: Currency;
+  usd_per_eur?: string;
+}
+
+export interface ProfileUpdatePayload {
+  display_name: string;
+  base_currency: Currency;
+  usd_per_eur: string | null;
+}
+
 export interface HoldingSummary {
   symbol: string;
   name: string;
   account_name: string;
   asset_class: AssetClass;
+  instrument_type: "STOCK" | "ETF";
   quantity: string;
   price: string;
   price_currency: Currency;
+  quote_source: string;
+  quote_observed_at: string;
+  is_market_open: boolean | null;
+  change_since_refresh_percent: string | null;
   market_value: string;
   base_currency: Currency;
   change_percent: string;
   is_demo: boolean;
+}
+
+export interface MarketSymbol {
+  symbol: string;
+  name: string;
+  exchange: string;
+  mic_code: string | null;
+  currency: Currency;
+  instrument_type: "STOCK" | "ETF";
+  country: string;
+}
+
+export interface MarketFxRate {
+  base_currency: Currency;
+  quote_currency: Currency;
+  rate: string;
+  provider: string;
+  observed_at: string;
+  change_percent: string | null;
+}
+
+export interface MarketDataStatus {
+  provider: string;
+  provider_configured: boolean;
+  automatic_refresh_enabled: boolean;
+}
+
+export interface MarketRefreshResult {
+  updated_symbols: string[];
+  updated_fx_pairs: string[];
+  errors: string[];
+}
+
+export interface HoldingCreatePayload {
+  account_id: string;
+  symbol: string;
+  mic_code: string | null;
+  exchange: string;
+  instrument_type: "STOCK" | "ETF";
+  quantity: string;
+  average_cost: string;
+}
+
+export interface HoldingCreated {
+  symbol: string;
+  account_name: string;
+  quantity: string;
+  quote_price: string;
+  quote_currency: Currency;
+}
+
+export interface AccountSummary {
+  id: string;
+  display_name: string;
+  provider_code: string;
+  account_type: AccountType;
+  currency: Currency;
+  cash_balance: string;
+  position_count: number;
+  is_sample: boolean;
 }
 
 export interface CashFlow {
@@ -116,13 +211,14 @@ export interface Vesting {
 }
 
 export interface Policy {
-  funding_rule: FundingRule;
+  funding_rule: FundingRule | null;
   emergency_reserve: string;
   target_weights: Record<AssetClass, string>;
 }
 
 export interface Dashboard {
   base_currency: Currency;
+  profile: UserProfile;
   as_of: string;
   sample_data: boolean;
   totals: {
@@ -141,7 +237,10 @@ export interface Dashboard {
   six_month_change_percent: string;
   allocation: Allocation[];
   chart: ChartPoint[];
+  accounts: AccountSummary[];
   holdings: HoldingSummary[];
+  market_fx_rates: MarketFxRate[];
+  market_data_provider_configured: boolean;
   goals: GoalSummary[];
   cash_flows: CashFlow[];
   cash_flow_schedules: CashFlowSchedule[];
@@ -198,8 +297,16 @@ export interface GoalCreatePayload {
   priority: number;
   risk_level: "low" | "moderate" | "high";
   monthly_contribution: string;
-  fixed_percent: string;
+  fixed_percent?: string;
   flexibility: "essential" | "flexible";
+}
+
+export interface AccountCreatePayload {
+  display_name: string;
+  provider_code: string;
+  account_type: AccountType;
+  currency: Currency;
+  opening_cash: string;
 }
 
 export interface CashFlowSchedulePayload {
@@ -210,6 +317,14 @@ export interface CashFlowSchedulePayload {
   recurrence: Recurrence;
   start_date: string;
   end_date?: string;
+}
+
+export interface CashReceiptPayload {
+  account_id: string;
+  source: string;
+  amount: string;
+  received_date: string;
+  idempotency_key: string;
 }
 
 export interface ChatMessage {

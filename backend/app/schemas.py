@@ -1,11 +1,12 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models import (
+    AccountType,
     AssetClass,
     Currency,
     FlowDirection,
@@ -19,6 +20,111 @@ from app.models import (
 )
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=12, max_length=128)
+    display_name: str | None = Field(default=None, min_length=2, max_length=80)
+    base_currency: Currency
+    usd_per_eur: Decimal | None = Field(default=None, gt=0, le=100)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError("Display name must contain at least two non-whitespace characters")
+        return normalized
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class ProfileUpdate(BaseModel):
+    display_name: str = Field(min_length=2, max_length=80)
+    base_currency: Currency
+    usd_per_eur: Decimal | None = Field(default=None, gt=0, le=100)
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError("Display name must contain at least two non-whitespace characters")
+        return normalized
+
+
+class UserProfileResponse(BaseModel):
+    id: UUID
+    username: str
+    display_name: str
+    base_currency: Currency
+    usd_per_eur: Decimal | None
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_at: datetime
+    user: UserProfileResponse
+
+
+class AccountCreate(BaseModel):
+    display_name: str = Field(min_length=2, max_length=80)
+    provider_code: str = Field(default="MANUAL", min_length=2, max_length=40)
+    account_type: AccountType
+    currency: Currency
+    opening_cash: Decimal = Field(default=Decimal("0"), ge=0, le=Decimal("100000000"))
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_account_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError("Account name must contain at least two non-whitespace characters")
+        return normalized
+
+    @field_validator("provider_code")
+    @classmethod
+    def normalize_provider_code(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized or not normalized.replace("_", "").isalnum():
+            raise ValueError("Provider code may contain letters, numbers, and underscores")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_opening_cash(self) -> "AccountCreate":
+        if self.account_type == AccountType.EMPLOYER_PLAN and self.opening_cash > 0:
+            raise ValueError(
+                "Employer-plan assets are tracked as holdings or grants, not available cash"
+            )
+        return self
+
+
+class AccountSummary(BaseModel):
+    id: UUID
+    display_name: str
+    provider_code: str
+    account_type: AccountType
+    currency: Currency
+    cash_balance: Decimal
+    position_count: int
+    is_sample: bool
+
+
 class GoalCreate(BaseModel):
     name: str = Field(min_length=2, max_length=80)
     goal_type: GoalType
@@ -28,11 +134,11 @@ class GoalCreate(BaseModel):
     current_annual_income: Decimal = Field(default=Decimal("0"), ge=0)
     target_currency: Currency = Currency.EUR
     target_date: date | None = None
-    priority: int = Field(default=3, ge=1, le=10)
-    risk_level: RiskLevel = RiskLevel.MODERATE
-    monthly_contribution: Decimal = Field(default=Decimal("0"), ge=0)
+    priority: int = Field(ge=1, le=10)
+    risk_level: RiskLevel
+    monthly_contribution: Decimal = Field(ge=0)
     fixed_percent: Decimal | None = Field(default=None, ge=0, le=1)
-    flexibility: str = Field(default="flexible", pattern="^(essential|flexible)$")
+    flexibility: str = Field(pattern="^(essential|flexible)$")
 
     @model_validator(mode="after")
     def validate_target(self) -> "GoalCreate":
@@ -90,7 +196,7 @@ class PolicyUpdate(BaseModel):
 
 
 class PolicyResponse(BaseModel):
-    funding_rule: FundingRule
+    funding_rule: FundingRule | None
     emergency_reserve: Decimal
     target_weights: dict[str, Decimal]
 
@@ -195,6 +301,22 @@ class CashFlowScheduleResponse(BaseModel):
     is_active: bool
 
 
+class CashReceiptCreate(BaseModel):
+    account_id: UUID
+    source: str = Field(min_length=2, max_length=100)
+    amount: Decimal = Field(gt=0, le=Decimal("100000000"), max_digits=20, decimal_places=2)
+    received_date: date
+    idempotency_key: UUID
+
+    @field_validator("source")
+    @classmethod
+    def normalize_source(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError("Source must contain at least two non-whitespace characters")
+        return normalized
+
+
 class GoalSummary(BaseModel):
     id: UUID
     name: str
@@ -218,13 +340,71 @@ class HoldingSummary(BaseModel):
     name: str
     account_name: str
     asset_class: AssetClass
+    instrument_type: Literal["STOCK", "ETF"]
     quantity: Decimal
     price: Decimal
     price_currency: Currency
+    quote_source: str
+    quote_observed_at: datetime
+    is_market_open: bool | None
+    change_since_refresh_percent: Decimal | None
     market_value: Decimal
     base_currency: Currency
     change_percent: Decimal
     is_demo: bool
+
+
+class MarketSymbolSearchResult(BaseModel):
+    symbol: str
+    name: str
+    exchange: str
+    mic_code: str | None
+    currency: Currency
+    instrument_type: Literal["STOCK", "ETF"]
+    country: str
+
+
+class MarketSymbolSearchResponse(BaseModel):
+    results: list[MarketSymbolSearchResult]
+
+
+class HoldingCreate(BaseModel):
+    account_id: UUID
+    symbol: str = Field(min_length=1, max_length=24)
+    mic_code: str | None = Field(default=None, max_length=8)
+    exchange: str | None = Field(default=None, max_length=80)
+    instrument_type: Literal["STOCK", "ETF"]
+    quantity: Decimal = Field(gt=0, le=Decimal("1000000000"))
+    average_cost: Decimal = Field(gt=0, le=Decimal("100000000"))
+
+
+class HoldingCreateResponse(BaseModel):
+    symbol: str
+    account_name: str
+    quantity: Decimal
+    quote_price: Decimal
+    quote_currency: Currency
+
+
+class MarketFXRateSummary(BaseModel):
+    base_currency: Currency
+    quote_currency: Currency
+    rate: Decimal
+    provider: str
+    observed_at: datetime
+    change_percent: Decimal | None
+
+
+class MarketDataStatusResponse(BaseModel):
+    provider: str
+    provider_configured: bool
+    automatic_refresh_enabled: bool = False
+
+
+class MarketRefreshResponse(BaseModel):
+    updated_symbols: list[str]
+    updated_fx_pairs: list[str]
+    errors: list[str]
 
 
 class AllocationSummary(BaseModel):
@@ -265,14 +445,18 @@ class VestingSummary(BaseModel):
 
 class DashboardResponse(BaseModel):
     base_currency: Currency
+    profile: UserProfileResponse
     as_of: datetime
     sample_data: bool
+    market_data_provider_configured: bool
     totals: dict[str, Decimal]
     six_month_change: Decimal
     six_month_change_percent: Decimal
     allocation: list[AllocationSummary]
     chart: list[ChartPoint]
+    accounts: list[AccountSummary]
     holdings: list[HoldingSummary]
+    market_fx_rates: list[MarketFXRateSummary]
     goals: list[GoalSummary]
     cash_flows: list[FlowResponse]
     cash_flow_schedules: list[CashFlowScheduleResponse]
