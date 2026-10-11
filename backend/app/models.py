@@ -315,6 +315,18 @@ class MarketFXRate(Base):
 
 class Goal(Base):
     __tablename__ = "financial_goals"
+    __table_args__ = (
+        CheckConstraint(
+            "(visualization_budget_amount IS NULL) = "
+            "(visualization_budget_period IS NULL)",
+            name="ck_goals_visualization_budget_pair",
+        ),
+        CheckConstraint(
+            "visualization_budget_period IS NULL OR "
+            "visualization_budget_period IN ('monthly', 'yearly')",
+            name="ck_goals_visualization_budget_period",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -343,6 +355,8 @@ class Goal(Base):
     monthly_contribution: Mapped[Decimal] = mapped_column(
         Numeric(20, 4), default=Decimal("0"), nullable=False
     )
+    visualization_budget_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    visualization_budget_period: Mapped[str | None] = mapped_column(String(8))
     fixed_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 6))
     flexibility: Mapped[str] = mapped_column(String(16), default="flexible", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -464,6 +478,9 @@ class FixedDeposit(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
     )
+    source_subaccount_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("account_subaccounts.id", ondelete="SET NULL")
+    )
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     principal: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
     currency: Mapped[Currency] = mapped_column(
@@ -481,8 +498,57 @@ class FixedDeposit(Base):
         ),
         nullable=False,
     )
+    period_months: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     maturity_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+
+class GoalAccountLink(Base):
+    __tablename__ = "goal_account_links"
+    __table_args__ = (UniqueConstraint("goal_id", "account_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("financial_goals.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class GoalHoldingAllocation(Base):
+    __tablename__ = "goal_holding_allocations"
+    __table_args__ = (UniqueConstraint("holding_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("financial_goals.id", ondelete="CASCADE"), nullable=False
+    )
+    holding_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("holdings.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class GoalDepositAllocation(Base):
+    __tablename__ = "goal_deposit_allocations"
+    __table_args__ = (UniqueConstraint("fixed_deposit_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    goal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("financial_goals.id", ondelete="CASCADE"), nullable=False
+    )
+    fixed_deposit_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("fixed_deposits.id", ondelete="CASCADE"), nullable=False
+    )
 
 
 class VestingGrant(Base):

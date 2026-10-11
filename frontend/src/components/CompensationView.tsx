@@ -186,12 +186,14 @@ export function CompensationView({
             <span className="deposit-icon"><LockKeyhole size={17} /></span>
           </div>
           {data.deposits.map((deposit) => (
-            <article className="deposit-card" key={deposit.name}>
+            <article className="deposit-card" key={deposit.id}>
               <div className="deposit-card-title"><strong>{deposit.name}</strong><span className="status-pill status-planned">Fixed</span></div>
               <div className="deposit-principal">{amount(deposit.principal, deposit.currency)}</div>
               <div className="deposit-details">
                 <div><span>{deposit.rate_basis === "effective_apy" ? "Effective APY" : "Nominal APR"}</span><strong>{(Number(deposit.annual_rate) * 100).toFixed(2)}%</strong></div>
                 <div><span>Interest accrued</span><strong>{amount(deposit.accrued_interest, deposit.currency, 2)}</strong></div>
+                <div><span>Term</span><strong>{deposit.period_months} months</strong></div>
+                <div><span>Capitalization</span><strong>{deposit.compounding === "at_maturity" ? "No · simple interest" : "Yes · monthly"}</strong></div>
                 <div><span>Maturity</span><strong>{dateLabel(deposit.maturity_date)}</strong></div>
               </div>
               <div className="maturity-progress">
@@ -200,7 +202,7 @@ export function CompensationView({
               </div>
             </article>
           ))}
-          <div className="privacy-note"><CircleHelp size={15} /><span>Deposit accrual follows its stored schedule; actual bank crediting and early withdrawal terms can differ.</span></div>
+          <div className="privacy-note"><CircleHelp size={15} /><span>Deposit accrual follows its stored term/rate/capitalization; actual bank crediting, tax and early-withdrawal terms can differ.</span></div>
         </section>
       </div>
       {dialogOpen && (

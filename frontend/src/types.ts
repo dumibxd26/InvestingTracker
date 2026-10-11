@@ -27,6 +27,7 @@ export interface GoalSummary {
   target_amount: string | null;
   target_annual_income: string | null;
   current_amount: string;
+  linked_asset_value: string;
   current_annual_income: string;
   currency: Currency;
   progress_percent: string;
@@ -34,8 +35,13 @@ export interface GoalSummary {
   priority: number;
   risk_level: "low" | "moderate" | "high";
   monthly_contribution: string;
+  visualization_budget_amount: string | null;
+  visualization_budget_period: "monthly" | "yearly" | null;
   fixed_percent: string | null;
   flexibility: "essential" | "flexible";
+  linked_account_ids: string[];
+  holding_ids: string[];
+  fixed_deposit_ids: string[];
 }
 
 export interface GoalRecord {
@@ -51,9 +57,14 @@ export interface GoalRecord {
   priority: number;
   risk_level: "low" | "moderate" | "high";
   monthly_contribution: string;
+  visualization_budget_amount: string | null;
+  visualization_budget_period: "monthly" | "yearly" | null;
   fixed_percent: string | null;
   flexibility: "essential" | "flexible";
   is_active: boolean;
+  linked_account_ids: string[];
+  holding_ids: string[];
+  fixed_deposit_ids: string[];
 }
 
 export interface UserProfile {
@@ -87,6 +98,9 @@ export interface ProfileUpdatePayload {
 
 export interface HoldingSummary {
   id: string;
+  account_id: string;
+  assigned_goal_id: string | null;
+  assigned_goal_name: string | null;
   symbol: string;
   name: string;
   account_name: string;
@@ -284,12 +298,21 @@ export interface ChartPoint {
 }
 
 export interface Deposit {
+  id: string;
+  account_id: string;
+  source_subaccount_id: string | null;
+  assigned_goal_id: string | null;
+  assigned_goal_name: string | null;
   name: string;
   principal: string;
   accrued_interest: string;
+  current_value: string;
   currency: Currency;
   annual_rate: string;
   rate_basis: "nominal_apr" | "effective_apy";
+  compounding: "daily" | "monthly" | "quarterly" | "annual" | "at_maturity";
+  period_months: number;
+  start_date: string;
   maturity_date: string;
   days_to_maturity: number;
 }
@@ -417,11 +440,39 @@ export interface GoalCreatePayload {
   flexibility: "essential" | "flexible";
   current_amount?: string;
   current_annual_income?: string;
+  visualization_budget_amount?: string | null;
+  visualization_budget_period?: "monthly" | "yearly" | null;
+  linked_account_ids: string[];
+  holding_ids: string[];
+  fixed_deposit_ids: string[];
 }
 
 export interface GoalUpdatePayload extends GoalCreatePayload {
   current_amount: string;
   current_annual_income: string;
+}
+
+export interface FixedDepositCreatePayload {
+  account_id: string;
+  subaccount_id: string;
+  name: string;
+  principal: string;
+  start_date: string;
+  period_months: number;
+  annual_profit_rate: string;
+  capitalization: boolean;
+}
+
+export interface FixedDepositCreated {
+  id: string;
+  name: string;
+  principal: string;
+  currency: Currency;
+  start_date: string;
+  maturity_date: string;
+  period_months: number;
+  annual_rate: string;
+  capitalization: boolean;
 }
 
 export interface AccountCreatePayload {

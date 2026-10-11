@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.models import (
     AccountType,
     AssetClass,
+    CompoundingFrequency,
     Currency,
     FlowDirection,
     FlowKind,
@@ -240,8 +241,13 @@ class GoalCreate(BaseModel):
     priority: int = Field(ge=1, le=10)
     risk_level: RiskLevel
     monthly_contribution: Decimal = Field(ge=0)
+    visualization_budget_amount: Decimal | None = Field(default=None, ge=0)
+    visualization_budget_period: Literal["monthly", "yearly"] | None = None
     fixed_percent: Decimal | None = Field(default=None, ge=0, le=1)
     flexibility: str = Field(pattern="^(essential|flexible)$")
+    linked_account_ids: list[UUID] = Field(default_factory=list, max_length=20)
+    holding_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    fixed_deposit_ids: list[UUID] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
     def validate_target(self) -> "GoalCreate":
@@ -249,6 +255,19 @@ class GoalCreate(BaseModel):
             raise ValueError("Set a target amount or an annual income target")
         if self.goal_type == GoalType.PASSIVE_INCOME and self.target_annual_income is None:
             raise ValueError("Passive income goals need a target annual income")
+        if (self.visualization_budget_amount is None) != (
+            self.visualization_budget_period is None
+        ):
+            raise ValueError(
+                "A visualization budget needs both an amount and a monthly/yearly period"
+            )
+        for values, label in (
+            (self.linked_account_ids, "linked account"),
+            (self.holding_ids, "stock or ETF"),
+            (self.fixed_deposit_ids, "deposit"),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"A {label} can only be selected once")
         return self
 
 
@@ -271,9 +290,14 @@ class GoalResponse(BaseModel):
     priority: int
     risk_level: RiskLevel
     monthly_contribution: Decimal
+    visualization_budget_amount: Decimal | None
+    visualization_budget_period: Literal["monthly", "yearly"] | None
     fixed_percent: Decimal | None
     flexibility: str
     is_active: bool
+    linked_account_ids: list[UUID]
+    holding_ids: list[UUID]
+    fixed_deposit_ids: list[UUID]
 
 
 class FixedShare(BaseModel):
@@ -446,6 +470,7 @@ class GoalSummary(BaseModel):
     target_amount: Decimal | None
     target_annual_income: Decimal | None
     current_amount: Decimal
+    linked_asset_value: Decimal
     current_annual_income: Decimal
     currency: Currency
     progress_percent: Decimal
@@ -453,13 +478,20 @@ class GoalSummary(BaseModel):
     priority: int
     risk_level: RiskLevel
     monthly_contribution: Decimal
+    visualization_budget_amount: Decimal | None
+    visualization_budget_period: Literal["monthly", "yearly"] | None
     fixed_percent: Decimal | None
     flexibility: str
+    linked_account_ids: list[UUID]
+    holding_ids: list[UUID]
+    fixed_deposit_ids: list[UUID]
 
 
 class HoldingSummary(BaseModel):
     id: UUID
     account_id: UUID
+    assigned_goal_id: UUID | None = None
+    assigned_goal_name: str | None = None
     symbol: str
     name: str
     account_name: str
@@ -568,14 +600,61 @@ class ChartPoint(BaseModel):
 
 
 class DepositSummary(BaseModel):
+    id: UUID
+    account_id: UUID
+    source_subaccount_id: UUID | None
+    assigned_goal_id: UUID | None
+    assigned_goal_name: str | None
     name: str
     principal: Decimal
     accrued_interest: Decimal
+    current_value: Decimal
     currency: Currency
     annual_rate: Decimal
     rate_basis: RateBasis
+    compounding: CompoundingFrequency
+    period_months: int
+    start_date: date
     maturity_date: date
     days_to_maturity: int
+
+
+class FixedDepositCreate(BaseModel):
+    account_id: UUID
+    subaccount_id: UUID
+    name: str = Field(min_length=2, max_length=80)
+    principal: Decimal = Field(gt=0, le=Decimal("100000000"))
+    start_date: date
+    period_months: int = Field(ge=1, le=1200)
+    annual_profit_rate: Decimal = Field(ge=0, le=1)
+    capitalization: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def normalize_deposit_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError("Deposit name must contain at least two non-whitespace characters")
+        return normalized
+
+    @field_validator("start_date")
+    @classmethod
+    def validate_start_date(cls, value: date) -> date:
+        if value > date.today():
+            raise ValueError("Deposit start date cannot be in the future")
+        return value
+
+
+class FixedDepositCreateResponse(BaseModel):
+    id: UUID
+    name: str
+    principal: Decimal
+    currency: Currency
+    start_date: date
+    maturity_date: date
+    period_months: int
+    annual_rate: Decimal
+    capitalization: bool
 
 
 class VestingTrancheSummary(BaseModel):

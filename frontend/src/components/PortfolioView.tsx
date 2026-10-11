@@ -6,11 +6,13 @@ import {
   Info,
   Pencil,
   Plus,
+  Landmark,
   RefreshCw,
   Trash2,
 } from "lucide-react";
 import { ApiError, api } from "../api";
 import { AccountDialog } from "./AccountDialog";
+import { AddDepositDialog } from "./AddDepositDialog";
 import { AddHoldingDialog } from "./AddHoldingDialog";
 import { AddSubaccountDialog } from "./AddSubaccountDialog";
 import { EditHoldingDialog } from "./EditHoldingDialog";
@@ -58,6 +60,8 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [holdingDialogOpen, setHoldingDialogOpen] = useState(false);
   const [initialSetupOpen, setInitialSetupOpen] = useState(false);
   const [addingSubaccountFor, setAddingSubaccountFor] = useState<AccountSummary | null>(null);
+  const [addingDepositFor, setAddingDepositFor] = useState<AccountSummary | null>(null);
+  const [deletingDepositId, setDeletingDepositId] = useState<string | null>(null);
   const [editingHolding, setEditingHolding] = useState<HoldingSummary | null>(null);
   const [mutatingHoldingId, setMutatingHoldingId] = useState<string | null>(null);
   const [mutatingAccountId, setMutatingAccountId] = useState<string | null>(null);
@@ -68,6 +72,8 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [holdingMessage, setHoldingMessage] = useState("");
   const [accountError, setAccountError] = useState("");
   const [accountMessage, setAccountMessage] = useState("");
+  const [depositError, setDepositError] = useState("");
+  const [depositMessage, setDepositMessage] = useState("");
 
   async function refreshMarketData() {
     setRefreshing(true);
@@ -140,6 +146,24 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
       );
     } finally {
       setMutatingAccountId(null);
+    }
+  }
+
+  async function deleteDeposit(depositId: string, depositName: string) {
+    if (!window.confirm(`Remove “${depositName}” from this tracker and restore its principal to the source wallet? Interest is an estimate and will not be credited.`)) {
+      return;
+    }
+    setDeletingDepositId(depositId);
+    setDepositError("");
+    setDepositMessage("");
+    try {
+      await api.deleteDeposit(depositId);
+      await onSaved();
+      setDepositMessage(`“${depositName}” was removed from the tracker.`);
+    } catch (cause) {
+      setDepositError(cause instanceof ApiError ? cause.message : "The deposit could not be removed.");
+    } finally {
+      setDeletingDepositId(null);
     }
   }
 
@@ -227,6 +251,8 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
       {holdingError && <div className="inline-error market-feedback" role="alert">{holdingError}</div>}
       {accountMessage && <div className="market-feedback" role="status">{accountMessage}</div>}
       {accountError && <div className="inline-error market-feedback" role="alert">{accountError}</div>}
+      {depositMessage && <div className="market-feedback" role="status">{depositMessage}</div>}
+      {depositError && <div className="inline-error market-feedback" role="alert">{depositError}</div>}
 
       <section className="panel account-list-panel">
         <div className="panel-heading">
@@ -257,6 +283,22 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                       {subaccount.is_primary ? " · primary" : ""}
                     </strong>
                   ))}
+                  {data.deposits.filter((deposit) => deposit.account_id === account.id).map((deposit) => (
+                    <span className="account-deposit-balance" key={deposit.id}>
+                      <strong>Deposit · {amount(deposit.current_value, deposit.currency, 2)}</strong>
+                      <small>{deposit.name} · matures {dateLabel(deposit.maturity_date, { month: "short", year: "numeric" })}</small>
+                      <button
+                        className="icon-button small account-delete-button"
+                        type="button"
+                        aria-label={`Remove deposit ${deposit.name}`}
+                        title="Remove deposit and restore its principal"
+                        onClick={() => void deleteDeposit(deposit.id, deposit.name)}
+                        disabled={deletingDepositId === deposit.id}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </span>
+                  ))}
                   <small>{account.subaccounts.length} currency wallet(s) · {account.position_count} positions</small>
                 </span>
                 <span className="account-card-actions">
@@ -270,6 +312,19 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                   >
                     <Plus size={14} />
                   </button>
+                  {(account.account_type === "BANK" || account.account_type === "SAVINGS") && (
+                    <button
+                      className="button button-quiet button-small"
+                      type="button"
+                      onClick={() => setAddingDepositFor(account)}
+                      disabled={account.is_sample || account.subaccounts.length === 0}
+                      title={account.subaccounts.length
+                        ? "Add a fixed deposit funded from one of this account's wallets"
+                        : "Add a currency wallet first"}
+                    >
+                      <Landmark size={13} /> Deposit
+                    </button>
+                  )}
                   <span className={`status-pill ${account.is_sample ? "status-planned" : "status-confirmed"}`}>
                     {account.is_sample ? "Sample" : "Manual"}
                   </span>
@@ -293,6 +348,14 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
           </div>
         ) : (
           <p className="account-empty">No accounts yet. Add a brokerage account to track investments.</p>
+        )}
+
+        {addingDepositFor && (
+          <AddDepositDialog
+            account={addingDepositFor}
+            onClose={() => setAddingDepositFor(null)}
+            onCreated={onSaved}
+          />
         )}
       </section>
 
@@ -363,6 +426,9 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                   </td>
                   <td className="muted-cell">
                     {holding.account_name}
+                    {holding.assigned_goal_name && (
+                      <small className="quote-timestamp">Goal · {holding.assigned_goal_name}</small>
+                    )}
                     {holding.funding_currency && (
                       <small className="quote-timestamp">
                         Paid from {holding.funding_currency} wallet · {amount(holding.funding_cost, holding.funding_currency, 2)}

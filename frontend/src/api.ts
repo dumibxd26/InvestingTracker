@@ -20,6 +20,8 @@ import type {
   GoalCreatePayload,
   GoalRecord,
   GoalUpdatePayload,
+  FixedDepositCreatePayload,
+  FixedDepositCreated,
   ProfileUpdatePayload,
   Policy,
   RecommendationPreview,
@@ -209,6 +211,15 @@ export const api = {
 
   deleteGoal: (goalId: string) =>
     request<void>(`/goals/${encodeURIComponent(goalId)}`, { method: "DELETE" }),
+
+  createDeposit: (payload: FixedDepositCreatePayload) =>
+    request<FixedDepositCreated>("/deposits", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteDeposit: (depositId: string) =>
+    request<void>(`/deposits/${encodeURIComponent(depositId)}`, { method: "DELETE" }),
 
   updatePolicy: (payload: {
     funding_rule: FundingRule;

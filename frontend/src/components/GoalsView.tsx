@@ -199,10 +199,24 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
                 <div className="full-goal-progress">
                   <div className="full-goal-value"><strong>{amount(goal.current_amount, currency)}</strong><span>of {target ? amount(target, currency) : "not set"}</span></div>
                   <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
-                  <small>{progress.toFixed(0)}% · {label}</small>
+                  <small>
+                    {progress.toFixed(0)}% · {label}
+                    {Number(goal.linked_asset_value) > 0
+                      ? ` · ${amount(goal.linked_asset_value, currency)} linked assets`
+                      : ""}
+                  </small>
                 </div>
                 <div className="full-goal-right">
                   <span className="monthly-needed">{amount(goal.monthly_contribution, currency)}<small>/ month planned</small></span>
+                  {goal.visualization_budget_amount !== null && goal.visualization_budget_period && (
+                    <span className="goal-date">
+                      {amount(goal.visualization_budget_amount, currency)} / {goal.visualization_budget_period} · visualization only
+                    </span>
+                  )}
+                  <span className="goal-date">
+                    {goal.holding_ids.length} stock/ETF · {goal.fixed_deposit_ids.length} deposit
+                    {goal.linked_account_ids.length ? ` · ${goal.linked_account_ids.length} account(s)` : ""}
+                  </span>
                   <span className="goal-date">{goal.target_date ? dateLabel(goal.target_date, { month: "short", year: "numeric" }) : "Ongoing"}</span>
                   <span className="goal-actions">
                     <button
@@ -334,6 +348,9 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
       {editingGoal && (
         <GoalDialog
           currency={currency}
+          accounts={data.accounts}
+          holdings={data.holdings}
+          deposits={data.deposits}
           goal={editingGoal}
           onClose={() => setEditingGoal(null)}
           onCreated={onSaved}

@@ -25,6 +25,8 @@ from app.schemas import (
     ChatRequest,
     ChatResponse,
     DashboardResponse,
+    FixedDepositCreate,
+    FixedDepositCreateResponse,
     FixedSharesUpdate,
     FlowResponse,
     GoalCreate,
@@ -55,11 +57,13 @@ from app.services import (
     create_account,
     create_account_subaccount,
     create_cash_flow_schedule,
+    create_fixed_deposit,
     create_goal,
     create_holding,
     create_vesting_grant,
     dashboard,
     delete_account,
+    delete_fixed_deposit,
     delete_holding,
     delete_vesting_grant,
     get_policy_response,
@@ -356,6 +360,23 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> None:
         archive_goal(session, current_user.id, goal_id)
+        return None
+
+    @app.post("/api/deposits", response_model=FixedDepositCreateResponse, status_code=201)
+    def post_deposit(
+        payload: FixedDepositCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> FixedDepositCreateResponse:
+        return create_fixed_deposit(session, current_user.id, payload)
+
+    @app.delete("/api/deposits/{deposit_id}", status_code=204)
+    def remove_deposit(
+        deposit_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        delete_fixed_deposit(session, current_user.id, deposit_id)
         return None
 
     @app.get("/api/policy", response_model=PolicyResponse)

@@ -35,6 +35,7 @@ from app.models import (
     BrokerAccount,
     CashFlow,
     CashFlowSchedule,
+    CompoundingFrequency,
     Currency,
     FixedDeposit,
     FlowDirection,
@@ -42,6 +43,9 @@ from app.models import (
     FlowStatus,
     FundingRule,
     Goal,
+    GoalAccountLink,
+    GoalDepositAllocation,
+    GoalHoldingAllocation,
     GoalType,
     GrantType,
     Holding,
@@ -49,6 +53,7 @@ from app.models import (
     LoginSession,
     MarketFXRate,
     MarketPriceCache,
+    RateBasis,
     Recommendation,
     RiskLevel,
     TrancheStatus,
@@ -71,6 +76,8 @@ from app.schemas import (
     CashReceiptCreate,
     ChartPoint,
     DepositSummary,
+    FixedDepositCreate,
+    FixedDepositCreateResponse,
     FixedSharesUpdate,
     FlowResponse,
     GoalAllocation,
@@ -1353,6 +1360,130 @@ def delete_account(session: Session, user_id: uuid.UUID, account_id: uuid.UUID) 
     session.commit()
 
 
+def create_fixed_deposit(
+    session: Session, user_id: uuid.UUID, payload: FixedDepositCreate
+) -> FixedDepositCreateResponse:
+    user = _get_user(session, user_id)
+    account = session.scalar(
+        select(BrokerAccount).where(
+            BrokerAccount.id == payload.account_id,
+            BrokerAccount.user_id == user.id,
+        )
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Selected deposit account was not found")
+    if account.account_type not in {AccountType.BANK, AccountType.SAVINGS}:
+        raise HTTPException(
+            status_code=422,
+            detail="Term deposits can only be added to bank or savings accounts.",
+        )
+    subaccount = session.scalar(
+        select(AccountSubaccount)
+        .where(
+            AccountSubaccount.id == payload.subaccount_id,
+            AccountSubaccount.account_id == account.id,
+        )
+        .with_for_update()
+    )
+    if subaccount is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Choose a currency wallet belonging to the selected account.",
+        )
+    fx_rates = _fx_matrix(session, user)
+    if not _can_convert(
+        subaccount.currency, user.base_currency, fx_rates, user.usd_per_eur
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh market data or set a manual FX reference before adding a deposit "
+                "in another currency."
+            ),
+        )
+    if subaccount.cash_balance < payload.principal:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Insufficient {subaccount.currency.value} cash to fund this deposit. "
+                f"Available: {subaccount.cash_balance:.2f}."
+            ),
+        )
+    maturity_date = add_months(payload.start_date, payload.period_months)
+    compounding = (
+        CompoundingFrequency.MONTHLY
+        if payload.capitalization
+        else CompoundingFrequency.AT_MATURITY
+    )
+    deposit = FixedDeposit(
+        user_id=user.id,
+        account_id=account.id,
+        source_subaccount_id=subaccount.id,
+        name=payload.name,
+        principal=payload.principal,
+        currency=subaccount.currency,
+        annual_rate=payload.annual_profit_rate,
+        rate_basis=RateBasis.NOMINAL_APR,
+        compounding=compounding,
+        period_months=payload.period_months,
+        start_date=payload.start_date,
+        maturity_date=maturity_date,
+    )
+    subaccount.cash_balance -= payload.principal
+    session.add(deposit)
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The deposit could not be saved. Refresh the account and try again.",
+        ) from error
+    session.refresh(deposit)
+    return FixedDepositCreateResponse(
+        id=deposit.id,
+        name=deposit.name,
+        principal=deposit.principal,
+        currency=deposit.currency,
+        start_date=deposit.start_date,
+        maturity_date=deposit.maturity_date,
+        period_months=deposit.period_months,
+        annual_rate=deposit.annual_rate,
+        capitalization=deposit.compounding != CompoundingFrequency.AT_MATURITY,
+    )
+
+
+def delete_fixed_deposit(session: Session, user_id: uuid.UUID, deposit_id: uuid.UUID) -> None:
+    _get_user(session, user_id)
+    deposit = session.scalar(
+        select(FixedDeposit)
+        .join(BrokerAccount, BrokerAccount.id == FixedDeposit.account_id)
+        .where(
+            FixedDeposit.id == deposit_id,
+            FixedDeposit.user_id == user_id,
+            BrokerAccount.user_id == user_id,
+        )
+        .with_for_update()
+    )
+    if deposit is None:
+        raise HTTPException(status_code=404, detail="Deposit was not found")
+    if deposit.source_subaccount_id is not None:
+        subaccount = session.scalar(
+            select(AccountSubaccount)
+            .join(BrokerAccount, BrokerAccount.id == AccountSubaccount.account_id)
+            .where(
+                AccountSubaccount.id == deposit.source_subaccount_id,
+                AccountSubaccount.account_id == deposit.account_id,
+                BrokerAccount.user_id == user_id,
+            )
+            .with_for_update()
+        )
+        if subaccount is not None:
+            subaccount.cash_balance += deposit.principal
+    session.delete(deposit)
+    session.commit()
+
+
 def register_user(session: Session, payload: RegisterRequest, session_days: int) -> AuthResponse:
     username = payload.username
     user = User(
@@ -1983,12 +2114,155 @@ def update_policy(session: Session, user_id: uuid.UUID, payload: PolicyUpdate) -
 
 def list_goals(session: Session, user_id: uuid.UUID) -> list[GoalResponse]:
     user = _get_user(session, user_id)
-    goals = session.scalars(
-        select(Goal)
-        .where(Goal.user_id == user.id, Goal.is_active.is_(True))
-        .order_by(Goal.priority, Goal.name)
+    goals = list(
+        session.scalars(
+            select(Goal)
+            .where(Goal.user_id == user.id, Goal.is_active.is_(True))
+            .order_by(Goal.priority, Goal.name)
+        )
     )
-    return [GoalResponse.model_validate(goal) for goal in goals]
+    return [_goal_response(session, goal) for goal in goals]
+
+
+def _goal_response(session: Session, goal: Goal) -> GoalResponse:
+    values = {column.key: getattr(goal, column.key) for column in Goal.__table__.columns}
+    values.update(
+        linked_account_ids=list(
+            session.scalars(
+                select(GoalAccountLink.account_id).where(GoalAccountLink.goal_id == goal.id)
+            )
+        ),
+        holding_ids=list(
+            session.scalars(
+                select(GoalHoldingAllocation.holding_id).where(
+                    GoalHoldingAllocation.goal_id == goal.id
+                )
+            )
+        ),
+        fixed_deposit_ids=list(
+            session.scalars(
+                select(GoalDepositAllocation.fixed_deposit_id).where(
+                    GoalDepositAllocation.goal_id == goal.id
+                )
+            )
+        ),
+    )
+    return GoalResponse.model_validate(values)
+
+
+def _replace_goal_sources(
+    session: Session,
+    user_id: uuid.UUID,
+    goal_id: uuid.UUID,
+    linked_account_ids: list[uuid.UUID],
+    holding_ids: list[uuid.UUID],
+    fixed_deposit_ids: list[uuid.UUID],
+) -> None:
+    account_ids = set(linked_account_ids)
+    accounts = list(
+        session.scalars(
+            select(BrokerAccount).where(
+                BrokerAccount.user_id == user_id,
+                BrokerAccount.id.in_(account_ids),
+            )
+        )
+    ) if account_ids else []
+    if len(accounts) != len(account_ids):
+        raise HTTPException(status_code=404, detail="A selected account was not found")
+
+    holdings_by_id: dict[uuid.UUID, Holding] = {}
+    if holding_ids:
+        holdings_by_id = {
+            holding.id: holding
+            for holding in session.scalars(
+                select(Holding).where(
+                    Holding.user_id == user_id,
+                    Holding.id.in_(holding_ids),
+                )
+            )
+        }
+        if len(holdings_by_id) != len(holding_ids):
+            raise HTTPException(status_code=404, detail="A selected stock or ETF was not found")
+        if any(holding.account_id not in account_ids for holding in holdings_by_id.values()):
+            raise HTTPException(
+                status_code=422,
+                detail="Link each holding's account to this goal before selecting the holding.",
+            )
+        conflicting_holding = session.scalar(
+            select(GoalHoldingAllocation)
+            .where(
+                GoalHoldingAllocation.holding_id.in_(holding_ids),
+                GoalHoldingAllocation.goal_id != goal_id,
+            )
+            .limit(1)
+        )
+        if conflicting_holding is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="A stock or ETF can only be assigned to one goal at a time.",
+            )
+
+    deposits_by_id: dict[uuid.UUID, FixedDeposit] = {}
+    if fixed_deposit_ids:
+        deposits_by_id = {
+            deposit.id: deposit
+            for deposit in session.scalars(
+                select(FixedDeposit).where(
+                    FixedDeposit.user_id == user_id,
+                    FixedDeposit.id.in_(fixed_deposit_ids),
+                )
+            )
+        }
+        if len(deposits_by_id) != len(fixed_deposit_ids):
+            raise HTTPException(status_code=404, detail="A selected deposit was not found")
+        if any(deposit.account_id not in account_ids for deposit in deposits_by_id.values()):
+            raise HTTPException(
+                status_code=422,
+                detail="Link each deposit's account to this goal before selecting the deposit.",
+            )
+        conflicting_deposit = session.scalar(
+            select(GoalDepositAllocation)
+            .where(
+                GoalDepositAllocation.fixed_deposit_id.in_(fixed_deposit_ids),
+                GoalDepositAllocation.goal_id != goal_id,
+            )
+            .limit(1)
+        )
+        if conflicting_deposit is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="A fixed deposit can only be assigned to one goal at a time.",
+            )
+
+    session.execute(delete(GoalAccountLink).where(GoalAccountLink.goal_id == goal_id))
+    session.execute(
+        delete(GoalHoldingAllocation).where(GoalHoldingAllocation.goal_id == goal_id)
+    )
+    session.execute(
+        delete(GoalDepositAllocation).where(GoalDepositAllocation.goal_id == goal_id)
+    )
+    session.add_all(
+        [
+            GoalAccountLink(user_id=user_id, goal_id=goal_id, account_id=account_id)
+            for account_id in linked_account_ids
+        ]
+    )
+    session.add_all(
+        [
+            GoalHoldingAllocation(user_id=user_id, goal_id=goal_id, holding_id=holding_id)
+            for holding_id in holding_ids
+        ]
+    )
+    session.add_all(
+        [
+            GoalDepositAllocation(
+                user_id=user_id,
+                goal_id=goal_id,
+                fixed_deposit_id=deposit_id,
+            )
+            for deposit_id in fixed_deposit_ids
+        ]
+    )
 
 
 def create_goal(session: Session, user_id: uuid.UUID, payload: GoalCreate) -> GoalResponse:
@@ -2020,11 +2294,30 @@ def create_goal(session: Session, user_id: uuid.UUID, payload: GoalCreate) -> Go
                 status_code=422,
                 detail="New goal percentages must keep the active fixed allocation at 100%",
             )
-    goal = Goal(user_id=user.id, **payload.model_dump())
+    goal_values = payload.model_dump(
+        exclude={"linked_account_ids", "holding_ids", "fixed_deposit_ids"}
+    )
+    goal = Goal(user_id=user.id, **goal_values)
     session.add(goal)
-    session.commit()
+    session.flush()
+    _replace_goal_sources(
+        session,
+        user.id,
+        goal.id,
+        payload.linked_account_ids,
+        payload.holding_ids,
+        payload.fixed_deposit_ids,
+    )
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="A selected stock or deposit was assigned to another goal at the same time.",
+        ) from error
     session.refresh(goal)
-    return GoalResponse.model_validate(goal)
+    return _goal_response(session, goal)
 
 
 def update_goal(
@@ -2074,11 +2367,29 @@ def update_goal(
                     "Updated fixed goal percentages must keep active goal shares at exactly 100%."
                 ),
             )
-    for field, value in payload.model_dump().items():
+    goal_values = payload.model_dump(
+        exclude={"linked_account_ids", "holding_ids", "fixed_deposit_ids"}
+    )
+    for field, value in goal_values.items():
         setattr(goal, field, value)
-    session.commit()
+    _replace_goal_sources(
+        session,
+        user.id,
+        goal.id,
+        payload.linked_account_ids,
+        payload.holding_ids,
+        payload.fixed_deposit_ids,
+    )
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="A selected stock or deposit was assigned to another goal at the same time.",
+        ) from error
     session.refresh(goal)
-    return GoalResponse.model_validate(goal)
+    return _goal_response(session, goal)
 
 
 def archive_goal(session: Session, user_id: uuid.UUID, goal_id: uuid.UUID) -> None:
@@ -2126,6 +2437,13 @@ def archive_goal(session: Session, user_id: uuid.UUID, goal_id: uuid.UUID) -> No
 
     goal.is_active = False
     goal.fixed_percent = None
+    session.execute(delete(GoalAccountLink).where(GoalAccountLink.goal_id == goal.id))
+    session.execute(
+        delete(GoalHoldingAllocation).where(GoalHoldingAllocation.goal_id == goal.id)
+    )
+    session.execute(
+        delete(GoalDepositAllocation).where(GoalDepositAllocation.goal_id == goal.id)
+    )
     session.commit()
 
 
@@ -2191,7 +2509,23 @@ def dashboard(
         .where(Holding.user_id == user.id)
     ).all()
 
+    assigned_holding_goals = {
+        holding_id: (goal_id, goal_name)
+        for holding_id, goal_id, goal_name in session.execute(
+            select(
+                GoalHoldingAllocation.holding_id,
+                Goal.id,
+                Goal.name,
+            )
+            .join(Goal, Goal.id == GoalHoldingAllocation.goal_id)
+            .where(
+                GoalHoldingAllocation.user_id == user.id,
+                Goal.is_active.is_(True),
+            )
+        ).all()
+    }
     holdings: list[HoldingSummary] = []
+    holding_values_by_id: dict[uuid.UUID, Decimal] = {}
     values_by_class = {asset_class.value: ZERO for asset_class in AssetClass}
     gross_holdings_by_account: dict[uuid.UUID, Decimal] = {}
     after_tax_holdings_by_account: dict[uuid.UUID, Decimal] = {}
@@ -2242,6 +2576,7 @@ def dashboard(
             fx_rates,
         )
         current_value = gross_current_value - sale_tax
+        holding_values_by_id[holding.id] = current_value
         values_by_class[instrument.asset_class.value] += current_value
         gross_holdings_by_account[account.id] = (
             gross_holdings_by_account.get(account.id, ZERO) + gross_current_value
@@ -2261,6 +2596,12 @@ def dashboard(
             HoldingSummary(
                 id=holding.id,
                 account_id=account.id,
+                assigned_goal_id=(
+                    assigned_holding_goals.get(holding.id, (None, None))[0]
+                ),
+                assigned_goal_name=(
+                    assigned_holding_goals.get(holding.id, (None, None))[1]
+                ),
                 symbol=instrument.symbol,
                 name=instrument.name,
                 account_name=account.display_name,
@@ -2336,8 +2677,24 @@ def dashboard(
 
     deposits: list[DepositSummary] = []
     deposit_value = ZERO
+    deposit_values_by_id: dict[uuid.UUID, Decimal] = {}
     deposit_value_by_account: dict[uuid.UUID, Decimal] = {}
     annual_interest_income = ZERO
+    assigned_deposit_goals = {
+        deposit_id: (goal_id, goal_name)
+        for deposit_id, goal_id, goal_name in session.execute(
+            select(
+                GoalDepositAllocation.fixed_deposit_id,
+                Goal.id,
+                Goal.name,
+            )
+            .join(Goal, Goal.id == GoalDepositAllocation.goal_id)
+            .where(
+                GoalDepositAllocation.user_id == user.id,
+                Goal.is_active.is_(True),
+            )
+        ).all()
+    }
     fixed_deposits = session.scalars(select(FixedDeposit).where(FixedDeposit.user_id == user.id))
     for deposit in fixed_deposits:
         valuation_date = min(today, deposit.maturity_date)
@@ -2354,6 +2711,7 @@ def dashboard(
             accrued_value, deposit.currency, base_currency, usd_per_eur, fx_rates
         )
         deposit_value += deposit_base_value
+        deposit_values_by_id[deposit.id] = deposit_base_value
         deposit_value_by_account[deposit.account_id] = (
             deposit_value_by_account.get(deposit.account_id, ZERO) + deposit_base_value
         )
@@ -2366,12 +2724,21 @@ def dashboard(
         )
         deposits.append(
             DepositSummary(
+                id=deposit.id,
+                account_id=deposit.account_id,
+                source_subaccount_id=deposit.source_subaccount_id,
+                assigned_goal_id=assigned_deposit_goals.get(deposit.id, (None, None))[0],
+                assigned_goal_name=assigned_deposit_goals.get(deposit.id, (None, None))[1],
                 name=deposit.name,
                 principal=deposit.principal,
                 accrued_interest=accrued_interest,
+                current_value=accrued_value,
                 currency=deposit.currency,
                 annual_rate=deposit.annual_rate,
                 rate_basis=deposit.rate_basis,
+                compounding=deposit.compounding,
+                period_months=deposit.period_months,
+                start_date=deposit.start_date,
                 maturity_date=deposit.maturity_date,
                 days_to_maturity=max((deposit.maturity_date - today).days, 0),
             )
@@ -2522,10 +2889,44 @@ def dashboard(
             .order_by(Goal.priority, Goal.name)
         )
     )
+    linked_accounts_by_goal: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for goal_id, account_id in session.execute(
+        select(GoalAccountLink.goal_id, GoalAccountLink.account_id)
+        .join(Goal, Goal.id == GoalAccountLink.goal_id)
+        .where(GoalAccountLink.user_id == user.id, Goal.is_active.is_(True))
+        .order_by(GoalAccountLink.account_id)
+    ):
+        linked_accounts_by_goal.setdefault(goal_id, []).append(account_id)
+    linked_holdings_by_goal: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for goal_id, holding_id in session.execute(
+        select(GoalHoldingAllocation.goal_id, GoalHoldingAllocation.holding_id)
+        .join(Goal, Goal.id == GoalHoldingAllocation.goal_id)
+        .where(GoalHoldingAllocation.user_id == user.id, Goal.is_active.is_(True))
+        .order_by(GoalHoldingAllocation.holding_id)
+    ):
+        linked_holdings_by_goal.setdefault(goal_id, []).append(holding_id)
+    linked_deposits_by_goal: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for goal_id, deposit_id in session.execute(
+        select(GoalDepositAllocation.goal_id, GoalDepositAllocation.fixed_deposit_id)
+        .join(Goal, Goal.id == GoalDepositAllocation.goal_id)
+        .where(GoalDepositAllocation.user_id == user.id, Goal.is_active.is_(True))
+        .order_by(GoalDepositAllocation.fixed_deposit_id)
+    ):
+        linked_deposits_by_goal.setdefault(goal_id, []).append(deposit_id)
     for goal in goal_rows:
-        current_amount = _to_base(
+        manual_current_amount = _to_base(
             goal.current_amount, goal.target_currency, base_currency, usd_per_eur, fx_rates
         )
+        goal_holding_ids = linked_holdings_by_goal.get(goal.id, [])
+        goal_deposit_ids = linked_deposits_by_goal.get(goal.id, [])
+        linked_asset_value = sum(
+            (holding_values_by_id.get(holding_id, ZERO) for holding_id in goal_holding_ids),
+            ZERO,
+        ) + sum(
+            (deposit_values_by_id.get(deposit_id, ZERO) for deposit_id in goal_deposit_ids),
+            ZERO,
+        )
+        current_amount = manual_current_amount + linked_asset_value
         current_annual_income = _to_base(
             goal.current_annual_income, goal.target_currency, base_currency, usd_per_eur, fx_rates
         )
@@ -2562,6 +2963,7 @@ def dashboard(
                 target_amount=target_amount,
                 target_annual_income=target_annual_income,
                 current_amount=progress_value,
+                linked_asset_value=round_money(linked_asset_value),
                 current_annual_income=current_annual_income,
                 currency=base_currency,
                 progress_percent=progress_percent.quantize(Decimal("0.01")),
@@ -2569,8 +2971,13 @@ def dashboard(
                 priority=goal.priority,
                 risk_level=goal.risk_level,
                 monthly_contribution=goal.monthly_contribution,
+                visualization_budget_amount=goal.visualization_budget_amount,
+                visualization_budget_period=goal.visualization_budget_period,
                 fixed_percent=goal.fixed_percent,
                 flexibility=goal.flexibility,
+                linked_account_ids=linked_accounts_by_goal.get(goal.id, []),
+                holding_ids=goal_holding_ids,
+                fixed_deposit_ids=goal_deposit_ids,
             )
         )
 

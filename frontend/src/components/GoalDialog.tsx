@@ -1,16 +1,41 @@
 import { useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 import { api, ApiError } from "../api";
-import type { Currency, GoalCreatePayload, GoalRecord, GoalType, GoalUpdatePayload } from "../types";
+import { amount, dateLabel, number } from "../format";
+import type {
+  AccountSummary,
+  Currency,
+  Deposit,
+  GoalCreatePayload,
+  GoalRecord,
+  GoalType,
+  GoalUpdatePayload,
+  HoldingSummary,
+} from "../types";
+
+function accountName(accounts: AccountSummary[], accountId: string): string {
+  return accounts.find((account) => account.id === accountId)?.display_name ?? "Account";
+}
 
 interface GoalDialogProps {
   currency: Currency;
+  accounts: AccountSummary[];
+  holdings: HoldingSummary[];
+  deposits: Deposit[];
   goal?: GoalRecord;
   onClose: () => void;
   onCreated: () => Promise<void>;
 }
 
-export function GoalDialog({ currency, goal, onClose, onCreated }: GoalDialogProps) {
+export function GoalDialog({
+  currency,
+  accounts,
+  holdings,
+  deposits,
+  goal,
+  onClose,
+  onCreated,
+}: GoalDialogProps) {
   const [goalType, setGoalType] = useState<GoalType | "">(goal?.goal_type ?? "");
   const [targetCurrency, setTargetCurrency] = useState<Currency>(
     goal?.target_currency ?? currency,
@@ -24,6 +49,19 @@ export function GoalDialog({ currency, goal, onClose, onCreated }: GoalDialogPro
   const [currentAnnualIncome, setCurrentAnnualIncome] = useState(
     goal?.current_annual_income ?? "0",
   );
+  const [linkedAccountIds, setLinkedAccountIds] = useState<string[]>(
+    goal?.linked_account_ids ?? [],
+  );
+  const [holdingIds, setHoldingIds] = useState<string[]>(goal?.holding_ids ?? []);
+  const [fixedDepositIds, setFixedDepositIds] = useState<string[]>(
+    goal?.fixed_deposit_ids ?? [],
+  );
+  const [visualizationBudgetAmount, setVisualizationBudgetAmount] = useState(
+    goal?.visualization_budget_amount ?? "",
+  );
+  const [visualizationBudgetPeriod, setVisualizationBudgetPeriod] = useState<
+    "monthly" | "yearly" | ""
+  >(goal?.visualization_budget_period ?? "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -37,6 +75,24 @@ export function GoalDialog({ currency, goal, onClose, onCreated }: GoalDialogPro
       );
       if (nextType === "passive_income") setCurrentAmount("0");
       else setCurrentAnnualIncome("0");
+    }
+  }
+
+  function toggleAccount(accountId: string) {
+    const isLinked = linkedAccountIds.includes(accountId);
+    const nextAccountIds = isLinked
+      ? linkedAccountIds.filter((id) => id !== accountId)
+      : [...linkedAccountIds, accountId];
+    setLinkedAccountIds(nextAccountIds);
+    if (isLinked) {
+      const accountHoldingIds = new Set(
+        holdings.filter((holding) => holding.account_id === accountId).map((holding) => holding.id),
+      );
+      const accountDepositIds = new Set(
+        deposits.filter((deposit) => deposit.account_id === accountId).map((deposit) => deposit.id),
+      );
+      setHoldingIds((current) => current.filter((id) => !accountHoldingIds.has(id)));
+      setFixedDepositIds((current) => current.filter((id) => !accountDepositIds.has(id)));
     }
   }
 
@@ -55,6 +111,11 @@ export function GoalDialog({ currency, goal, onClose, onCreated }: GoalDialogPro
       setSaving(false);
       return;
     }
+    if (visualizationBudgetAmount && !visualizationBudgetPeriod) {
+      setError("Choose whether the visualization-only budget is monthly or yearly.");
+      setSaving(false);
+      return;
+    }
 
     const payload: GoalCreatePayload = {
       name,
@@ -66,6 +127,14 @@ export function GoalDialog({ currency, goal, onClose, onCreated }: GoalDialogPro
       flexibility: flexibility as GoalCreatePayload["flexibility"],
       current_amount: goalType === "passive_income" ? "0" : currentAmount,
       current_annual_income: goalType === "passive_income" ? currentAnnualIncome : "0",
+      visualization_budget_amount: visualizationBudgetAmount || null,
+      visualization_budget_period:
+        visualizationBudgetAmount && visualizationBudgetPeriod
+          ? visualizationBudgetPeriod
+          : null,
+      linked_account_ids: linkedAccountIds,
+      holding_ids: holdingIds,
+      fixed_deposit_ids: fixedDepositIds,
     };
     const fixedPercent = String(form.get("fixedPercent") ?? "").trim();
     if (fixedPercent) payload.fixed_percent = String(Number(fixedPercent) / 100);
@@ -143,21 +212,115 @@ export function GoalDialog({ currency, goal, onClose, onCreated }: GoalDialogPro
               />
             </label>
           </div>
+          <label className="form-field">
+            <span>Progress already saved outside selected assets ({targetCurrency})</span>
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={goalType === "passive_income" ? currentAnnualIncome : currentAmount}
+              onChange={(event) =>
+                goalType === "passive_income"
+                  ? setCurrentAnnualIncome(event.target.value)
+                  : setCurrentAmount(event.target.value)
+              }
+            />
+            <small>This is added to selected stocks and deposits. Don’t repeat an amount that is already linked below.</small>
+          </label>
+          <section className="goal-source-picker">
+            <div className="goal-source-heading">
+              <strong>Link accounts and choose goal assets</strong>
+              <small>Links are virtual earmarks; no cash or investments move.</small>
+            </div>
+            <div className="goal-source-accounts">
+              {accounts.map((account) => (
+                <label className="goal-source-account" key={account.id}>
+                  <input
+                    type="checkbox"
+                    checked={linkedAccountIds.includes(account.id)}
+                    onChange={() => toggleAccount(account.id)}
+                  />
+                  <span>
+                    <strong>{account.display_name}</strong>
+                    <small>{account.account_type.toLowerCase().replace("_", " ")}</small>
+                  </span>
+                </label>
+              ))}
+              {accounts.length === 0 && <p className="quiet-copy">Add an account first to link existing assets.</p>}
+            </div>
+            {linkedAccountIds.length > 0 && (
+              <div className="goal-source-assets">
+                {holdings
+                  .filter((holding) => linkedAccountIds.includes(holding.account_id))
+                  .map((holding) => {
+                    const assignedElsewhere =
+                      holding.assigned_goal_id !== null && holding.assigned_goal_id !== goal?.id;
+                    return (
+                      <label
+                        className={`goal-source-asset ${assignedElsewhere ? "is-disabled" : ""}`}
+                        key={holding.id}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={holdingIds.includes(holding.id)}
+                          disabled={assignedElsewhere}
+                          onChange={(event) =>
+                            setHoldingIds((current) =>
+                              event.target.checked
+                                ? [...current, holding.id]
+                                : current.filter((id) => id !== holding.id),
+                            )
+                          }
+                        />
+                        <span>
+                          <strong>{holding.symbol} · {holding.account_name}</strong>
+                          <small>
+                            {number(holding.quantity)} shares · {amount(holding.market_value, currency)}
+                            {assignedElsewhere ? ` · assigned to ${holding.assigned_goal_name}` : ""}
+                          </small>
+                        </span>
+                      </label>
+                    );
+                  })}
+                {deposits
+                  .filter((deposit) => linkedAccountIds.includes(deposit.account_id))
+                  .map((deposit) => {
+                    const assignedElsewhere =
+                      deposit.assigned_goal_id !== null && deposit.assigned_goal_id !== goal?.id;
+                    return (
+                      <label
+                        className={`goal-source-asset ${assignedElsewhere ? "is-disabled" : ""}`}
+                        key={deposit.id}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={fixedDepositIds.includes(deposit.id)}
+                          disabled={assignedElsewhere}
+                          onChange={(event) =>
+                            setFixedDepositIds((current) =>
+                              event.target.checked
+                                ? [...current, deposit.id]
+                                : current.filter((id) => id !== deposit.id),
+                            )
+                          }
+                        />
+                        <span>
+                          <strong>{deposit.name} · {accountName(accounts, deposit.account_id)}</strong>
+                          <small>
+                            {amount(deposit.current_value, deposit.currency)} · matures {dateLabel(deposit.maturity_date)}
+                            {assignedElsewhere ? ` · assigned to ${deposit.assigned_goal_name}` : ""}
+                          </small>
+                        </span>
+                      </label>
+                    );
+                  })}
+                {holdings.filter((holding) => linkedAccountIds.includes(holding.account_id)).length === 0
+                  && deposits.filter((deposit) => linkedAccountIds.includes(deposit.account_id)).length === 0
+                  && <p className="quiet-copy">No stocks or term deposits in selected accounts yet. Cash is not earmarked by this asset selector.</p>}
+              </div>
+            )}
+          </section>
           <div className="form-row">
-            <label className="form-field">
-              <span>Current {goalType === "passive_income" ? "annual passive income" : "amount toward goal"}</span>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={goalType === "passive_income" ? currentAnnualIncome : currentAmount}
-                onChange={(event) =>
-                  goalType === "passive_income"
-                    ? setCurrentAnnualIncome(event.target.value)
-                    : setCurrentAmount(event.target.value)
-                }
-              />
-            </label>
             <label className="form-field">
               <span>Goal currency</span>
               <select value={targetCurrency} onChange={(event) => setTargetCurrency(event.target.value as Currency)}>
@@ -173,10 +336,42 @@ export function GoalDialog({ currency, goal, onClose, onCreated }: GoalDialogPro
               <input name="targetDate" type="date" defaultValue={goal?.target_date ?? ""} />
             </label>
             <label className="form-field">
-              <span>Monthly contribution ({targetCurrency}) <small>optional</small></span>
+              <span>Monthly contribution for cash-allocation rules ({targetCurrency}) <small>optional</small></span>
               <input name="monthlyContribution" type="number" min="0" step="0.01" defaultValue={goal?.monthly_contribution ?? "0"} placeholder="Leave blank if not planned" />
             </label>
           </div>
+          <div className="form-row">
+            <label className="form-field">
+              <span>Visualization-only budget <small>optional</small></span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={visualizationBudgetAmount}
+                onChange={(event) => setVisualizationBudgetAmount(event.target.value)}
+                placeholder="Planned saving amount"
+              />
+            </label>
+            <label className="form-field">
+              <span>Budget period</span>
+              <select
+                value={visualizationBudgetPeriod}
+                onChange={(event) =>
+                  setVisualizationBudgetPeriod(event.target.value as "monthly" | "yearly" | "")
+                }
+                disabled={!visualizationBudgetAmount}
+              >
+                <option value="">Choose a period</option>
+                <option value="monthly">Monthly</option>
+                <option value="yearly">Yearly</option>
+              </select>
+            </label>
+          </div>
+          <p className="goal-visual-budget-note">
+            The visualization-only budget is saved for future goal charts. It does not post money,
+            change an account balance, or affect cash-allocation rules. The existing monthly
+            contribution above is a separate input for the cash-allocation rule.
+          </p>
           <div className="form-row">
             <label className="form-field">
               <span>Priority</span>

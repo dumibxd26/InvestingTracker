@@ -19,8 +19,31 @@
   --shadow: 0 2px 12px rgb(18 46 34 / 3%);
 }
 
+.account-deposit-balance {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 5px;
+}
+
+.account-deposit-balance strong,
+.account-deposit-balance small {
+  grid-column: 1;
+}
+
+.account-deposit-balance button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.account-deposit-balance small {
+  color: #929e95;
+  font-size: 8px;
+}
+
 html[data-theme="dark"] .custom-tranche-editor,
 html[data-theme="dark"] .grant-tax-fields,
+html[data-theme="dark"] .goal-source-account,
 html[data-theme="dark"] .vesting-sale-scenarios > div {
   border-color: var(--line);
   background: var(--panel);
@@ -28,7 +51,10 @@ html[data-theme="dark"] .vesting-sale-scenarios > div {
 
 html[data-theme="dark"] .custom-tranche-heading,
 html[data-theme="dark"] .vesting-sale-scenarios strong,
-html[data-theme="dark"] .vesting-schedule-details {
+html[data-theme="dark"] .vesting-schedule-details,
+html[data-theme="dark"] .goal-source-heading,
+html[data-theme="dark"] .goal-source-account strong,
+html[data-theme="dark"] .goal-source-asset strong {
   color: #c1d5c7;
 }
 
@@ -1883,6 +1909,96 @@ a:focus-visible {
 .goal-actions {
   display: flex;
   gap: 5px;
+}
+
+.goal-source-picker {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid #e7ece8;
+  border-radius: 11px;
+  background: #fbfcfa;
+}
+
+.goal-source-heading {
+  display: grid;
+  gap: 4px;
+  color: #4b6254;
+  font-size: 10px;
+}
+
+.goal-source-heading small {
+  color: #849188;
+  font-size: 8px;
+}
+
+.goal-source-accounts,
+.goal-source-assets {
+  display: grid;
+  gap: 6px;
+}
+
+.goal-source-assets {
+  max-height: 190px;
+  overflow: auto;
+  padding-top: 8px;
+  border-top: 1px solid #e8ede8;
+}
+
+.goal-source-account,
+.goal-source-asset {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px;
+  border-radius: 8px;
+  color: #627268;
+  font-size: 9px;
+}
+
+.goal-source-account {
+  border: 1px solid #ebefeb;
+  background: #fff;
+}
+
+.goal-source-account input,
+.goal-source-asset input {
+  flex: 0 0 auto;
+  accent-color: #4e815d;
+}
+
+.goal-source-account > span,
+.goal-source-asset > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.goal-source-account strong,
+.goal-source-asset strong {
+  overflow: hidden;
+  color: #52675a;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-source-account small,
+.goal-source-asset small {
+  color: #929e95;
+  font-size: 8px;
+}
+
+.goal-source-asset.is-disabled {
+  opacity: 0.55;
+}
+
+.goal-visual-budget-note {
+  margin: -6px 0 0;
+  color: #839087;
+  font-size: 8px;
+  line-height: 1.5;
 }
 
 .goal-delete-button {
@@ -4613,6 +4729,7 @@ html[data-theme="dark"] .metric-card,
 html[data-theme="dark"] .goal-card,
 html[data-theme="dark"] .account-card,
 html[data-theme="dark"] .account-wealth-card,
+html[data-theme="dark"] .goal-source-picker,
 html[data-theme="dark"] .vesting-card,
 html[data-theme="dark"] .deposit-card,
 html[data-theme="dark"] .chat-panel,

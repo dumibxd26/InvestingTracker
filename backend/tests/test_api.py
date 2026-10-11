@@ -23,6 +23,7 @@ from app.models import (
     Holding,
     Instrument,
     MarketFXRate,
+    MarketPriceCache,
     RateBasis,
     User,
 )
@@ -1613,3 +1614,267 @@ def test_named_grant_accepts_custom_vesting_dates_and_sale_tax_rates(monkeypatch
         Decimal(dashboard.json()["totals"]["unvested_equity_long_term_sale_estimate"])
         == Decimal("10897.95")
     )
+
+
+def test_fixed_deposit_is_account_funded_and_uses_capitalization_terms(tmp_path) -> None:
+    start_date = date.today() - timedelta(days=365)
+    with create_test_client(tmp_path) as client:
+        account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Deposit bank",
+                "provider_code": "MANUAL",
+                "account_type": "SAVINGS",
+                "currency": "EUR",
+                "opening_cash": "5000",
+            },
+        )
+        wallet_id = account.json()["subaccounts"][0]["id"]
+        created = client.post(
+            "/api/deposits",
+            json={
+                "account_id": account.json()["id"],
+                "subaccount_id": wallet_id,
+                "name": "One-year capitalized deposit",
+                "principal": "1000",
+                "start_date": start_date.isoformat(),
+                "period_months": 12,
+                "annual_profit_rate": "0.05",
+                "capitalization": True,
+            },
+        )
+        simple_created = client.post(
+            "/api/deposits",
+            json={
+                "account_id": account.json()["id"],
+                "subaccount_id": wallet_id,
+                "name": "Simple-interest deposit",
+                "principal": "500",
+                "start_date": start_date.isoformat(),
+                "period_months": 12,
+                "annual_profit_rate": "0.04",
+                "capitalization": False,
+            },
+        )
+        after_create = client.get("/api/dashboard").json()
+        invalid_account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Broker",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "1000",
+            },
+        )
+        rejected_deposit = client.post(
+            "/api/deposits",
+            json={
+                "account_id": invalid_account.json()["id"],
+                "subaccount_id": invalid_account.json()["subaccounts"][0]["id"],
+                "name": "Invalid brokerage deposit",
+                "principal": "100",
+                "start_date": date.today().isoformat(),
+                "period_months": 6,
+                "annual_profit_rate": "0.04",
+                "capitalization": False,
+            },
+        )
+        deleted = client.delete(f"/api/deposits/{created.json()['id']}")
+        deleted_simple = client.delete(f"/api/deposits/{simple_created.json()['id']}")
+        after_delete = client.get("/api/dashboard").json()
+
+    assert account.status_code == 201, account.text
+    assert created.status_code == 201, created.text
+    assert simple_created.status_code == 201, simple_created.text
+    assert created.json()["maturity_date"] == add_months(start_date, 12).isoformat()
+    assert created.json()["period_months"] == 12
+    assert created.json()["capitalization"] is True
+    bank_after_create = next(
+        item for item in after_create["accounts"] if item["id"] == account.json()["id"]
+    )
+    assert Decimal(bank_after_create["subaccounts"][0]["cash_balance"]) == 3500
+    deposits = {deposit["name"]: deposit for deposit in after_create["deposits"]}
+    deposit = deposits["One-year capitalized deposit"]
+    assert deposit["name"] == "One-year capitalized deposit"
+    assert deposit["compounding"] == "monthly"
+    assert deposit["period_months"] == 12
+    assert Decimal(deposit["annual_rate"]) == Decimal("0.05")
+    assert Decimal(deposit["current_value"]) > Decimal("1000")
+    simple_deposit = deposits["Simple-interest deposit"]
+    assert simple_deposit["compounding"] == "at_maturity"
+    assert Decimal(simple_deposit["current_value"]) == Decimal("520.00")
+    assert invalid_account.status_code == 201
+    assert rejected_deposit.status_code == 422
+    assert deleted.status_code == 204
+    assert deleted_simple.status_code == 204
+    assert after_delete["deposits"] == []
+    bank_after_delete = next(
+        item for item in after_delete["accounts"] if item["id"] == account.json()["id"]
+    )
+    assert Decimal(bank_after_delete["subaccounts"][0]["cash_balance"]) == 5000
+
+
+def test_goal_links_account_selected_assets_and_visualization_only_budget(tmp_path) -> None:
+    with create_test_client(tmp_path) as client:
+        brokerage = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Goal brokerage",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "0",
+            },
+        )
+        bank = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Goal savings bank",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "2000",
+            },
+        )
+        created_deposit = client.post(
+            "/api/deposits",
+            json={
+                "account_id": bank.json()["id"],
+                "subaccount_id": bank.json()["subaccounts"][0]["id"],
+                "name": "Goal deposit",
+                "principal": "1000",
+                "start_date": date.today().isoformat(),
+                "period_months": 12,
+                "annual_profit_rate": "0.04",
+                "capitalization": False,
+            },
+        )
+        user_id = UUID(client.get("/api/auth/me").json()["id"])
+        with client.app.state.session_factory() as session:
+            instrument = Instrument(
+                symbol="GOALTEST",
+                name="Goal Test Corp",
+                asset_class=AssetClass.EQUITIES,
+                currency=Currency.EUR,
+                mic="XNAS",
+                exchange="NASDAQ",
+                instrument_type="STOCK",
+                is_demo=False,
+            )
+            session.add(instrument)
+            session.flush()
+            holding = Holding(
+                user_id=user_id,
+                account_id=UUID(brokerage.json()["id"]),
+                funding_subaccount_id=None,
+                instrument_id=instrument.id,
+                quantity=Decimal("2"),
+                average_cost=Decimal("40"),
+                purchase_date=date(2025, 1, 1),
+                funding_cost=Decimal("0"),
+            )
+            session.add(holding)
+            session.flush()
+            session.add(
+                MarketPriceCache(
+                    instrument_id=instrument.id,
+                    price=Decimal("100"),
+                    currency=Currency.EUR,
+                    source="TEST",
+                    feed_type="QUOTE",
+                    observed_at=datetime.now(UTC),
+                )
+            )
+            session.commit()
+            holding_id = str(holding.id)
+
+        payload = {
+            "name": "Home fund",
+            "goal_type": "purchase",
+            "target_amount": "5000",
+            "current_amount": "0",
+            "target_currency": "EUR",
+            "priority": 1,
+            "risk_level": "moderate",
+            "monthly_contribution": "0",
+            "visualization_budget_amount": "500",
+            "visualization_budget_period": "yearly",
+            "flexibility": "flexible",
+            "linked_account_ids": [brokerage.json()["id"], bank.json()["id"]],
+            "holding_ids": [holding_id],
+            "fixed_deposit_ids": [created_deposit.json()["id"]],
+        }
+        created_goal = client.post("/api/goals", json=payload)
+        dashboard = client.get("/api/dashboard").json()
+        duplicate_assignment = client.post(
+            "/api/goals",
+            json={
+                **payload,
+                "name": "Second goal",
+                "linked_account_ids": [brokerage.json()["id"]],
+                "fixed_deposit_ids": [],
+            },
+        )
+        duplicate_deposit_assignment = client.post(
+            "/api/goals",
+            json={
+                **payload,
+                "name": "Second deposit goal",
+                "linked_account_ids": [bank.json()["id"]],
+                "holding_ids": [],
+            },
+        )
+        invalid_account_link = client.post(
+            "/api/goals",
+            json={
+                **payload,
+                "name": "Unlinked source",
+                "linked_account_ids": [],
+                "holding_ids": [holding_id],
+                "fixed_deposit_ids": [],
+            },
+        )
+        updated_goal = client.put(
+            f"/api/goals/{created_goal.json()['id']}",
+            json={
+                **payload,
+                "visualization_budget_amount": "700",
+                "visualization_budget_period": "yearly",
+                "linked_account_ids": [brokerage.json()["id"]],
+                "holding_ids": [],
+                "fixed_deposit_ids": [],
+            },
+        )
+        dashboard_after_update = client.get("/api/dashboard").json()
+
+    assert created_deposit.status_code == 201, created_deposit.text
+    assert created_goal.status_code == 201, created_goal.text
+    assert created_goal.json()["linked_account_ids"] == sorted(
+        [brokerage.json()["id"], bank.json()["id"]]
+    ) or set(created_goal.json()["linked_account_ids"]) == {
+        brokerage.json()["id"],
+        bank.json()["id"],
+    }
+    assert created_goal.json()["holding_ids"] == [holding_id]
+    assert created_goal.json()["fixed_deposit_ids"] == [created_deposit.json()["id"]]
+    assert Decimal(created_goal.json()["visualization_budget_amount"]) == 500
+    assert created_goal.json()["visualization_budget_period"] == "yearly"
+    assert Decimal(created_goal.json()["monthly_contribution"]) == 0
+    goal = dashboard["goals"][0]
+    assert Decimal(goal["linked_asset_value"]) > Decimal("1196")
+    assert Decimal(goal["current_amount"]) == Decimal(goal["linked_asset_value"])
+    assert Decimal(goal["visualization_budget_amount"]) == 500
+    assert goal["visualization_budget_period"] == "yearly"
+    assert dashboard["holdings"][0]["assigned_goal_id"] == created_goal.json()["id"]
+    assert dashboard["deposits"][0]["assigned_goal_id"] == created_goal.json()["id"]
+    assert duplicate_assignment.status_code == 409
+    assert duplicate_deposit_assignment.status_code == 409
+    assert invalid_account_link.status_code == 422
+    assert updated_goal.status_code == 200, updated_goal.text
+    assert Decimal(updated_goal.json()["visualization_budget_amount"]) == 700
+    assert updated_goal.json()["holding_ids"] == []
+    assert updated_goal.json()["fixed_deposit_ids"] == []
+    assert Decimal(dashboard_after_update["goals"][0]["linked_asset_value"]) == 0
+    assert dashboard_after_update["holdings"][0]["assigned_goal_id"] is None
+    assert dashboard_after_update["deposits"][0]["assigned_goal_id"] is None

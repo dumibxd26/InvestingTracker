@@ -370,7 +370,14 @@ export default function App() {
       </main>
 
       {goalDialogOpen && (
-        <GoalDialog currency={currency} onClose={() => setGoalDialogOpen(false)} onCreated={handleGoalCreated} />
+        <GoalDialog
+          currency={currency}
+          accounts={data?.accounts ?? []}
+          holdings={data?.holdings ?? []}
+          deposits={data?.deposits ?? []}
+          onClose={() => setGoalDialogOpen(false)}
+          onCreated={handleGoalCreated}
+        />
       )}
       {allocationOpen && <AllocationSimulator currency={currency} onClose={() => setAllocationOpen(false)} />}
     </div>
