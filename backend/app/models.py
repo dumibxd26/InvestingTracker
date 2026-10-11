@@ -226,6 +226,11 @@ class Holding(Base):
     __table_args__ = (
         UniqueConstraint("account_id", "instrument_id"),
         Index("ix_holdings_user_account", "user_id", "account_id"),
+        CheckConstraint("risk_tier IN ('X', 'Y', 'Z')", name="ck_holdings_risk_tier"),
+        CheckConstraint(
+            "expected_annual_return > -1 AND expected_annual_return <= 1",
+            name="ck_holdings_expected_return_range",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -246,6 +251,12 @@ class Holding(Base):
         default=date(2025, 1, 1),
         server_default=text("'2025-01-01'"),
         nullable=False,
+    )
+    risk_tier: Mapped[str] = mapped_column(
+        String(1), default="Y", server_default="Y", nullable=False
+    )
+    expected_annual_return: Mapped[Decimal] = mapped_column(
+        Numeric(8, 6), default=Decimal("0.05"), server_default="0.05", nullable=False
     )
     funding_cost: Mapped[Decimal] = mapped_column(
         Numeric(20, 4), default=Decimal("0"), nullable=False

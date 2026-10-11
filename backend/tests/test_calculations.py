@@ -5,6 +5,8 @@ from decimal import Decimal
 import pytest
 
 from app.calculations import (
+    compound_growth_factor,
+    compound_value_over_years,
     convert_currency,
     fixed_deposit_value,
     generate_vesting_schedule,
@@ -17,6 +19,12 @@ from app.cash_flow_logic import occurrence_dates
 from app.models import CompoundingFrequency, FundingRule, RateBasis, Recurrence
 
 D = Decimal
+
+
+def test_compound_growth_factor_preserves_partial_year_precision() -> None:
+    factor = compound_growth_factor(D("0.05"), D("0.5"))
+    assert D("1.024") < factor < D("1.025")
+    assert compound_value_over_years(D("1000"), D("0.05"), D("1")) == D("1050.00")
 
 
 @dataclass(eq=False)

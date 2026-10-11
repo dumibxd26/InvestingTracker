@@ -245,6 +245,26 @@ def fixed_deposit_value(
         return round_money(principal * factor)
 
 
+def compound_growth_factor(annual_effective_return: Decimal, years: Decimal) -> Decimal:
+    if annual_effective_return <= Decimal("-1") or years < ZERO:
+        raise ValueError("Return must exceed -100% and period must be non-negative")
+    if years == ZERO:
+        return Decimal(1)
+    with localcontext() as context:
+        context.prec = 32
+        return ((Decimal(1) + annual_effective_return).ln() * years).exp()
+
+
+def compound_value_over_years(
+    principal: Decimal, annual_effective_return: Decimal, years: Decimal
+) -> Decimal:
+    if principal < ZERO:
+        raise ValueError("Principal must be non-negative")
+    return round_money(
+        principal * compound_growth_factor(annual_effective_return, years)
+    )
+
+
 def goal_progress(
     goal_type: GoalType,
     target_amount: Decimal | None,

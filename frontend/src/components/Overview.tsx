@@ -14,7 +14,9 @@ import {
 import { amount, dateLabel, goalLabel } from "../format";
 import type { Currency, Dashboard, GoalSummary } from "../types";
 import { AllocationDonut } from "./AllocationDonut";
+import { InvestmentHeatmap } from "./InvestmentHeatmap";
 import { PortfolioChart } from "./PortfolioChart";
+import { PortfolioProjectionPanel } from "./PortfolioProjectionPanel";
 
 interface OverviewProps {
   data: Dashboard;
@@ -184,6 +186,9 @@ export function Overview({
           </div>
         </section>
       )}
+
+      <InvestmentHeatmap holdings={data.holdings} currency={currency} />
+      <PortfolioProjectionPanel currency={currency} />
 
       <div className="dashboard-grid dashboard-grid-top">
         <PortfolioChart

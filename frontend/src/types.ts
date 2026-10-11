@@ -104,11 +104,15 @@ export interface HoldingSummary {
   symbol: string;
   name: string;
   account_name: string;
+  exchange: string;
+  mic_code: string;
   asset_class: AssetClass;
   instrument_type: "STOCK" | "ETF";
   quantity: string;
   average_cost: string;
   purchase_date: string;
+  risk_tier: "X" | "Y" | "Z";
+  expected_annual_return: string;
   funding_currency: Currency | null;
   funding_cost: string;
   price: string;
@@ -119,6 +123,9 @@ export interface HoldingSummary {
   change_since_refresh_percent: string | null;
   market_value: string;
   gross_market_value: string;
+  cost_basis_value: string;
+  estimated_gain: string;
+  estimated_gain_percent: string;
   estimated_sale_tax: string;
   estimated_tax_rate: string;
   base_currency: Currency;
@@ -174,6 +181,8 @@ export interface HoldingUpdatePayload {
   average_cost: string;
   average_cost_currency: Currency;
   purchase_date?: string;
+  risk_tier?: "X" | "Y" | "Z";
+  expected_annual_return?: string;
   short_term_sale_tax_rate?: string;
   long_term_sale_tax_rate?: string;
   long_term_holding_period_days?: number;
@@ -424,6 +433,35 @@ export interface RecommendationPreview {
   created_at: string;
   expires_at: string;
   explanation: string;
+}
+
+export interface ProjectionAccountValue {
+  account_id: string;
+  account_name: string;
+  current_value: string;
+  projected_cash_value: string;
+  projected_holdings_value: string;
+  projected_deposit_value: string;
+  projected_total_value: string;
+}
+
+export interface ProjectionPoint {
+  date: string;
+  label: string;
+  total_value: string;
+  accounts: ProjectionAccountValue[];
+}
+
+export interface PortfolioProjection {
+  base_currency: Currency;
+  as_of: string;
+  target_date: string;
+  current_net_worth: string;
+  projected_net_worth: string;
+  estimated_change: string;
+  accounts: ProjectionAccountValue[];
+  timeline: ProjectionPoint[];
+  warnings: string[];
 }
 
 export interface GoalCreatePayload {

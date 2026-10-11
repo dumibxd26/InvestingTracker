@@ -29,6 +29,7 @@ import type {
   MarketDataStatus,
   MarketRefreshResult,
   MarketSymbol,
+  PortfolioProjection,
   UserProfile,
   VestingGrantPayload,
 } from "./types";
@@ -147,6 +148,12 @@ export const api = {
 
   dashboard: (currency: Currency, signal?: AbortSignal) =>
     request<Dashboard>(`/dashboard?currency=${currency}`, { signal }),
+
+  portfolioProjection: (targetDate: string, currency: Currency, signal?: AbortSignal) =>
+    request<PortfolioProjection>(
+      `/projections/portfolio?target_date=${encodeURIComponent(targetDate)}&currency=${currency}`,
+      { signal },
+    ),
 
   createAccount: (payload: AccountCreatePayload) =>
     request<AccountSummary>("/accounts", { method: "POST", body: JSON.stringify(payload) }),

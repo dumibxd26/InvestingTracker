@@ -207,6 +207,10 @@ class InitialPortfolioHolding(BaseModel):
     average_cost: Decimal = Field(gt=0, le=Decimal("100000000"))
     average_cost_currency: Currency | None = None
     purchase_date: date = date(2025, 1, 1)
+    risk_tier: Literal["X", "Y", "Z"] | None = None
+    expected_annual_return: Decimal | None = Field(
+        default=None, gt=Decimal("-1"), le=Decimal("1")
+    )
 
 
 class InitialPortfolioRequest(BaseModel):
@@ -495,11 +499,15 @@ class HoldingSummary(BaseModel):
     symbol: str
     name: str
     account_name: str
+    exchange: str
+    mic_code: str
     asset_class: AssetClass
     instrument_type: Literal["STOCK", "ETF"]
     quantity: Decimal
     average_cost: Decimal
     purchase_date: date
+    risk_tier: Literal["X", "Y", "Z"]
+    expected_annual_return: Decimal
     funding_currency: Currency | None
     funding_cost: Decimal
     price: Decimal
@@ -510,6 +518,9 @@ class HoldingSummary(BaseModel):
     change_since_refresh_percent: Decimal | None
     market_value: Decimal
     gross_market_value: Decimal
+    cost_basis_value: Decimal
+    estimated_gain: Decimal
+    estimated_gain_percent: Decimal
     estimated_sale_tax: Decimal
     estimated_tax_rate: Decimal
     base_currency: Currency
@@ -541,6 +552,10 @@ class HoldingCreate(BaseModel):
     average_cost: Decimal = Field(gt=0, le=Decimal("100000000"))
     average_cost_currency: Currency | None = None
     purchase_date: date = Field(default_factory=date.today)
+    risk_tier: Literal["X", "Y", "Z"] | None = None
+    expected_annual_return: Decimal | None = Field(
+        default=None, gt=Decimal("-1"), le=Decimal("1")
+    )
 
 
 class HoldingUpdate(BaseModel):
@@ -548,6 +563,10 @@ class HoldingUpdate(BaseModel):
     average_cost: Decimal = Field(gt=0, le=Decimal("100000000"))
     average_cost_currency: Currency | None = None
     purchase_date: date | None = None
+    risk_tier: Literal["X", "Y", "Z"] | None = None
+    expected_annual_return: Decimal | None = Field(
+        default=None, gt=Decimal("-1"), le=Decimal("1")
+    )
 
 
 class HoldingCreateResponse(BaseModel):
@@ -578,6 +597,35 @@ class MarketDataStatusResponse(BaseModel):
     provider: str
     provider_configured: bool
     automatic_refresh_enabled: bool = False
+
+
+class ProjectionAccountValue(BaseModel):
+    account_id: UUID
+    account_name: str
+    current_value: Decimal
+    projected_cash_value: Decimal
+    projected_holdings_value: Decimal
+    projected_deposit_value: Decimal
+    projected_total_value: Decimal
+
+
+class ProjectionPoint(BaseModel):
+    date: date
+    label: str
+    total_value: Decimal
+    accounts: list[ProjectionAccountValue]
+
+
+class PortfolioProjectionResponse(BaseModel):
+    base_currency: Currency
+    as_of: datetime
+    target_date: date
+    current_net_worth: Decimal
+    projected_net_worth: Decimal
+    estimated_change: Decimal
+    accounts: list[ProjectionAccountValue]
+    timeline: list[ProjectionPoint]
+    warnings: list[str]
 
 
 class MarketRefreshResponse(BaseModel):

@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.calculations import (
+    compound_growth_factor,
     fixed_deposit_value,
     generate_vesting_schedule,
     goal_progress,
@@ -99,7 +100,10 @@ from app.schemas import (
     MarketSymbolSearchResult,
     PolicyResponse,
     PolicyUpdate,
+    PortfolioProjectionResponse,
     ProfileUpdate,
+    ProjectionAccountValue,
+    ProjectionPoint,
     RecommendationRequest,
     RecommendationResponse,
     RegisterRequest,
@@ -545,6 +549,16 @@ async def create_holding(
             quantity=payload.quantity,
             average_cost=average_cost_in_quote_currency,
             purchase_date=payload.purchase_date,
+            risk_tier=payload.risk_tier or ("X" if instrument.instrument_type == "ETF" else "Y"),
+            expected_annual_return=(
+                payload.expected_annual_return
+                if payload.expected_annual_return is not None
+                else (
+                    Decimal("0.06")
+                    if instrument.instrument_type == "ETF"
+                    else Decimal("0.05")
+                )
+            ),
             funding_cost=funding_cost,
         )
         session.add(holding)
@@ -574,6 +588,10 @@ async def create_holding(
             int(weighted_purchase_ordinal.to_integral_value(rounding=ROUND_HALF_UP))
         )
         holding.funding_cost += funding_cost
+        if payload.risk_tier is not None:
+            holding.risk_tier = payload.risk_tier
+        if payload.expected_annual_return is not None:
+            holding.expected_annual_return = payload.expected_annual_return
 
     funding_subaccount.cash_balance -= funding_cost
     session.add(
@@ -818,6 +836,17 @@ async def initialize_portfolio(
                 quantity=holding_request.quantity,
                 average_cost=average_cost_in_quote_currency,
                 purchase_date=holding_request.purchase_date,
+                risk_tier=holding_request.risk_tier
+                or ("X" if holding_request.instrument_type == "ETF" else "Y"),
+                expected_annual_return=(
+                    holding_request.expected_annual_return
+                    if holding_request.expected_annual_return is not None
+                    else (
+                        Decimal("0.06")
+                        if holding_request.instrument_type == "ETF"
+                        else Decimal("0.05")
+                    )
+                ),
                 funding_cost=ZERO,
             )
         )
@@ -937,6 +966,10 @@ def update_holding(
     holding.average_cost = updated_native_average_cost
     if payload.purchase_date is not None:
         holding.purchase_date = payload.purchase_date
+    if payload.risk_tier is not None:
+        holding.risk_tier = payload.risk_tier
+    if payload.expected_annual_return is not None:
+        holding.expected_annual_return = payload.expected_annual_return
     session.commit()
 
 
@@ -2563,6 +2596,13 @@ def dashboard(
         gross_current_value = _to_base(
             native_value, quote.currency, base_currency, usd_per_eur, fx_rates
         )
+        cost_basis_base = _to_base(
+            holding.quantity * holding.average_cost,
+            instrument.currency,
+            base_currency,
+            usd_per_eur,
+            fx_rates,
+        )
         taxable_gain = max(
             ZERO,
             native_value - holding.quantity * holding.average_cost,
@@ -2576,6 +2616,12 @@ def dashboard(
             fx_rates,
         )
         current_value = gross_current_value - sale_tax
+        estimated_gain = current_value - cost_basis_base
+        estimated_gain_percent = (
+            (estimated_gain * Decimal(100) / cost_basis_base).quantize(Decimal("0.01"))
+            if cost_basis_base > ZERO
+            else ZERO
+        )
         holding_values_by_id[holding.id] = current_value
         values_by_class[instrument.asset_class.value] += current_value
         gross_holdings_by_account[account.id] = (
@@ -2605,11 +2651,15 @@ def dashboard(
                 symbol=instrument.symbol,
                 name=instrument.name,
                 account_name=account.display_name,
+                exchange=instrument.exchange,
+                mic_code=instrument.mic,
                 asset_class=instrument.asset_class,
                 instrument_type=instrument.instrument_type,
                 quantity=holding.quantity,
                 average_cost=holding.average_cost,
                 purchase_date=holding.purchase_date,
+                risk_tier=holding.risk_tier,
+                expected_annual_return=holding.expected_annual_return,
                 funding_currency=(
                     funding_subaccount.currency if funding_subaccount is not None else None
                 ),
@@ -2631,6 +2681,9 @@ def dashboard(
                 ),
                 market_value=round_money(current_value),
                 gross_market_value=round_money(gross_current_value),
+                cost_basis_value=round_money(cost_basis_base),
+                estimated_gain=round_money(estimated_gain),
+                estimated_gain_percent=estimated_gain_percent,
                 estimated_sale_tax=round_money(sale_tax),
                 estimated_tax_rate=sale_tax_rate,
                 base_currency=base_currency,
@@ -3093,6 +3146,175 @@ def dashboard(
             target_weights=_target_weights(policy),
         ),
     }
+
+
+def portfolio_projection(
+    session: Session,
+    user_id: uuid.UUID,
+    target_date: date,
+    requested_currency: Currency | None = None,
+) -> PortfolioProjectionResponse:
+    user = _get_user(session, user_id)
+    today = date.today()
+    if target_date <= today:
+        raise HTTPException(status_code=422, detail="Choose a future projection date")
+    maximum_date = add_months(today, 40 * 12)
+    if target_date > maximum_date:
+        raise HTTPException(
+            status_code=422,
+            detail="Projection dates can be at most 40 years in the future.",
+        )
+
+    snapshot = dashboard(session, user.id, requested_currency)
+    base_currency = snapshot["base_currency"]
+    usd_per_eur = user.usd_per_eur
+    fx_rates = _fx_matrix(session, user)
+    current_accounts = snapshot["account_wealth"]
+    holdings = snapshot["holdings"]
+    deposits = list(session.scalars(select(FixedDeposit).where(FixedDeposit.user_id == user.id)))
+
+    def project_at(projection_date: date) -> list[ProjectionAccountValue]:
+        years = Decimal((projection_date - today).days) / Decimal(365)
+        cash_by_account = {
+            account.id: account.cash_value for account in current_accounts
+        }
+        holding_by_account: dict[uuid.UUID, Decimal] = {}
+        for holding in holdings:
+            growth_factor = compound_growth_factor(
+                holding.expected_annual_return,
+                years,
+            )
+            future_gross_native = holding.quantity * holding.price * growth_factor
+            future_gross_base = _to_base(
+                future_gross_native,
+                holding.price_currency,
+                base_currency,
+                usd_per_eur,
+                fx_rates,
+            )
+            cost_basis_base = _to_base(
+                holding.quantity * holding.average_cost,
+                holding.price_currency,
+                base_currency,
+                usd_per_eur,
+                fx_rates,
+            )
+            future_tax = max(ZERO, future_gross_base - cost_basis_base) * Decimal("0.03")
+            projected_value = future_gross_base - future_tax
+            holding_by_account[holding.account_id] = (
+                holding_by_account.get(holding.account_id, ZERO) + projected_value
+            )
+
+        deposit_by_account: dict[uuid.UUID, Decimal] = {}
+        for deposit in deposits:
+            accrual_date = min(projection_date, deposit.maturity_date)
+            value_at_accrual_date = fixed_deposit_value(
+                deposit.principal,
+                deposit.annual_rate,
+                deposit.start_date,
+                accrual_date,
+                deposit.compounding,
+                deposit.rate_basis,
+            )
+            deposit_by_account[deposit.account_id] = (
+                deposit_by_account.get(deposit.account_id, ZERO)
+                + _to_base(
+                    value_at_accrual_date,
+                    deposit.currency,
+                    base_currency,
+                    usd_per_eur,
+                    fx_rates,
+                )
+            )
+
+        result: list[ProjectionAccountValue] = []
+        for account in current_accounts:
+            projected_cash = cash_by_account.get(account.id, ZERO)
+            projected_holdings = holding_by_account.get(account.id, ZERO)
+            projected_deposits = deposit_by_account.get(account.id, ZERO)
+            result.append(
+                ProjectionAccountValue(
+                    account_id=account.id,
+                    account_name=account.display_name,
+                    current_value=account.total_after_tax_value,
+                    projected_cash_value=round_money(projected_cash),
+                    projected_holdings_value=round_money(projected_holdings),
+                    projected_deposit_value=round_money(projected_deposits),
+                    projected_total_value=round_money(
+                        projected_cash + projected_holdings + projected_deposits
+                    ),
+                )
+            )
+        return result
+
+    dates = [today]
+    year_index = 1
+    while add_months(today, year_index * 12) < target_date:
+        dates.append(add_months(today, year_index * 12))
+        year_index += 1
+    if dates[-1] != target_date:
+        dates.append(target_date)
+
+    timeline: list[ProjectionPoint] = []
+    for point_date in dates:
+        account_values = project_at(point_date)
+        timeline.append(
+            ProjectionPoint(
+                date=point_date,
+                label=(
+                    point_date.strftime("%Y")
+                    if point_date.month == today.month
+                    else point_date.strftime("%b %Y")
+                ),
+                total_value=round_money(
+                    sum(
+                        (account.projected_total_value for account in account_values),
+                        ZERO,
+                    )
+                ),
+                accounts=account_values,
+            )
+        )
+
+    projected_accounts = timeline[-1].accounts
+    projected_total = sum(
+        (account.projected_total_value for account in projected_accounts),
+        ZERO,
+    )
+    return PortfolioProjectionResponse(
+        base_currency=base_currency,
+        as_of=datetime.now(UTC),
+        target_date=target_date,
+        current_net_worth=snapshot["totals"]["net_worth"],
+        projected_net_worth=round_money(projected_total),
+        estimated_change=round_money(projected_total - snapshot["totals"]["net_worth"]),
+        accounts=projected_accounts,
+        timeline=timeline,
+        warnings=[
+            (
+                "Illustrative deterministic scenario, not a prediction or guarantee. "
+                "Annual returns are user-editable and not inferred from historical volatility. "
+                "Existing positions start at a 5% nominal assumption."
+            ),
+            (
+                "Stock/ETF assumptions are nominal total returns (including reinvested dividends) "
+                "in listing currency. Current FX rates are held constant."
+            ),
+            (
+                "The model applies the current 3% estimate to positive projected holding gains. "
+                "Cash stays flat; deposits accrue to maturity and are not reinvested."
+            ),
+            (
+                "Unvested awards, future cash-flow forecasts, and additional contributions "
+                "are excluded."
+            ),
+            (
+                "Risk tiers are qualitative placeholders: ETFs default to X and individual "
+                "stocks to Y. No return distribution, volatility, or probability of loss is "
+                "calculated."
+            ),
+        ],
+    )
 
 
 def list_cash_flows(session: Session, user_id: uuid.UUID, months: int = 12) -> list[FlowResponse]:

@@ -1,6 +1,6 @@
 import json
 from collections.abc import Generator
-from datetime import UTC
+from datetime import UTC, date
 from typing import Annotated
 from uuid import UUID
 
@@ -43,6 +43,7 @@ from app.schemas import (
     MarketSymbolSearchResponse,
     PolicyResponse,
     PolicyUpdate,
+    PortfolioProjectionResponse,
     ProfileUpdate,
     RecommendationRequest,
     RecommendationResponse,
@@ -76,6 +77,7 @@ from app.services import (
     login_user,
     logout_user,
     market_data_status,
+    portfolio_projection,
     preview_recommendation,
     record_extra_cash,
     refresh_market_data,
@@ -200,6 +202,15 @@ def create_app(
         currency: Currency | None = None,
     ) -> dict:
         return dashboard(session, current_user.id, currency)
+
+    @app.get("/api/projections/portfolio", response_model=PortfolioProjectionResponse)
+    def get_portfolio_projection(
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+        target_date: date,
+        currency: Currency | None = None,
+    ) -> PortfolioProjectionResponse:
+        return portfolio_projection(session, current_user.id, target_date, currency)
 
     @app.get("/api/accounts", response_model=list[AccountSummary])
     def get_accounts(

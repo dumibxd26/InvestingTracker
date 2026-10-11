@@ -423,6 +423,8 @@ def test_search_and_add_holding_use_provider_results_and_quote_fx(monkeypatch, t
                 "quantity": "3",
                 "average_cost": "350",
                 "purchase_date": "2024-06-15",
+                "risk_tier": "Z",
+                "expected_annual_return": "0.10",
             },
         )
         updated_dashboard = client.get("/api/dashboard")
@@ -462,18 +464,27 @@ def test_search_and_add_holding_use_provider_results_and_quote_fx(monkeypatch, t
     assert Decimal(dashboard.json()["holdings"][0]["gross_market_value"]) == Decimal("640.00")
     assert Decimal(dashboard.json()["holdings"][0]["estimated_sale_tax"]) == Decimal("4.80")
     assert Decimal(dashboard.json()["holdings"][0]["market_value"]) == Decimal("635.20")
+    assert Decimal(dashboard.json()["holdings"][0]["estimated_gain"]) == Decimal("155.20")
+    assert dashboard.json()["holdings"][0]["exchange"] == "NASDAQ"
+    assert dashboard.json()["holdings"][0]["mic_code"] == "XNAS"
     assert dashboard.json()["holdings"][0]["quote_source"] == "TWELVE_DATA"
     assert Decimal(dashboard.json()["totals"]["available_cash"]) == Decimal("2120.00")
     assert update.status_code == 204, update.text
     assert Decimal(updated_dashboard.json()["holdings"][0]["quantity"]) == Decimal("3")
     assert Decimal(updated_dashboard.json()["holdings"][0]["average_cost"]) == Decimal("350")
     assert updated_dashboard.json()["holdings"][0]["purchase_date"] == "2024-06-15"
+    assert updated_dashboard.json()["holdings"][0]["risk_tier"] == "Z"
+    assert (
+        Decimal(updated_dashboard.json()["holdings"][0]["expected_annual_return"])
+        == Decimal("0.10")
+    )
     assert (
         Decimal(updated_dashboard.json()["holdings"][0]["gross_market_value"])
         == Decimal("960.00")
     )
     assert Decimal(updated_dashboard.json()["holdings"][0]["estimated_sale_tax"]) == Decimal("3.60")
     assert Decimal(updated_dashboard.json()["holdings"][0]["market_value"]) == Decimal("956.40")
+    assert Decimal(updated_dashboard.json()["holdings"][0]["estimated_gain"]) == Decimal("116.40")
     assert Decimal(updated_dashboard.json()["totals"]["invested_assets"]) == Decimal("956.40")
     assert Decimal(updated_dashboard.json()["totals"]["net_worth"]) == Decimal("2716.40")
     assert Decimal(updated_dashboard.json()["totals"]["available_cash"]) == Decimal("1760.00")
@@ -1878,3 +1889,95 @@ def test_goal_links_account_selected_assets_and_visualization_only_budget(tmp_pa
     assert Decimal(dashboard_after_update["goals"][0]["linked_asset_value"]) == 0
     assert dashboard_after_update["holdings"][0]["assigned_goal_id"] is None
     assert dashboard_after_update["deposits"][0]["assigned_goal_id"] is None
+
+
+def test_portfolio_projection_uses_position_return_assumption_and_account_values(
+    tmp_path,
+) -> None:
+    target_date = date.today() + timedelta(days=365)
+    with create_test_client(tmp_path) as client:
+        brokerage = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Projection brokerage",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "0",
+            },
+        )
+        bank = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Projection bank",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "3000",
+            },
+        )
+        assert bank.status_code == 201, bank.text
+        user_id = UUID(client.get("/api/auth/me").json()["id"])
+        with client.app.state.session_factory() as session:
+            instrument = Instrument(
+                symbol="PROJ",
+                name="Projection Corp",
+                asset_class=AssetClass.EQUITIES,
+                currency=Currency.EUR,
+                mic="XNAS",
+                exchange="NASDAQ",
+                instrument_type="STOCK",
+                is_demo=False,
+            )
+            session.add(instrument)
+            session.flush()
+            holding = Holding(
+                user_id=user_id,
+                account_id=UUID(brokerage.json()["id"]),
+                funding_subaccount_id=None,
+                instrument_id=instrument.id,
+                quantity=Decimal("2"),
+                average_cost=Decimal("40"),
+                purchase_date=date(2025, 1, 1),
+                risk_tier="Z",
+                expected_annual_return=Decimal("0.10"),
+                funding_cost=Decimal("0"),
+            )
+            session.add(holding)
+            session.flush()
+            session.add(
+                MarketPriceCache(
+                    instrument_id=instrument.id,
+                    price=Decimal("100"),
+                    currency=Currency.EUR,
+                    source="TEST",
+                    feed_type="QUOTE",
+                    observed_at=datetime.now(UTC),
+                )
+            )
+            session.commit()
+
+        response = client.get(
+            "/api/projections/portfolio",
+            params={"target_date": target_date.isoformat(), "currency": "EUR"},
+        )
+        past_date = client.get(
+            "/api/projections/portfolio",
+            params={"target_date": date.today().isoformat()},
+        )
+
+    assert response.status_code == 200, response.text
+    projection = response.json()
+    assert projection["target_date"] == target_date.isoformat()
+    assert Decimal(projection["current_net_worth"]) == Decimal("3196.40")
+    assert Decimal(projection["projected_net_worth"]) == Decimal("3215.80")
+    assert Decimal(projection["estimated_change"]) == Decimal("19.40")
+    accounts = {account["account_name"]: account for account in projection["accounts"]}
+    assert Decimal(accounts["Projection bank"]["projected_cash_value"]) == Decimal("3000.00")
+    assert Decimal(accounts["Projection brokerage"]["projected_holdings_value"]) == Decimal(
+        "215.80"
+    )
+    assert projection["timeline"][0]["date"] == date.today().isoformat()
+    assert projection["timeline"][-1]["date"] == target_date.isoformat()
+    assert any("not a prediction" in warning for warning in projection["warnings"])
+    assert past_date.status_code == 422
