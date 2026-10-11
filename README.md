@@ -20,11 +20,13 @@ For this personal MVP, Python makes the calculation and AI integration layers st
 - Username/password application account creation, sign-in/out, and per-user portfolios.
 - Blank personal workspaces with profile-specific display name, base currency, and cached provider FX rates or an optional manual USD-per-EUR reference.
 - Responsive dashboard with separate tracked wealth, invested assets, cash, fixed deposits, and unvested compensation.
-- Manually managed brokerage, bank, savings, and employer-plan account registry; opening cash persists in PostgreSQL.
+- Manually managed brokerage, bank, savings, and employer-plan account registry; opening cash persists in PostgreSQL as the initial currency sub-account balance.
+- Multi-currency EUR/USD/RON cash sub-accounts under each bank or broker. Existing account currency and opening cash are migrated into its primary sub-account.
+- Guided initial portfolio setup to enter multiple institutions and current currency balances plus already-owned stock/ETF positions in one atomic save. Average cost defaults to the instrument's listing currency and can be overridden.
 - Provider-backed stock/ETF search and holdings entry; manually refreshable Twelve Data quotes and EUR/USD, EUR/RON, and USD/RON FX rates. Automatic hourly refresh is disabled.
-- User-created goals where the user supplies the purpose, currency, amount, priority, risk comfort, deadline flexibility, and contribution plan.
+- User-created goals where the user supplies the purpose, currency, amount, priority, risk comfort, deadline flexibility, and contribution plan; active goals can be edited or archived from Goals & plan.
 - One-time and recurring salary, bonus, bill, windfall, dividend, interest, and contribution forecasts.
-- One-time “extra cash received” entries that update the selected owned cash account and are protected against duplicate retries.
+- One-time “extra cash received” entries that update the selected owned currency sub-account and are protected against duplicate retries.
 - Priority-first, contribution-proportional, and fixed-percentage goal funding.
 - No allocation rule or asset target weights are preloaded; the user must set them before generating an investment preview.
 - Deterministic, buy-only asset-class allocation preview with reserve protection and a ten-minute preview expiry. It does not create cash flows or place trades.
@@ -88,13 +90,16 @@ API tests use isolated SQLite temporary databases; the Docker stack uses Postgre
 | `GET /api/profile` / `PUT /api/profile` | Read or update display name, base currency, and optional manual FX reference |
 | `GET /api/dashboard?currency=EUR` | Signed-in user's aggregated snapshot |
 | `GET /api/accounts` / `POST /api/accounts` | List or add the signed-in user's manual financial accounts |
+| `POST /api/accounts/{id}/subaccounts` | Add a EUR, USD, or RON cash sub-account to an institution |
+| `POST /api/portfolio/initialize` | Atomically initialize institutions and current currency balances plus already-owned stock/ETF positions without charging their costs again |
 | `DELETE /api/accounts/{id}` | Remove an account and its balance/assets from the tracker while preserving linked cash-flow history |
 | `GET /api/market/status` | Check whether provider-backed market data is configured |
 | `GET /api/market/search?q=MSFT` | Search provider listings for stocks and ETFs |
-| `POST /api/holdings` | Add a selected stock/ETF listing and record its initial quote |
-| `PUT /api/holdings/{id}` / `DELETE /api/holdings/{id}` | Update share quantity and average cost, or remove a tracked position |
+| `POST /api/holdings` | Add a selected stock/ETF listing, record its quote, and convert/debit the purchase cost from the chosen EUR/USD/RON sub-account |
+| `PUT /api/holdings/{id}` / `DELETE /api/holdings/{id}` | Update a position and apply the converted cost-basis difference, or remove it and restore its recorded funding-currency cost |
 | `POST /api/market/refresh` | Manually refresh held symbols and EUR/USD/RON FX rates |
 | `GET /api/goals` / `POST /api/goals` | List or add a goal |
+| `PUT /api/goals/{id}` / `DELETE /api/goals/{id}` | Update a goal or archive it from the active plan |
 | `PUT /api/goals/funding-shares` | Save fixed goal shares |
 | `GET /api/policy` / `PUT /api/policy` | Read or update reserve, target mix, and funding rule |
 | `GET /api/cash-flows?months=12` | Confirmed records and dated forecasts over a 1–24 month window |
@@ -127,14 +132,18 @@ The default Compose port bindings are loopback-only. Do not expose this service 
 
 - The application no longer seeds demo users or sample financial records. Historical sample rows from an older shared profile are preserved but inaccessible through the new user-scoped APIs.
 - New profiles start without a funding rule, asset-class weights, reserve target, balances, or goals; the user chooses these before an allocation preview is enabled.
-- Provider quotes are informational marks and may be delayed according to the selected provider plan and listing. Quotes and FX update only after a manual refresh; there is no automatic hourly job. They are not executable prices.
-- Grant “after-tax” values are a simple user-editable-rate estimate, not jurisdictional tax advice. Option values use intrinsic value only.
+- Provider quotes are informational marks and may be delayed according to the selected provider plan and listing. Quotes are fetched on explicit symbol search/add and manual refresh; FX and existing quote marks do not refresh automatically. They are not executable prices.
+- The Overview breaks wealth down by account: tracked cash, gross owned holdings, estimated tax on gains, after-tax holdings, fixed-deposit accrual, and account total. The account total excludes unvested awards and future income; those remain separate.
+- User-entered named RSU/option awards support either generated duration/cliff/interval schedules or custom date-and-share tranches; custom awards can omit an unknown original grant date. Unvested value uses the latest cached quote (RSUs: unvested units × quote; options: unvested units × max(quote − strike, 0)); manually refresh quotes to update marks. Tranches whose availability date has passed are treated as vested and stop contributing to unvested value. Unvested awards are excluded from total tracked wealth and shown separately; future salary/bonus forecasts are also excluded until credited as tracked cash. These estimates are not owned-share balances or P&L.
+- Grant tax-at-vest assumptions are separate from configurable short-/long-term sale-tax scenarios. Sale scenarios apply simple percentage haircuts to modeled stock value; they do not calculate taxable capital gains. These are user assumptions, not jurisdictional tax advice. Option values use intrinsic value only.
 - Goal progress is entered independently and is **not linked to positions**; it must not be interpreted as a reconciled account balance.
-- Cash-flow schedules create dated forecasts only. They never confirm a receipt, change account balances, or become investable cash; occurrences are generated deterministically within the requested horizon.
-- Manual account creation stores account metadata and opening cash directly, not as a complete double-entry transaction ledger. It does not connect to the institution or import holdings.
-- Removing a manual account from the tracker deletes its linked holdings and fixed deposits, removes its tracked cash balance, and preserves cash-flow history with the account link cleared. It does not close or modify any real bank or broker account.
+- Cash-flow schedules create dated forecasts unless salary or bonus is explicitly set to auto-post to a selected liquid account and currency wallet. Due auto-posts are idempotent and update Northstar's tracked cash balance the next time the dashboard or cash-flow ledger refreshes on or after the scheduled date; missed dates are caught up. This is bookkeeping only—not a bank transfer or payroll confirmation. Variable or uncertain bonuses should remain forecast-only until known.
+- Manual account creation stores institution metadata and sub-account balances directly, not as a complete double-entry transaction ledger. It does not connect to the institution or import holdings.
+- Removing a manual account from the tracker deletes its linked holdings and fixed deposits, removes its tracked cash balance, stops its active auto-post schedules, and preserves cash-flow history with the account link cleared. It does not close or modify any real bank or broker account.
+- Adding a stock/ETF models a local purchase: `quantity × average_cost` in the listing currency is converted using available FX and debited from the user-selected EUR/USD/RON broker sub-account. The tracker records the actual funding-currency amount for later edits/removal and refuses purchases with insufficient cash. This changes only Northstar's records; it does not submit a trade to a broker.
 - Recording extra received cash atomically increments the selected liquid account and creates a confirmed cash-flow record. It is a cash receipt, not broker reconciliation.
-- The prototype’s “unrealized gain” uses one average-cost figure and the latest cached quote/FX mark, not tax lots or historical acquisition FX.
+- The prototype does not report realized or unrealized investment profit/loss. Average cost and purchase date also support the illustrative positive-gain tax estimate below.
+- Positions store one average purchase date and average cost; older holdings are assumed purchased on 2025-01-01 unless edited. The displayed estimated after-tax position value subtracts 3% of positive market gain over average cost. This is an illustrative haircut, not realized P&L, lot-level accounting, or tax advice. Separate MSFT grant sale-rate scenarios use the grant date, the stated short-/long-term holding period, and the grant-specific percentages.
 - Allocation previews are asset-class-level, long-only, buy-only, and require user judgement. They do not select individual securities or submit orders.
 - Do not use these calculations as personalized investment advice. Regulatory and tax treatment require jurisdiction-specific review before distribution.
 

@@ -1,18 +1,29 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Search, X } from "lucide-react";
 import { ApiError, api } from "../api";
-import type { AccountSummary, MarketSymbol } from "../types";
+import { amount, convertAmount } from "../format";
+import type { AccountSummary, Currency, MarketFxRate, MarketSymbol } from "../types";
 
 interface AddHoldingDialogProps {
   accounts: AccountSummary[];
   marketDataConfigured: boolean;
+  marketFxRates: MarketFxRate[];
+  usdPerEur: string | null;
   onClose: () => void;
   onCreated: () => Promise<void>;
+}
+
+function localDateValue(): string {
+  const now = new Date();
+  now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+  return now.toISOString().slice(0, 10);
 }
 
 export function AddHoldingDialog({
   accounts,
   marketDataConfigured,
+  marketFxRates,
+  usdPerEur,
   onClose,
   onCreated,
 }: AddHoldingDialogProps) {
@@ -23,9 +34,28 @@ export function AddHoldingDialog({
   const [results, setResults] = useState<MarketSymbol[]>([]);
   const [selected, setSelected] = useState<MarketSymbol | null>(null);
   const [accountId, setAccountId] = useState(eligibleAccounts[0]?.id ?? "");
+  const [subaccountId, setSubaccountId] = useState("");
   const [searching, setSearching] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [averageCost, setAverageCost] = useState("");
+  const [averageCostCurrency, setAverageCostCurrency] = useState<Currency | null>(null);
+  const [purchaseDate, setPurchaseDate] = useState(localDateValue());
+  const selectedAccount = eligibleAccounts.find((account) => account.id === accountId);
+  const selectedSubaccount = selectedAccount?.subaccounts.find(
+    (subaccount) => subaccount.id === subaccountId,
+  );
+  const estimatedDebit =
+    selected && selectedSubaccount && quantity && averageCost
+      ? convertAmount(
+          Number(quantity) * Number(averageCost),
+          averageCostCurrency ?? selected.currency,
+          selectedSubaccount.currency,
+          marketFxRates,
+          usdPerEur,
+        )
+      : null;
 
   useEffect(() => {
     const normalized = query.trim();
@@ -58,22 +88,24 @@ export function AddHoldingDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selected || !accountId) {
-      setError("Choose a market result and an investment account.");
+    if (!selected || !selectedAccount || !selectedSubaccount) {
+      setError("Choose a market result, broker account, and funding wallet.");
       return;
     }
     setSaving(true);
     setError("");
-    const form = new FormData(event.currentTarget);
     try {
       await api.addHolding({
         account_id: accountId,
+        subaccount_id: subaccountId,
         symbol: selected.symbol,
         mic_code: selected.mic_code,
         exchange: selected.exchange,
         instrument_type: selected.instrument_type,
-        quantity: String(form.get("quantity") ?? ""),
-        average_cost: String(form.get("averageCost") ?? ""),
+        quantity,
+        average_cost: averageCost,
+        average_cost_currency: averageCostCurrency ?? selected.currency,
+        purchase_date: purchaseDate,
       });
       await onCreated();
       onClose();
@@ -107,8 +139,9 @@ export function AddHoldingDialog({
           </button>
         </div>
         <p className="modal-intro">
-          Search by company or ticker, choose the exchange listing, then enter shares and your
-          average cost per share. A quote is fetched when you add the position.
+          Search by company or ticker, enter your shares and average cost, then choose a wallet.
+          Average-cost currency defaults to the listing currency, but you can change it. The cost
+          basis is converted to the chosen wallet currency for the balance check and debit.
         </p>
         {!marketDataConfigured ? (
           <div className="inline-error" role="status">
@@ -126,6 +159,7 @@ export function AddHoldingDialog({
                   value={selected ? `${selected.symbol} · ${selected.name}` : query}
                   onChange={(event) => {
                     setSelected(null);
+                    setAverageCostCurrency(null);
                     setQuery(event.target.value);
                   }}
                   placeholder="Company or ticker · e.g. Microsoft or MSFT"
@@ -156,7 +190,24 @@ export function AddHoldingDialog({
                     key={`${result.symbol}-${result.mic_code ?? result.exchange}`}
                     onClick={() => {
                       setSelected(result);
+                      setAverageCostCurrency(result.currency);
                       setQuery(result.symbol);
+                      const matchingAccount =
+                        eligibleAccounts.find((account) =>
+                          account.subaccounts.some(
+                            (subaccount) => subaccount.currency === result.currency,
+                          ),
+                        ) ?? eligibleAccounts.find((account) => account.subaccounts.length > 0);
+                      if (matchingAccount) {
+                        setAccountId(matchingAccount.id);
+                        setSubaccountId(
+                          matchingAccount.subaccounts.find(
+                            (subaccount) => subaccount.currency === result.currency,
+                          )?.id ?? matchingAccount.subaccounts[0]?.id ?? "",
+                        );
+                      } else {
+                        setSubaccountId("");
+                      }
                       setResults([]);
                       setError("");
                     }}
@@ -189,14 +240,39 @@ export function AddHoldingDialog({
                     <span>Investment account</span>
                     <select
                       value={accountId}
-                      onChange={(event) => setAccountId(event.target.value)}
+                      onChange={(event) => {
+                        const nextAccountId = event.target.value;
+                        const nextAccount = eligibleAccounts.find(
+                          (account) => account.id === nextAccountId,
+                        );
+                        setAccountId(nextAccountId);
+                        setSubaccountId(nextAccount?.subaccounts[0]?.id ?? "");
+                      }}
                       required
                     >
                       {eligibleAccounts.map((account) => (
                         <option key={account.id} value={account.id}>
-                          {account.display_name} · {account.currency}
+                          {account.display_name} · {account.subaccounts.map((wallet) => wallet.currency).join("/")}
                         </option>
                       ))}
+                    </select>
+                  </label>
+                  <label className="form-field">
+                    <span>Funded from</span>
+                    <select
+                      value={subaccountId}
+                      onChange={(event) => setSubaccountId(event.target.value)}
+                      required
+                      disabled={!selectedAccount?.subaccounts.length}
+                    >
+                      {selectedAccount?.subaccounts.map((subaccount) => (
+                        <option key={subaccount.id} value={subaccount.id}>
+                          {subaccount.currency} cash · {amount(subaccount.cash_balance, subaccount.currency, 2)}
+                        </option>
+                      ))}
+                      {!selectedAccount?.subaccounts.length && (
+                        <option value="">Add a currency sub-account first</option>
+                      )}
                     </select>
                   </label>
                   <label className="form-field">
@@ -209,21 +285,58 @@ export function AddHoldingDialog({
                       step="any"
                       required
                       placeholder="e.g. 2.5"
+                      value={quantity}
+                      onChange={(event) => setQuantity(event.target.value)}
                     />
                   </label>
                 </div>
                 <label className="form-field">
-                  <span>Average cost per share ({selected.currency})</span>
+                  <span>Average cost per share</span>
+                  <div className="average-cost-input">
+                    <input
+                      type="number"
+                      min="0.00000001"
+                      max="100000000"
+                      step="any"
+                      required
+                      placeholder="Your average purchase price"
+                      value={averageCost}
+                      onChange={(event) => setAverageCost(event.target.value)}
+                    />
+                    <select
+                      aria-label="Average cost currency"
+                      value={averageCostCurrency ?? selected.currency}
+                      onChange={(event) =>
+                        setAverageCostCurrency(event.target.value as Currency)
+                      }
+                    >
+                      {(["EUR", "USD", "RON"] as Currency[]).map((currency) => (
+                        <option value={currency} key={currency}>{currency}</option>
+                      ))}
+                    </select>
+                  </div>
+                </label>
+                <label className="form-field">
+                  <span>Purchase date <small>tax estimate basis</small></span>
                   <input
-                    name="averageCost"
-                    type="number"
-                    min="0.00000001"
-                    max="100000000"
-                    step="any"
+                    type="date"
                     required
-                    placeholder="Your average purchase price"
+                    value={purchaseDate}
+                    onChange={(event) => setPurchaseDate(event.target.value)}
                   />
                 </label>
+                {(!selectedAccount || selectedAccount.subaccounts.length === 0) && (
+                  <div className="inline-error" role="status">
+                    Add a currency sub-account to this broker before recording this purchase.
+                  </div>
+                )}
+                <p className="quiet-copy">
+                  {estimatedDebit !== null && selectedSubaccount
+                    ? `Estimated debit: ${amount(String(estimatedDebit), selectedSubaccount.currency, 2)} from the ${selectedSubaccount.currency} wallet.`
+                    : selectedSubaccount
+                      ? `The ${selected.currency} purchase cost will be converted to ${selectedSubaccount.currency} when saved.`
+                      : "Choose a funding wallet."}
+                </p>
               </>
             )}
             {eligibleAccounts.length === 0 && (
@@ -239,7 +352,14 @@ export function AddHoldingDialog({
               <button
                 className="button button-primary"
                 type="submit"
-                disabled={saving || !selected || eligibleAccounts.length === 0}
+                disabled={
+                  saving ||
+                  !selected ||
+                  eligibleAccounts.length === 0 ||
+                  !selectedSubaccount ||
+                  !quantity ||
+                  !averageCost
+                }
               >
                 {saving ? "Adding position…" : "Add holding"}
               </button>

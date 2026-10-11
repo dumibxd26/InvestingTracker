@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.calculations import (
     fixed_deposit_value,
+    generate_vesting_schedule,
     goal_progress,
     rebalance_with_contribution,
     round_money,
@@ -23,9 +24,11 @@ from app.market_data import (
     PROVIDER_NAME,
     ExchangeRateQuote,
     MarketDataProviderError,
+    MarketQuote,
     TwelveDataClient,
 )
 from app.models import (
+    AccountSubaccount,
     AccountType,
     AllocationPolicy,
     AssetClass,
@@ -40,6 +43,7 @@ from app.models import (
     FundingRule,
     Goal,
     GoalType,
+    GrantType,
     Holding,
     Instrument,
     LoginSession,
@@ -55,7 +59,10 @@ from app.models import (
 )
 from app.schemas import (
     AccountCreate,
+    AccountSubaccountCreate,
+    AccountSubaccountSummary,
     AccountSummary,
+    AccountWealthSummary,
     AllocationSummary,
     AuthResponse,
     BucketAllocation,
@@ -70,10 +77,14 @@ from app.schemas import (
     GoalCreate,
     GoalResponse,
     GoalSummary,
+    GoalUpdate,
     HoldingCreate,
     HoldingCreateResponse,
     HoldingSummary,
     HoldingUpdate,
+    InitialPortfolioHolding,
+    InitialPortfolioRequest,
+    InitialPortfolioResponse,
     LoginRequest,
     MarketDataStatusResponse,
     MarketFXRateSummary,
@@ -86,7 +97,9 @@ from app.schemas import (
     RecommendationResponse,
     RegisterRequest,
     UserProfileResponse,
+    VestingGrantCreate,
     VestingSummary,
+    VestingTrancheSummary,
 )
 from app.security import create_access_token, digest_access_token, hash_password, verify_password
 
@@ -210,6 +223,32 @@ def _raise_provider_error(error: MarketDataProviderError) -> None:
     raise HTTPException(status_code=error.status_code, detail=error.detail) from error
 
 
+async def _ensure_fx_conversion(
+    session: Session,
+    client: TwelveDataClient,
+    from_currency: Currency,
+    to_currency: Currency,
+    rates: dict[tuple[Currency, Currency], Decimal],
+) -> None:
+    if _can_convert(from_currency, to_currency, rates):
+        return
+    try:
+        quote = await client.exchange_rate(f"{from_currency.value}/{to_currency.value}")
+    except MarketDataProviderError as error:
+        _raise_provider_error(error)
+    _save_market_fx_quote(session, quote)
+    rates[(quote.base_currency, quote.quote_currency)] = quote.rate
+    rates[(quote.quote_currency, quote.base_currency)] = ONE / quote.rate
+    if not _can_convert(from_currency, to_currency, rates):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"The provider did not return a usable FX rate from "
+                f"{from_currency.value} to {to_currency.value}."
+            ),
+        )
+
+
 def market_data_status() -> MarketDataStatusResponse:
     return MarketDataStatusResponse(
         provider=PROVIDER_NAME,
@@ -237,6 +276,141 @@ async def search_market_symbols(query: str) -> list[MarketSymbolSearchResult]:
     ]
 
 
+async def create_vesting_grant(
+    session: Session, user_id: uuid.UUID, payload: VestingGrantCreate
+) -> uuid.UUID:
+    user = _get_user(session, user_id)
+    client = _market_client()
+    try:
+        quote = await client.quote(payload.symbol, payload.mic_code, payload.exchange)
+    except MarketDataProviderError as error:
+        _raise_provider_error(error)
+
+    fx_rates = _fx_matrix(session, user)
+    await _ensure_fx_conversion(session, client, quote.currency, user.base_currency, fx_rates)
+    symbol = quote.symbol.upper()
+    mic = (quote.mic_code or payload.mic_code or "UNKNOWN").upper()
+    exchange = quote.exchange or payload.exchange or ""
+    instrument = session.scalar(
+        select(Instrument).where(Instrument.symbol == symbol, Instrument.mic == mic)
+    )
+    if instrument is None:
+        instrument = Instrument(
+            symbol=symbol,
+            name=quote.name,
+            asset_class=AssetClass.EQUITIES,
+            currency=quote.currency,
+            mic=mic,
+            exchange=exchange,
+            instrument_type="STOCK",
+            estimated_annual_yield=ZERO,
+            is_demo=False,
+        )
+        session.add(instrument)
+        session.flush()
+    elif (
+        instrument.currency != quote.currency
+        or (instrument.exchange and exchange and instrument.exchange != exchange)
+        or instrument.instrument_type != "STOCK"
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{symbol} is already tracked using a different listing. "
+                "Select its existing stock exchange listing."
+            ),
+        )
+    else:
+        instrument.name = quote.name
+        instrument.exchange = exchange or instrument.exchange
+        instrument.is_demo = False
+
+    grant = VestingGrant(
+        user_id=user.id,
+        instrument_id=instrument.id,
+        grant_type=payload.grant_type,
+        grant_label=payload.grant_label,
+        grant_date=payload.grant_date,
+        total_units=payload.total_units,
+        strike_price=payload.strike_price,
+        strike_currency=quote.currency if payload.strike_price is not None else None,
+        tax_rate_assumption=payload.tax_rate_assumption,
+        short_term_sale_tax_rate=payload.short_term_sale_tax_rate,
+        long_term_sale_tax_rate=payload.long_term_sale_tax_rate,
+        long_term_holding_period_days=payload.long_term_holding_period_days,
+    )
+    session.add(grant)
+    session.flush()
+    grant_id = grant.id
+    if payload.tranches is not None:
+        vesting_schedule = sorted(
+            ((tranche.vest_date, tranche.units) for tranche in payload.tranches),
+            key=lambda tranche: tranche[0],
+        )
+    else:
+        if (
+            payload.grant_date is None
+            or payload.duration_months is None
+            or payload.cliff_months is None
+            or payload.interval_months is None
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Enter either custom vesting periods or a complete standard schedule.",
+            )
+        vesting_schedule = generate_vesting_schedule(
+            payload.total_units,
+            payload.grant_date,
+            payload.duration_months,
+            payload.cliff_months,
+            payload.interval_months,
+        )
+    for vest_date, units in vesting_schedule:
+        session.add(
+            VestingTranche(
+                grant_id=grant.id,
+                vest_date=vest_date,
+                available_date=vest_date,
+                units=units,
+                status=TrancheStatus.SCHEDULED,
+            )
+        )
+    session.add(
+        MarketPriceCache(
+            instrument_id=instrument.id,
+            price=quote.price,
+            currency=quote.currency,
+            source=PROVIDER_NAME,
+            feed_type="QUOTE",
+            observed_at=quote.observed_at,
+            is_market_open=quote.is_market_open,
+        )
+    )
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The equity grant could not be saved because its listing changed concurrently.",
+        ) from error
+    return grant_id
+
+
+def delete_vesting_grant(session: Session, user_id: uuid.UUID, grant_id: uuid.UUID) -> None:
+    grant = session.scalar(
+        select(VestingGrant).where(
+            VestingGrant.id == grant_id,
+            VestingGrant.user_id == user_id,
+        )
+    )
+    if grant is None:
+        raise HTTPException(status_code=404, detail="Equity grant was not found")
+    session.execute(delete(VestingTranche).where(VestingTranche.grant_id == grant.id))
+    session.delete(grant)
+    session.commit()
+
+
 async def create_holding(
     session: Session, user_id: uuid.UUID, payload: HoldingCreate
 ) -> HoldingCreateResponse:
@@ -262,14 +436,54 @@ async def create_holding(
         _raise_provider_error(error)
 
     fx_rates = _fx_matrix(session, user)
-    if not _can_convert(quote.currency, user.base_currency, fx_rates, user.usd_per_eur):
-        try:
-            fx_quote = await client.exchange_rate(
-                f"{quote.currency.value}/{user.base_currency.value}"
-            )
-        except MarketDataProviderError as error:
-            _raise_provider_error(error)
-        _save_market_fx_quote(session, fx_quote)
+    average_cost_currency = payload.average_cost_currency or quote.currency
+    await _ensure_fx_conversion(
+        session, client, average_cost_currency, quote.currency, fx_rates
+    )
+    await _ensure_fx_conversion(
+        session, client, quote.currency, user.base_currency, fx_rates
+    )
+    funding_subaccount = session.scalar(
+        select(AccountSubaccount)
+        .where(
+            AccountSubaccount.id == payload.subaccount_id,
+            AccountSubaccount.account_id == account.id,
+        )
+        .with_for_update()
+    )
+    if funding_subaccount is None:
+        raise HTTPException(
+            status_code=404, detail="The selected cash sub-account was not found"
+        )
+    await _ensure_fx_conversion(
+        session, client, quote.currency, funding_subaccount.currency, fx_rates
+    )
+    average_cost_in_quote_currency = _to_base(
+        payload.average_cost,
+        average_cost_currency,
+        quote.currency,
+        user.usd_per_eur,
+        fx_rates,
+    )
+    purchase_cost = round_money(payload.quantity * average_cost_in_quote_currency)
+    funding_cost = round_money(
+        _to_base(
+            purchase_cost,
+            quote.currency,
+            funding_subaccount.currency,
+            user.usd_per_eur,
+            fx_rates,
+        )
+    )
+    if funding_subaccount.cash_balance < funding_cost:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Insufficient {funding_subaccount.currency.value} cash: "
+                f"the converted purchase cost is {funding_cost:.2f}, but the selected "
+                f"sub-account has {funding_subaccount.cash_balance:.2f}."
+            ),
+        )
 
     symbol = quote.symbol.upper()
     mic = (quote.mic_code or payload.mic_code or "UNKNOWN").upper()
@@ -319,19 +533,42 @@ async def create_holding(
         holding = Holding(
             user_id=user.id,
             account_id=account.id,
+            funding_subaccount_id=funding_subaccount.id,
             instrument_id=instrument.id,
             quantity=payload.quantity,
-            average_cost=payload.average_cost,
+            average_cost=average_cost_in_quote_currency,
+            purchase_date=payload.purchase_date,
+            funding_cost=funding_cost,
         )
         session.add(holding)
         total_quantity = payload.quantity
     else:
+        if (
+            holding.funding_subaccount_id is not None
+            and holding.funding_subaccount_id != funding_subaccount.id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This position is already funded from another currency sub-account.",
+            )
+        if holding.funding_subaccount_id is None:
+            holding.funding_subaccount_id = funding_subaccount.id
         total_quantity = holding.quantity + payload.quantity
+        weighted_purchase_ordinal = (
+            Decimal(holding.purchase_date.toordinal()) * holding.quantity
+            + Decimal(payload.purchase_date.toordinal()) * payload.quantity
+        ) / total_quantity
         holding.average_cost = (
-            holding.quantity * holding.average_cost + payload.quantity * payload.average_cost
+            holding.quantity * holding.average_cost
+            + payload.quantity * average_cost_in_quote_currency
         ) / total_quantity
         holding.quantity = total_quantity
+        holding.purchase_date = date.fromordinal(
+            int(weighted_purchase_ordinal.to_integral_value(rounding=ROUND_HALF_UP))
+        )
+        holding.funding_cost += funding_cost
 
+    funding_subaccount.cash_balance -= funding_cost
     session.add(
         MarketPriceCache(
             instrument_id=instrument.id,
@@ -357,6 +594,266 @@ async def create_holding(
         quantity=total_quantity,
         quote_price=quote.price,
         quote_currency=quote.currency,
+        funding_currency=funding_subaccount.currency,
+        funding_cost=funding_cost,
+    )
+
+
+async def initialize_portfolio(
+    session: Session, user_id: uuid.UUID, request: InitialPortfolioRequest
+) -> InitialPortfolioResponse:
+    user = _get_user(session, user_id)
+    normalized_names = [account.display_name.casefold() for account in request.accounts]
+    existing_names = set(
+        session.scalars(
+            select(func.lower(BrokerAccount.display_name)).where(
+                BrokerAccount.user_id == user.id,
+                func.lower(BrokerAccount.display_name).in_(normalized_names),
+            )
+        )
+    )
+    if existing_names:
+        duplicate_name = next(
+            name for name in request.accounts if name.display_name.casefold() in existing_names
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f'An account named "{duplicate_name.display_name}" already exists.',
+        )
+
+    client = _market_client() if request.holdings else None
+    quote_cache: dict[tuple[str, str, str], MarketQuote] = {}
+    quoted_holdings: list[tuple[InitialPortfolioHolding, MarketQuote, int, Decimal]] = []
+    seen_positions: set[tuple[int, str, str]] = set()
+    fx_rates = _fx_matrix(session, user)
+    fx_quotes: dict[tuple[Currency, Currency], ExchangeRateQuote] = {}
+
+    async def ensure_currency_conversion(
+        from_currency: Currency, to_currency: Currency
+    ) -> None:
+        nonlocal client
+        if _can_convert(from_currency, to_currency, fx_rates, user.usd_per_eur):
+            return
+        pair = (from_currency, to_currency)
+        if pair not in fx_quotes:
+            if client is None:
+                client = _market_client()
+            try:
+                fx_quote = await client.exchange_rate(
+                    f"{from_currency.value}/{to_currency.value}"
+                )
+            except MarketDataProviderError as error:
+                _raise_provider_error(error)
+            fx_quotes[pair] = fx_quote
+            fx_rates[(fx_quote.base_currency, fx_quote.quote_currency)] = fx_quote.rate
+            fx_rates[(fx_quote.quote_currency, fx_quote.base_currency)] = ONE / fx_quote.rate
+        if not _can_convert(from_currency, to_currency, fx_rates, user.usd_per_eur):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"No FX reference is available to convert {from_currency.value} "
+                    f"to {to_currency.value}."
+                ),
+            )
+
+    for holding_request in request.holdings:
+        account_request = request.accounts[holding_request.account_index]
+        listing_key = (
+            holding_request.symbol.strip().upper(),
+            (holding_request.mic_code or "").strip().upper(),
+            (holding_request.exchange or "").strip().upper(),
+        )
+        cache_key = listing_key
+        quote = quote_cache.get(cache_key)
+        if quote is None:
+            try:
+                if client is None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Configure Twelve Data before adding owned stocks during setup.",
+                    )
+                quote = await client.quote(
+                    holding_request.symbol.strip(),
+                    holding_request.mic_code,
+                    holding_request.exchange,
+                )
+            except MarketDataProviderError as error:
+                _raise_provider_error(error)
+            quote_cache[cache_key] = quote
+
+        mic = (quote.mic_code or holding_request.mic_code or "UNKNOWN").upper()
+        position_key = (holding_request.account_index, quote.symbol.upper(), mic)
+        if position_key in seen_positions:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{quote.symbol} is listed more than once for "
+                    f"{account_request.display_name}. Combine those shares into one position."
+                ),
+            )
+        seen_positions.add(position_key)
+
+        await ensure_currency_conversion(quote.currency, user.base_currency)
+        average_cost_currency = holding_request.average_cost_currency or quote.currency
+        await ensure_currency_conversion(average_cost_currency, quote.currency)
+
+        instrument = session.scalar(
+            select(Instrument).where(
+                Instrument.symbol == quote.symbol.upper(),
+                Instrument.mic == mic,
+            )
+        )
+        exchange = quote.exchange or holding_request.exchange or ""
+        if instrument is not None and (
+            instrument.currency != quote.currency
+            or (instrument.exchange and exchange and instrument.exchange != exchange)
+            or instrument.instrument_type != holding_request.instrument_type
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=f"{quote.symbol} is already tracked with a different listing.",
+            )
+
+        average_cost_in_quote_currency = _to_base(
+            holding_request.average_cost,
+            average_cost_currency,
+            quote.currency,
+            user.usd_per_eur,
+            fx_rates,
+        )
+        quoted_holdings.append(
+            (
+                holding_request,
+                quote,
+                holding_request.account_index,
+                average_cost_in_quote_currency,
+            )
+        )
+
+    for account_request in request.accounts:
+        for wallet in account_request.subaccounts:
+            if wallet.opening_balance:
+                await ensure_currency_conversion(wallet.currency, user.base_currency)
+
+    accounts: list[BrokerAccount] = []
+    for account_request in request.accounts:
+        account = BrokerAccount(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            provider_code=account_request.provider_code,
+            display_name=account_request.display_name,
+            account_type=account_request.account_type,
+        )
+        accounts.append(account)
+        session.add(account)
+        try:
+            session.flush()
+        except IntegrityError as error:
+            session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f'An account named "{account_request.display_name}" already exists '
+                    "in this profile."
+                ),
+            ) from error
+        for wallet_index, wallet_request in enumerate(account_request.subaccounts):
+            session.add(
+                AccountSubaccount(
+                    id=uuid.uuid4(),
+                    account_id=account.id,
+                    currency=wallet_request.currency,
+                    cash_balance=wallet_request.opening_balance,
+                    is_primary=wallet_index == 0,
+                )
+            )
+
+    session.flush()
+    holding_responses: list[HoldingCreateResponse] = []
+    for (
+        holding_request,
+        quote,
+        account_index,
+        average_cost_in_quote_currency,
+    ) in quoted_holdings:
+        account = accounts[account_index]
+        symbol = quote.symbol.upper()
+        mic = (quote.mic_code or holding_request.mic_code or "UNKNOWN").upper()
+        exchange = quote.exchange or holding_request.exchange or ""
+        instrument = session.scalar(
+            select(Instrument).where(Instrument.symbol == symbol, Instrument.mic == mic)
+        )
+        if instrument is None:
+            instrument = Instrument(
+                symbol=symbol,
+                name=quote.name,
+                asset_class=AssetClass.EQUITIES,
+                currency=quote.currency,
+                mic=mic,
+                exchange=exchange,
+                instrument_type=holding_request.instrument_type,
+                estimated_annual_yield=ZERO,
+                is_demo=False,
+            )
+            session.add(instrument)
+            session.flush()
+        else:
+            instrument.name = quote.name
+            instrument.exchange = exchange or instrument.exchange
+            instrument.is_demo = False
+
+        session.add(
+            Holding(
+                user_id=user.id,
+                account_id=account.id,
+                funding_subaccount_id=None,
+                instrument_id=instrument.id,
+                quantity=holding_request.quantity,
+                average_cost=average_cost_in_quote_currency,
+                purchase_date=holding_request.purchase_date,
+                funding_cost=ZERO,
+            )
+        )
+        session.add(
+            MarketPriceCache(
+                instrument_id=instrument.id,
+                price=quote.price,
+                currency=quote.currency,
+                source="TWELVE_DATA",
+                feed_type="QUOTE",
+                observed_at=quote.observed_at,
+                is_market_open=quote.is_market_open,
+            )
+        )
+        holding_responses.append(
+            HoldingCreateResponse(
+                symbol=instrument.symbol,
+                account_name=account.display_name,
+                quantity=holding_request.quantity,
+                quote_price=quote.price,
+                quote_currency=quote.currency,
+                funding_currency=None,
+                funding_cost=ZERO,
+            )
+        )
+
+    for fx_quote in fx_quotes.values():
+        _save_market_fx_quote(session, fx_quote)
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Initial portfolio setup could not be saved because an account or "
+                "position conflicts with existing data."
+            ),
+        ) from error
+
+    return InitialPortfolioResponse(
+        accounts=list_accounts(session, user.id),
+        holdings=holding_responses,
     )
 
 
@@ -367,12 +864,72 @@ def update_holding(
     holding = session.scalar(
         select(Holding)
         .where(Holding.id == holding_id, Holding.user_id == user_id)
+    )
+    if holding is None:
+        raise HTTPException(status_code=404, detail="Holding was not found")
+    funding_subaccount_id = holding.funding_subaccount_id
+    funding_subaccount = None
+    if funding_subaccount_id is not None:
+        funding_subaccount = session.scalar(
+            select(AccountSubaccount)
+            .where(AccountSubaccount.id == funding_subaccount_id)
+            .with_for_update()
+        )
+        if funding_subaccount is None:
+            raise HTTPException(
+                status_code=409, detail="The position's funding sub-account is unavailable"
+            )
+    holding = session.scalar(
+        select(Holding)
+        .where(Holding.id == holding_id, Holding.user_id == user_id)
         .with_for_update()
     )
     if holding is None:
         raise HTTPException(status_code=404, detail="Holding was not found")
+    if holding.funding_subaccount_id != funding_subaccount_id:
+        raise HTTPException(
+            status_code=409, detail="The position's funding sub-account changed; reload it."
+        )
+    instrument = session.get(Instrument, holding.instrument_id)
+    if instrument is None:
+        raise HTTPException(status_code=409, detail="The position's instrument is unavailable")
+    user = _get_user(session, user_id)
+    average_cost_currency = payload.average_cost_currency or instrument.currency
+    fx_rates = _fx_matrix(session, user)
+    updated_native_average_cost = _to_base(
+        payload.average_cost,
+        average_cost_currency,
+        instrument.currency,
+        user.usd_per_eur,
+        fx_rates,
+    )
+    if funding_subaccount is not None:
+        updated_funding_cost = round_money(
+            _to_base(
+                round_money(payload.quantity * updated_native_average_cost),
+                instrument.currency,
+                funding_subaccount.currency,
+                user.usd_per_eur,
+                fx_rates,
+            )
+        )
+        cost_change = updated_funding_cost - holding.funding_cost
+        if cost_change > funding_subaccount.cash_balance:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Insufficient {funding_subaccount.currency.value} cash for this change. "
+                    f"It would require an additional {cost_change:.2f}."
+                ),
+            )
+        funding_subaccount.cash_balance -= cost_change
+        holding.funding_cost = updated_funding_cost
+    else:
+        holding.funding_cost = ZERO
     holding.quantity = payload.quantity
-    holding.average_cost = payload.average_cost
+    holding.average_cost = updated_native_average_cost
+    if payload.purchase_date is not None:
+        holding.purchase_date = payload.purchase_date
     session.commit()
 
 
@@ -381,10 +938,34 @@ def delete_holding(session: Session, user_id: uuid.UUID, holding_id: uuid.UUID) 
     holding = session.scalar(
         select(Holding)
         .where(Holding.id == holding_id, Holding.user_id == user_id)
+    )
+    if holding is None:
+        raise HTTPException(status_code=404, detail="Holding was not found")
+    funding_subaccount_id = holding.funding_subaccount_id
+    funding_subaccount = None
+    if funding_subaccount_id is not None:
+        funding_subaccount = session.scalar(
+            select(AccountSubaccount)
+            .where(AccountSubaccount.id == funding_subaccount_id)
+            .with_for_update()
+        )
+        if funding_subaccount is None:
+            raise HTTPException(
+                status_code=409, detail="The position's funding sub-account is unavailable"
+            )
+    holding = session.scalar(
+        select(Holding)
+        .where(Holding.id == holding_id, Holding.user_id == user_id)
         .with_for_update()
     )
     if holding is None:
         raise HTTPException(status_code=404, detail="Holding was not found")
+    if holding.funding_subaccount_id != funding_subaccount_id:
+        raise HTTPException(
+            status_code=409, detail="The position's funding sub-account changed; reload it."
+        )
+    if funding_subaccount is not None:
+        funding_subaccount.cash_balance += holding.funding_cost
     session.delete(holding)
     session.commit()
 
@@ -442,20 +1023,28 @@ async def refresh_market_data(
     user = _get_user(session, user_id)
     settings = get_settings()
     client = _market_client()
-    instruments = list(
-        session.scalars(
-            select(Instrument)
-            .join(Holding, Holding.instrument_id == Instrument.id)
-            .where(Holding.user_id == user.id)
-            .distinct()
-            .order_by(Instrument.symbol)
+    instrument_ids = set(
+        session.scalars(select(Holding.instrument_id).where(Holding.user_id == user.id))
+    )
+    instrument_ids.update(
+        session.scalars(select(VestingGrant.instrument_id).where(VestingGrant.user_id == user.id))
+    )
+    instruments = (
+        list(
+            session.scalars(
+                select(Instrument)
+                .where(Instrument.id.in_(instrument_ids))
+                .order_by(Instrument.symbol)
+            )
         )
+        if instrument_ids
+        else []
     )
     if len(instruments) > settings.market_data_max_symbols:
         raise HTTPException(
             status_code=413,
             detail=(
-                f"This profile has {len(instruments)} different holdings; "
+                f"This profile has {len(instruments)} different held or granted symbols; "
                 f"the manual refresh limit is {settings.market_data_max_symbols}."
             ),
         )
@@ -512,7 +1101,11 @@ async def refresh_market_data(
 
     if not updated_symbols and not updated_fx_pairs:
         session.rollback()
-        detail = errors[0] if errors else "No held symbols or supported FX pairs were refreshed."
+        detail = (
+            errors[0]
+            if errors
+            else "No held or granted symbols or supported FX pairs were refreshed."
+        )
         raise HTTPException(status_code=502, detail=detail)
     session.commit()
     return MarketRefreshResponse(
@@ -580,16 +1173,36 @@ def list_accounts(session: Session, user_id: uuid.UUID) -> list[AccountSummary]:
             .group_by(Holding.account_id)
         ).all()
     )
+    subaccounts_by_account: dict[uuid.UUID, list[AccountSubaccount]] = {}
+    for subaccount in session.scalars(
+        select(AccountSubaccount)
+        .where(AccountSubaccount.account_id.in_([account.id for account in accounts]))
+        .order_by(
+            AccountSubaccount.account_id,
+            AccountSubaccount.is_primary.desc(),
+            AccountSubaccount.currency,
+        )
+    ):
+        subaccounts_by_account.setdefault(subaccount.account_id, []).append(subaccount)
     return [
         AccountSummary(
             id=account.id,
             display_name=account.display_name,
             provider_code=account.provider_code,
             account_type=account.account_type,
-            currency=account.currency,
-            cash_balance=account.cash_balance,
+            currency=(subaccounts_by_account[account.id][0].currency),
+            cash_balance=(subaccounts_by_account[account.id][0].cash_balance),
             position_count=position_counts.get(account.id, 0),
             is_sample=account.provider_code == "SAMPLE",
+            subaccounts=[
+                AccountSubaccountSummary(
+                    id=subaccount.id,
+                    currency=subaccount.currency,
+                    cash_balance=subaccount.cash_balance,
+                    is_primary=subaccount.is_primary,
+                )
+                for subaccount in subaccounts_by_account[account.id]
+            ],
         )
         for account in accounts
     ]
@@ -597,7 +1210,7 @@ def list_accounts(session: Session, user_id: uuid.UUID) -> list[AccountSummary]:
 
 def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate) -> AccountSummary:
     user = _get_user(session, user_id)
-    if not _can_convert(
+    if payload.opening_cash and not _can_convert(
         payload.currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
     ):
         raise HTTPException(
@@ -612,11 +1225,17 @@ def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate)
         provider_code=payload.provider_code,
         display_name=payload.display_name,
         account_type=payload.account_type,
-        currency=payload.currency,
-        cash_balance=payload.opening_cash,
     )
     session.add(account)
     try:
+        session.flush()
+        primary_subaccount = AccountSubaccount(
+            account_id=account.id,
+            currency=payload.currency,
+            cash_balance=payload.opening_cash,
+            is_primary=True,
+        )
+        session.add(primary_subaccount)
         session.commit()
     except IntegrityError as error:
         session.rollback()
@@ -625,15 +1244,88 @@ def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate)
             detail="An account with that name already exists in this profile",
         ) from error
     session.refresh(account)
+    session.refresh(primary_subaccount)
     return AccountSummary(
         id=account.id,
         display_name=account.display_name,
         provider_code=account.provider_code,
         account_type=account.account_type,
-        currency=account.currency,
-        cash_balance=account.cash_balance,
+        currency=primary_subaccount.currency,
+        cash_balance=primary_subaccount.cash_balance,
         position_count=0,
         is_sample=False,
+        subaccounts=[
+            AccountSubaccountSummary(
+                id=primary_subaccount.id,
+                currency=primary_subaccount.currency,
+                cash_balance=primary_subaccount.cash_balance,
+                is_primary=True,
+            )
+        ],
+    )
+
+
+def create_account_subaccount(
+    session: Session,
+    user_id: uuid.UUID,
+    account_id: uuid.UUID,
+    payload: AccountSubaccountCreate,
+) -> AccountSubaccountSummary:
+    user = _get_user(session, user_id)
+    account = session.scalar(
+        select(BrokerAccount)
+        .where(BrokerAccount.id == account_id, BrokerAccount.user_id == user.id)
+        .with_for_update()
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account was not found")
+    existing = session.scalar(
+        select(AccountSubaccount).where(
+            AccountSubaccount.account_id == account.id,
+            AccountSubaccount.currency == payload.currency,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This account already has a {payload.currency.value} sub-account.",
+        )
+    if account.account_type == AccountType.EMPLOYER_PLAN and payload.opening_balance > ZERO:
+        raise HTTPException(
+            status_code=422,
+            detail="Employer-plan sub-accounts cannot hold available cash balances.",
+        )
+    if payload.opening_balance and not _can_convert(
+        payload.currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh market data or configure an FX reference before entering a balance "
+                "in this currency."
+            ),
+        )
+    subaccount = AccountSubaccount(
+        account_id=account.id,
+        currency=payload.currency,
+        cash_balance=payload.opening_balance,
+        is_primary=False,
+    )
+    session.add(subaccount)
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=f"This account already has a {payload.currency.value} sub-account.",
+        ) from error
+    session.refresh(subaccount)
+    return AccountSubaccountSummary(
+        id=subaccount.id,
+        currency=subaccount.currency,
+        cash_balance=subaccount.cash_balance,
+        is_primary=subaccount.is_primary,
     )
 
 
@@ -648,6 +1340,15 @@ def delete_account(session: Session, user_id: uuid.UUID, account_id: uuid.UUID) 
         raise HTTPException(status_code=404, detail="Account was not found")
     if account.provider_code == "SAMPLE":
         raise HTTPException(status_code=409, detail="Legacy sample accounts cannot be deleted")
+    for schedule in session.scalars(
+        select(CashFlowSchedule).where(
+            CashFlowSchedule.account_id == account.id,
+            CashFlowSchedule.auto_post.is_(True),
+            CashFlowSchedule.is_active.is_(True),
+        )
+    ):
+        schedule.is_active = False
+        schedule.auto_post = False
     session.delete(account)
     session.commit()
 
@@ -789,7 +1490,9 @@ def _has_unconvertible_currency_data(
     usd_per_eur: Decimal | None,
 ) -> bool:
     statements = [
-        select(BrokerAccount.currency).where(BrokerAccount.user_id == user_id),
+        select(AccountSubaccount.currency)
+        .join(BrokerAccount, BrokerAccount.id == AccountSubaccount.account_id)
+        .where(BrokerAccount.user_id == user_id),
         select(Goal.target_currency).where(Goal.user_id == user_id),
         select(CashFlow.currency).where(CashFlow.user_id == user_id),
         select(CashFlowSchedule.currency).where(CashFlowSchedule.user_id == user_id),
@@ -833,10 +1536,146 @@ def list_cash_flow_schedules(
     return [CashFlowScheduleResponse.model_validate(schedule) for schedule in schedules]
 
 
+def _post_due_cash_flow_schedules(
+    session: Session, user_id: uuid.UUID, as_of: date | None = None
+) -> None:
+    today = as_of or date.today()
+    schedules = list(
+        session.scalars(
+            select(CashFlowSchedule)
+            .where(
+                CashFlowSchedule.user_id == user_id,
+                CashFlowSchedule.is_active.is_(True),
+                CashFlowSchedule.auto_post.is_(True),
+                CashFlowSchedule.start_date <= today,
+            )
+            .order_by(CashFlowSchedule.start_date, CashFlowSchedule.id)
+            .with_for_update()
+        )
+    )
+    changed = False
+    for schedule in schedules:
+        if schedule.account_id is None or schedule.subaccount_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Automatic income schedule “{schedule.label}” has no destination wallet. "
+                    "Stop the schedule or choose a new wallet."
+                ),
+            )
+        account = session.scalar(
+            select(BrokerAccount).where(
+                BrokerAccount.id == schedule.account_id,
+                BrokerAccount.user_id == user_id,
+            )
+        )
+        if account is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Automatic income schedule “{schedule.label}” has no valid destination "
+                    "account. Stop the schedule or choose a new account."
+                ),
+            )
+        through_date = min(today, schedule.end_date) if schedule.end_date else today
+        if through_date < schedule.start_date:
+            continue
+        for occurrence in occurrence_dates(
+            schedule.recurrence,
+            schedule.start_date,
+            schedule.end_date,
+            schedule.start_date,
+            through_date,
+        ):
+            source_event_id = f"{schedule.id}:{occurrence.isoformat()}"
+            existing = session.scalar(
+                select(CashFlow.id).where(
+                    CashFlow.user_id == user_id,
+                    CashFlow.source_system == "SCHEDULED_CASH_FLOW",
+                    CashFlow.source_event_id == source_event_id,
+                )
+            )
+            if existing is not None:
+                continue
+            subaccount = session.scalar(
+                select(AccountSubaccount)
+                .where(
+                    AccountSubaccount.id == schedule.subaccount_id,
+                    AccountSubaccount.account_id == account.id,
+                    AccountSubaccount.currency == schedule.currency,
+                )
+                .with_for_update()
+            )
+            if subaccount is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Automatic income schedule “{schedule.label}” has no valid "
+                        "destination wallet. Stop the schedule or choose a new wallet."
+                    ),
+                )
+            occurred_at = datetime.combine(occurrence, datetime.min.time(), tzinfo=UTC) + timedelta(
+                hours=12
+            )
+            subaccount.cash_balance += schedule.amount
+            session.add(
+                CashFlow(
+                    user_id=user_id,
+                    account_id=account.id,
+                    subaccount_id=subaccount.id,
+                    schedule_id=schedule.id,
+                    label=schedule.label,
+                    kind=schedule.kind,
+                    status=FlowStatus.CONFIRMED,
+                    amount=schedule.amount,
+                    currency=schedule.currency,
+                    expected_date=occurrence,
+                    occurred_at=occurred_at,
+                    source_system="SCHEDULED_CASH_FLOW",
+                    source_event_id=source_event_id,
+                )
+            )
+            changed = True
+    if changed:
+        session.commit()
+
+
 def create_cash_flow_schedule(
     session: Session, user_id: uuid.UUID, payload: CashFlowScheduleCreate
 ) -> CashFlowScheduleResponse:
     user = _get_user(session, user_id)
+    if payload.account_id is not None or payload.subaccount_id is not None:
+        if payload.account_id is None or payload.subaccount_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="A destination account and wallet must be selected together.",
+            )
+        account = session.scalar(
+            select(BrokerAccount).where(
+                BrokerAccount.id == payload.account_id,
+                BrokerAccount.user_id == user.id,
+            )
+        )
+        if account is None:
+            raise HTTPException(status_code=404, detail="Destination account was not found")
+        subaccount = session.scalar(
+            select(AccountSubaccount).where(
+                AccountSubaccount.id == payload.subaccount_id,
+                AccountSubaccount.account_id == account.id,
+            )
+        )
+        if subaccount is None:
+            raise HTTPException(status_code=404, detail="Destination wallet was not found")
+        if payload.auto_post and account.account_type == AccountType.EMPLOYER_PLAN:
+            raise HTTPException(
+                status_code=422,
+                detail="Scheduled cash income must be credited to a liquid account.",
+            )
+        if payload.auto_post and subaccount.currency != payload.currency:
+            raise HTTPException(
+                status_code=422,
+                detail="The scheduled income currency must match the destination wallet.",
+            )
     if not _can_convert(
         payload.currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
     ):
@@ -903,6 +1742,10 @@ def record_extra_cash(
     if existing is not None:
         same_receipt = (
             existing.account_id == payload.account_id
+            and (
+                payload.subaccount_id is None
+                or existing.subaccount_id == payload.subaccount_id
+            )
             and existing.amount == payload.amount
             and existing.label == f"Extra cash · {payload.source}"
             and existing.expected_date == payload.received_date
@@ -931,8 +1774,23 @@ def record_extra_cash(
             status_code=422,
             detail="Extra cash receipts must go to a liquid bank, savings, or brokerage account",
         )
+    subaccount_query = select(AccountSubaccount).where(
+        AccountSubaccount.account_id == account.id
+    )
+    if payload.subaccount_id is None:
+        subaccount_query = subaccount_query.where(AccountSubaccount.is_primary.is_(True))
+    else:
+        subaccount_query = subaccount_query.where(AccountSubaccount.id == payload.subaccount_id)
+    subaccount = session.scalar(subaccount_query.with_for_update())
+    if subaccount is None:
+        raise HTTPException(
+            status_code=404, detail="Cash sub-account was not found on the selected account"
+        )
     if not _can_convert(
-        account.currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
+        subaccount.currency,
+        user.base_currency,
+        _fx_matrix(session, user),
+        user.usd_per_eur,
     ):
         raise HTTPException(
             status_code=409,
@@ -948,17 +1806,18 @@ def record_extra_cash(
     flow = CashFlow(
         user_id=user.id,
         account_id=account.id,
+        subaccount_id=subaccount.id,
         label=f"Extra cash · {payload.source}",
         kind=FlowKind.WINDFALL,
         status=FlowStatus.CONFIRMED,
         amount=payload.amount,
-        currency=account.currency,
+        currency=subaccount.currency,
         expected_date=payload.received_date,
         occurred_at=occurred_at,
         source_system="USER_ENTRY",
         source_event_id=event_id,
     )
-    account.cash_balance += payload.amount
+    subaccount.cash_balance += payload.amount
     session.add(flow)
     try:
         session.commit()
@@ -1034,6 +1893,8 @@ def _project_cash_flows(
                     _to_base(flow.amount, flow.currency, base_currency, usd_per_eur, fx_rates)
                 ),
                 reporting_currency=base_currency,
+                schedule_id=flow.schedule_id,
+                automatically_posted=flow.source_system == "SCHEDULED_CASH_FLOW",
             )
         )
 
@@ -1044,11 +1905,12 @@ def _project_cash_flows(
         )
     )
     for schedule in schedules:
+        forecast_start = today + timedelta(days=1) if schedule.auto_post else today
         for occurrence in occurrence_dates(
             schedule.recurrence,
             schedule.start_date,
             schedule.end_date,
-            today,
+            forecast_start,
             through_date,
         ):
             entries.append(
@@ -1122,7 +1984,9 @@ def update_policy(session: Session, user_id: uuid.UUID, payload: PolicyUpdate) -
 def list_goals(session: Session, user_id: uuid.UUID) -> list[GoalResponse]:
     user = _get_user(session, user_id)
     goals = session.scalars(
-        select(Goal).where(Goal.user_id == user.id).order_by(Goal.priority, Goal.name)
+        select(Goal)
+        .where(Goal.user_id == user.id, Goal.is_active.is_(True))
+        .order_by(Goal.priority, Goal.name)
     )
     return [GoalResponse.model_validate(goal) for goal in goals]
 
@@ -1163,6 +2027,108 @@ def create_goal(session: Session, user_id: uuid.UUID, payload: GoalCreate) -> Go
     return GoalResponse.model_validate(goal)
 
 
+def update_goal(
+    session: Session, user_id: uuid.UUID, goal_id: uuid.UUID, payload: GoalUpdate
+) -> GoalResponse:
+    user = _get_user(session, user_id)
+    goal = session.scalar(
+        select(Goal)
+        .where(
+            Goal.id == goal_id,
+            Goal.user_id == user.id,
+            Goal.is_active.is_(True),
+        )
+        .with_for_update()
+    )
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Active goal was not found")
+    if not _can_convert(
+        payload.target_currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh market data or set a manual USD-per-EUR reference rate before "
+                "updating a goal in another currency."
+            ),
+        )
+    policy = _get_policy(session, user.id)
+    if policy.funding_rule == FundingRule.FIXED_PERCENTAGES:
+        other_percentages = sum(
+            (
+                active_goal.fixed_percent or ZERO
+                for active_goal in session.scalars(
+                    select(Goal).where(
+                        Goal.user_id == user.id,
+                        Goal.is_active.is_(True),
+                        Goal.id != goal.id,
+                    )
+                )
+            ),
+            ZERO,
+        )
+        if other_percentages + (payload.fixed_percent or ZERO) != ONE:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Updated fixed goal percentages must keep active goal shares at exactly 100%."
+                ),
+            )
+    for field, value in payload.model_dump().items():
+        setattr(goal, field, value)
+    session.commit()
+    session.refresh(goal)
+    return GoalResponse.model_validate(goal)
+
+
+def archive_goal(session: Session, user_id: uuid.UUID, goal_id: uuid.UUID) -> None:
+    user = _get_user(session, user_id)
+    goal = session.scalar(
+        select(Goal)
+        .where(
+            Goal.id == goal_id,
+            Goal.user_id == user.id,
+            Goal.is_active.is_(True),
+        )
+        .with_for_update()
+    )
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Active goal was not found")
+
+    policy = _get_policy(session, user.id)
+    if policy.funding_rule == FundingRule.FIXED_PERCENTAGES:
+        remaining_goals = list(
+            session.scalars(
+                select(Goal).where(
+                    Goal.user_id == user.id,
+                    Goal.is_active.is_(True),
+                    Goal.id != goal.id,
+                )
+            )
+        )
+        remaining_total = sum(
+            (active_goal.fixed_percent or ZERO for active_goal in remaining_goals),
+            ZERO,
+        )
+        if remaining_total > ZERO:
+            allocated = ZERO
+            for active_goal in remaining_goals[:-1]:
+                share = ((active_goal.fixed_percent or ZERO) / remaining_total).quantize(
+                    Decimal("0.000001"), rounding=ROUND_HALF_UP
+                )
+                active_goal.fixed_percent = share
+                allocated += share
+            remaining_goals[-1].fixed_percent = ONE - allocated
+        else:
+            policy.funding_rule = None
+            for active_goal in remaining_goals:
+                active_goal.fixed_percent = None
+
+    goal.is_active = False
+    goal.fixed_percent = None
+    session.commit()
+
+
 def update_fixed_shares(
     session: Session, user_id: uuid.UUID, payload: FixedSharesUpdate
 ) -> dict[str, Decimal]:
@@ -1195,6 +2161,7 @@ def dashboard(
     policy = _get_policy(session, user.id)
     now = datetime.now(UTC)
     today = date.today()
+    _post_due_cash_flow_schedules(session, user.id, today)
 
     quote_rows = list(
         session.scalars(
@@ -1217,19 +2184,21 @@ def dashboard(
             previous_quotes.setdefault(quote.instrument_id, quote)
 
     holding_rows = session.execute(
-        select(Holding, Instrument, BrokerAccount)
+        select(Holding, Instrument, BrokerAccount, AccountSubaccount)
         .join(Instrument, Instrument.id == Holding.instrument_id)
         .join(BrokerAccount, BrokerAccount.id == Holding.account_id)
+        .outerjoin(AccountSubaccount, AccountSubaccount.id == Holding.funding_subaccount_id)
         .where(Holding.user_id == user.id)
     ).all()
 
     holdings: list[HoldingSummary] = []
     values_by_class = {asset_class.value: ZERO for asset_class in AssetClass}
-    position_counts: dict[uuid.UUID, int] = {}
+    gross_holdings_by_account: dict[uuid.UUID, Decimal] = {}
+    after_tax_holdings_by_account: dict[uuid.UUID, Decimal] = {}
+    sale_tax_by_account: dict[uuid.UUID, Decimal] = {}
     annual_dividend_income = ZERO
-    unrealized_pnl = ZERO
     sample_data = bool(holding_rows) and all(
-        instrument.is_demo for _, instrument, _ in holding_rows
+        instrument.is_demo for _, instrument, _, _ in holding_rows
     )
     warnings: list[str] = []
     if sample_data:
@@ -1242,8 +2211,13 @@ def dashboard(
                 ),
             ]
         )
-    for holding, instrument, account in holding_rows:
-        position_counts[account.id] = position_counts.get(account.id, 0) + 1
+    if any(quote.source == "XTB_SCREENSHOT" for quote in latest_quotes.values()):
+        warnings.append(
+            "Some XTB position prices were reconstructed from the screenshots' account-currency "
+            "market values using cached FX. They are historical imported marks, not live quotes; "
+            "refresh market data to replace them."
+        )
+    for holding, instrument, account, funding_subaccount in holding_rows:
         quote = latest_quotes.get(instrument.id)
         if quote is None:
             warnings.append(
@@ -1252,16 +2226,30 @@ def dashboard(
             sample_data = False
             continue
         native_value = holding.quantity * quote.price
-        current_value = _to_base(native_value, quote.currency, base_currency, usd_per_eur, fx_rates)
-        cost_value = _to_base(
-            holding.quantity * holding.average_cost,
-            instrument.currency,
+        gross_current_value = _to_base(
+            native_value, quote.currency, base_currency, usd_per_eur, fx_rates
+        )
+        taxable_gain = max(
+            ZERO,
+            native_value - holding.quantity * holding.average_cost,
+        )
+        sale_tax_rate = Decimal("0.03")
+        sale_tax = _to_base(
+            taxable_gain * sale_tax_rate,
+            quote.currency,
             base_currency,
             usd_per_eur,
             fx_rates,
         )
-        unrealized_pnl += current_value - cost_value
+        current_value = gross_current_value - sale_tax
         values_by_class[instrument.asset_class.value] += current_value
+        gross_holdings_by_account[account.id] = (
+            gross_holdings_by_account.get(account.id, ZERO) + gross_current_value
+        )
+        after_tax_holdings_by_account[account.id] = (
+            after_tax_holdings_by_account.get(account.id, ZERO) + current_value
+        )
+        sale_tax_by_account[account.id] = sale_tax_by_account.get(account.id, ZERO) + sale_tax
         annual_dividend_income += _to_base(
             native_value * instrument.estimated_annual_yield,
             quote.currency,
@@ -1269,14 +2257,10 @@ def dashboard(
             usd_per_eur,
             fx_rates,
         )
-        change_percent = (
-            (quote.price - holding.average_cost) * Decimal(100) / holding.average_cost
-            if holding.average_cost
-            else ZERO
-        )
         holdings.append(
             HoldingSummary(
                 id=holding.id,
+                account_id=account.id,
                 symbol=instrument.symbol,
                 name=instrument.name,
                 account_name=account.display_name,
@@ -1284,6 +2268,11 @@ def dashboard(
                 instrument_type=instrument.instrument_type,
                 quantity=holding.quantity,
                 average_cost=holding.average_cost,
+                purchase_date=holding.purchase_date,
+                funding_currency=(
+                    funding_subaccount.currency if funding_subaccount is not None else None
+                ),
+                funding_cost=holding.funding_cost,
                 price=quote.price,
                 price_currency=quote.currency,
                 quote_source=quote.source,
@@ -1300,31 +2289,46 @@ def dashboard(
                     else None
                 ),
                 market_value=round_money(current_value),
+                gross_market_value=round_money(gross_current_value),
+                estimated_sale_tax=round_money(sale_tax),
+                estimated_tax_rate=sale_tax_rate,
                 base_currency=base_currency,
-                change_percent=change_percent.quantize(Decimal("0.01")),
                 is_demo=instrument.is_demo,
             )
         )
 
-    accounts = list(session.scalars(select(BrokerAccount).where(BrokerAccount.user_id == user.id)))
-    account_summaries = [
-        AccountSummary(
-            id=account.id,
-            display_name=account.display_name,
-            provider_code=account.provider_code,
-            account_type=account.account_type,
-            currency=account.currency,
-            cash_balance=account.cash_balance,
-            position_count=position_counts.get(account.id, 0),
-            is_sample=account.provider_code == "SAMPLE",
+    account_summaries = list_accounts(session, user.id)
+    account_cash_values = {
+        account.id: sum(
+            (
+                _to_base(
+                    subaccount.cash_balance,
+                    subaccount.currency,
+                    base_currency,
+                    usd_per_eur,
+                    fx_rates,
+                )
+                for subaccount in account.subaccounts
+            ),
+            ZERO,
         )
-        for account in accounts
-    ]
+        for account in account_summaries
+    }
     available_cash = sum(
         (
-            _to_base(account.cash_balance, account.currency, base_currency, usd_per_eur, fx_rates)
-            for account in accounts
-            if account.account_type
+            _to_base(
+                subaccount.cash_balance,
+                subaccount.currency,
+                base_currency,
+                usd_per_eur,
+                fx_rates,
+            )
+            for subaccount, account_type in session.execute(
+                select(AccountSubaccount, BrokerAccount.account_type)
+                .join(BrokerAccount, BrokerAccount.id == AccountSubaccount.account_id)
+                .where(BrokerAccount.user_id == user.id)
+            ).all()
+            if account_type
             in {AccountType.BROKERAGE, AccountType.BANK, AccountType.SAVINGS}
         ),
         ZERO,
@@ -1332,6 +2336,7 @@ def dashboard(
 
     deposits: list[DepositSummary] = []
     deposit_value = ZERO
+    deposit_value_by_account: dict[uuid.UUID, Decimal] = {}
     annual_interest_income = ZERO
     fixed_deposits = session.scalars(select(FixedDeposit).where(FixedDeposit.user_id == user.id))
     for deposit in fixed_deposits:
@@ -1345,8 +2350,12 @@ def dashboard(
             deposit.rate_basis,
         )
         accrued_interest = max(ZERO, accrued_value - deposit.principal)
-        deposit_value += _to_base(
+        deposit_base_value = _to_base(
             accrued_value, deposit.currency, base_currency, usd_per_eur, fx_rates
+        )
+        deposit_value += deposit_base_value
+        deposit_value_by_account[deposit.account_id] = (
+            deposit_value_by_account.get(deposit.account_id, ZERO) + deposit_base_value
         )
         annual_interest_income += _to_base(
             deposit.principal * deposit.annual_rate,
@@ -1368,46 +2377,100 @@ def dashboard(
             )
         )
 
+    account_wealth = [
+        AccountWealthSummary(
+            id=account.id,
+            display_name=account.display_name,
+            account_type=account.account_type,
+            currency=base_currency,
+            cash_value=round_money(account_cash_values[account.id]),
+            gross_holdings_value=round_money(
+                gross_holdings_by_account.get(account.id, ZERO)
+            ),
+            estimated_sale_tax=round_money(sale_tax_by_account.get(account.id, ZERO)),
+            after_tax_holdings_value=round_money(
+                after_tax_holdings_by_account.get(account.id, ZERO)
+            ),
+            fixed_deposit_value=round_money(
+                deposit_value_by_account.get(account.id, ZERO)
+            ),
+            total_after_tax_value=round_money(
+                account_cash_values[account.id]
+                + after_tax_holdings_by_account.get(account.id, ZERO)
+                + deposit_value_by_account.get(account.id, ZERO)
+            ),
+        )
+        for account in account_summaries
+    ]
+
     grants = list(session.scalars(select(VestingGrant).where(VestingGrant.user_id == user.id)))
     vesting: list[VestingSummary] = []
     unvested_gross = ZERO
     unvested_net = ZERO
+    unvested_short_term_sale_value = ZERO
+    unvested_long_term_sale_value = ZERO
     for grant in grants:
         instrument = session.get(Instrument, grant.instrument_id)
         quote = latest_quotes.get(grant.instrument_id)
-        if instrument is None or quote is None:
+        if instrument is None:
             continue
-        grant_tranches = list(
-            session.scalars(select(VestingTranche).where(VestingTranche.grant_id == grant.id))
+        grant_tranches = sorted(
+            session.scalars(
+                select(VestingTranche).where(VestingTranche.grant_id == grant.id)
+            ),
+            key=lambda tranche: (tranche.available_date, tranche.vest_date),
         )
         future_tranches = [
             tranche
             for tranche in grant_tranches
-            if tranche.available_date >= today and tranche.status == TrancheStatus.SCHEDULED
+            if tranche.available_date > today and tranche.status == TrancheStatus.SCHEDULED
         ]
         vested_units = sum(
             (
                 tranche.units
                 for tranche in grant_tranches
                 if tranche.status in {TrancheStatus.VESTED, TrancheStatus.RELEASED}
+                or (
+                    tranche.status == TrancheStatus.SCHEDULED
+                    and tranche.available_date <= today
+                )
             ),
             ZERO,
         )
         units = sum((tranche.units for tranche in future_tranches), ZERO)
-        if grant.grant_type.value == "option":
+        if quote is None:
+            warnings.append(
+                f"{instrument.symbol} equity grant has no cached market quote and is excluded "
+                "from its current value estimate."
+            )
+            intrinsic_value = ZERO
+        elif grant.grant_type == GrantType.OPTION:
             intrinsic_value = units * max(quote.price - (grant.strike_price or ZERO), ZERO)
         else:
             intrinsic_value = units * quote.price
-        gross = _to_base(intrinsic_value, quote.currency, base_currency, usd_per_eur, fx_rates)
+        gross = (
+            _to_base(intrinsic_value, quote.currency, base_currency, usd_per_eur, fx_rates)
+            if quote is not None
+            else ZERO
+        )
         net = gross * (ONE - grant.tax_rate_assumption)
+        short_term_sale_value = gross * (ONE - grant.short_term_sale_tax_rate)
+        long_term_sale_value = gross * (ONE - grant.long_term_sale_tax_rate)
         unvested_gross += gross
         unvested_net += net
+        unvested_short_term_sale_value += short_term_sale_value
+        unvested_long_term_sale_value += long_term_sale_value
         vesting.append(
             VestingSummary(
+                id=grant.id,
                 symbol=instrument.symbol,
                 name=instrument.name,
-                grant_type=grant.grant_type.value,
+                grant_type=grant.grant_type,
+                grant_label=grant.grant_label,
+                grant_date=grant.grant_date,
+                total_units=grant.total_units,
                 units=units,
+                vested_units=vested_units,
                 vested_percent=(
                     min(Decimal(100), vested_units * Decimal(100) / grant.total_units)
                     if grant.total_units
@@ -1416,14 +2479,40 @@ def dashboard(
                 next_vest_date=min(
                     (tranche.vest_date for tranche in future_tranches), default=None
                 ),
+                strike_price=grant.strike_price,
+                strike_currency=grant.strike_currency,
+                tax_rate_assumption=grant.tax_rate_assumption,
+                short_term_sale_tax_rate=grant.short_term_sale_tax_rate,
+                long_term_sale_tax_rate=grant.long_term_sale_tax_rate,
+                long_term_holding_period_days=grant.long_term_holding_period_days,
                 gross_value=round_money(gross),
                 estimated_net_value=round_money(net),
+                estimated_short_term_sale_value=round_money(short_term_sale_value),
+                estimated_long_term_sale_value=round_money(long_term_sale_value),
                 currency=base_currency,
+                price=quote.price if quote is not None else None,
+                price_currency=quote.currency if quote is not None else None,
+                quote_source=quote.source if quote is not None else None,
+                quote_observed_at=quote.observed_at if quote is not None else None,
+                tranches=[
+                    VestingTrancheSummary(
+                        vest_date=tranche.vest_date,
+                        available_date=tranche.available_date,
+                        units=tranche.units,
+                        status=(
+                            TrancheStatus.VESTED.value
+                            if tranche.status == TrancheStatus.SCHEDULED
+                            and tranche.available_date <= today
+                            else tranche.status.value
+                        ),
+                    )
+                    for tranche in grant_tranches
+                ],
             )
         )
 
     total_invested = sum(values_by_class.values(), ZERO)
-    net_worth = total_invested + available_cash + deposit_value + unvested_gross
+    net_worth = total_invested + available_cash + deposit_value
     annual_income = annual_dividend_income + annual_interest_income
     goals: list[GoalSummary] = []
     goal_rows = list(
@@ -1549,7 +2638,12 @@ def dashboard(
             "fixed_deposits": round_money(deposit_value),
             "unvested_equity_gross": round_money(unvested_gross),
             "unvested_equity_net_estimate": round_money(unvested_net),
-            "unrealized_pnl_estimate": round_money(unrealized_pnl),
+            "unvested_equity_short_term_sale_estimate": round_money(
+                unvested_short_term_sale_value
+            ),
+            "unvested_equity_long_term_sale_estimate": round_money(
+                unvested_long_term_sale_value
+            ),
             "estimated_monthly_income": round_money(annual_income / Decimal(12)),
             "emergency_reserve_target": round_money(policy.emergency_reserve),
             "reserve_shortfall": round_money(
@@ -1571,6 +2665,7 @@ def dashboard(
         "allocation": current_allocation,
         "chart": chart,
         "accounts": account_summaries,
+        "account_wealth": account_wealth,
         "holdings": holdings,
         "market_fx_rates": _market_fx_summaries(session),
         "goals": goals,
@@ -1595,6 +2690,7 @@ def dashboard(
 
 def list_cash_flows(session: Session, user_id: uuid.UUID, months: int = 12) -> list[FlowResponse]:
     user = _get_user(session, user_id)
+    _post_due_cash_flow_schedules(session, user.id)
     return _project_cash_flows(
         session, user.id, user.base_currency, user.usd_per_eur, _fx_matrix(session, user), months
     )

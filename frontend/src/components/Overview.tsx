@@ -1,6 +1,7 @@
 import {
   ArrowRight,
   ArrowUpRight,
+  Building2,
   CalendarClock,
   CircleDollarSign,
   Clock3,
@@ -8,6 +9,7 @@ import {
   ShieldCheck,
   Sparkles,
   Wallet,
+  WalletCards,
 } from "lucide-react";
 import { amount, dateLabel, goalLabel } from "../format";
 import type { Currency, Dashboard, GoalSummary } from "../types";
@@ -21,6 +23,7 @@ interface OverviewProps {
   onPreview: () => void;
   onOpenGoals: () => void;
   onOpenCashFlow: () => void;
+  onOpenPortfolio: () => void;
 }
 
 function GoalCard({ goal, currency }: { goal: GoalSummary; currency: Currency }) {
@@ -62,6 +65,7 @@ export function Overview({
   onPreview,
   onOpenGoals,
   onOpenCashFlow,
+  onOpenPortfolio,
 }: OverviewProps) {
   const total = data.totals;
   const reserveGap = Number(total.reserve_shortfall);
@@ -81,20 +85,37 @@ export function Overview({
         </button>
       </div>
 
+      {data.accounts.length === 0 && (
+        <section className="portfolio-setup-banner">
+          <span className="portfolio-setup-icon"><WalletCards size={19} /></span>
+          <div>
+            <strong>Bring your accounts and investments together</strong>
+            <p>
+              Enter your banks and brokers, opening balances for each currency, and the stocks or
+              ETFs you already own in one guided setup.
+            </p>
+          </div>
+          <button className="button button-primary" type="button" onClick={onOpenPortfolio}>
+            Set up portfolio <ArrowRight size={15} />
+          </button>
+        </section>
+      )}
+
       <div className="metric-grid">
         <section className="metric-card metric-primary">
           <div className="metric-top">
-            <span>Total tracked wealth</span>
+            <span>Total tracked wealth · after tax estimate</span>
             <span className="metric-icon"><Wallet size={17} /></span>
           </div>
           <div className="metric-value">{amount(total.net_worth, currency)}</div>
           <div className="metric-foot">
             <span className="metric-trend"><ArrowUpRight size={15} /> {amount(data.six_month_change, currency)} <small>illustrative · 6 months</small></span>
+            <span>Excludes unvested awards and future income</span>
           </div>
         </section>
         <section className="metric-card">
           <div className="metric-top">
-            <span>Invested assets</span>
+            <span>Owned investments · after tax</span>
             <span className="metric-icon soft-green"><ArrowUpRight size={17} /></span>
           </div>
           <div className="metric-value">{amount(total.invested_assets, currency)}</div>
@@ -113,13 +134,56 @@ export function Overview({
         </section>
         <section className="metric-card">
           <div className="metric-top">
-            <span>Unvested equity</span>
+            <span>Unvested awards · excluded</span>
             <span className="metric-icon soft-gold"><Sparkles size={17} /></span>
           </div>
           <div className="metric-value">{amount(total.unvested_equity_gross, currency)}</div>
-          <div className="metric-foot"><span>Gross estimate</span><span>{amount(total.unvested_equity_net_estimate, currency)} after assumed tax</span></div>
+          <div className="metric-foot unvested-scenario-foot">
+            <span>Sell before one year · {amount(total.unvested_equity_short_term_sale_estimate, currency)}</span>
+            <span>Sell after one year · {amount(total.unvested_equity_long_term_sale_estimate, currency)}</span>
+          </div>
         </section>
       </div>
+
+      {data.account_wealth.length > 0 && (
+        <section className="panel account-wealth-overview">
+          <div className="panel-heading">
+            <div>
+              <div className="eyebrow">Your accounts</div>
+              <h2>Account values after estimated tax</h2>
+            </div>
+            <button className="text-button" type="button" onClick={onOpenPortfolio}>
+              Account details <ArrowRight size={15} />
+            </button>
+          </div>
+          <div className="account-wealth-grid">
+            {data.account_wealth.map((account) => (
+              <article className="account-wealth-card" key={account.id}>
+                <div className="account-wealth-heading">
+                  <span className="account-wealth-icon"><Building2 size={17} /></span>
+                  <span className="account-wealth-name">
+                    <strong>{account.display_name}</strong>
+                    <small>{account.account_type.toLowerCase().replace("_", " ")}</small>
+                  </span>
+                  <strong className="account-wealth-total">
+                    {amount(account.total_after_tax_value, currency)}
+                  </strong>
+                </div>
+                <div className="account-wealth-lines">
+                  <div><span>Owned holdings · gross</span><strong>{amount(account.gross_holdings_value, currency)}</strong></div>
+                  <div><span>Estimated tax on gains</span><strong>−{amount(account.estimated_sale_tax, currency)}</strong></div>
+                  <div><span>Holdings · after tax</span><strong>{amount(account.after_tax_holdings_value, currency)}</strong></div>
+                  <div><span>Cash</span><strong>{amount(account.cash_value, currency)}</strong></div>
+                  <div><span>Fixed deposits</span><strong>{amount(account.fixed_deposit_value, currency)}</strong></div>
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="table-note">
+            Account totals include owned holdings after the estimated gain-tax haircut, tracked cash, and deposit accruals. Cash/deposits have no tax estimate. Unvested awards and future income are shown separately and are not included; vested awards only count here after they are recorded as owned holdings.
+          </div>
+        </section>
+      )}
 
       <div className="dashboard-grid dashboard-grid-top">
         <PortfolioChart

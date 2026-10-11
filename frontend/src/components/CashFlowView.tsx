@@ -44,7 +44,8 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
   const [error, setError] = useState("");
 
   async function archiveSchedule(schedule: CashFlowSchedule) {
-    if (!window.confirm(`Stop future forecasts for “${schedule.label}”?`)) return;
+    const action = schedule.auto_post ? "automatic credits and forecasts" : "future forecasts";
+    if (!window.confirm(`Stop future ${action} for “${schedule.label}”? Already posted entries will remain.`)) return;
     setArchivingId(schedule.id);
     setError("");
     try {
@@ -63,7 +64,7 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
         <div>
           <div className="eyebrow">Plan for money in motion</div>
           <h1>Cash flow.</h1>
-          <p>Keep scheduled income distinct from cash that has actually arrived.</p>
+          <p>Forecast money ahead, or schedule a salary/bonus credit to a chosen currency wallet.</p>
         </div>
         <div className="cashflow-intro-actions">
           <button
@@ -71,7 +72,7 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
             type="button"
             onClick={() => setDialogOpen(true)}
           >
-            <CalendarDays size={16} /> Add a forecast
+            <CalendarDays size={16} /> Add a schedule
           </button>
           <button
             className="button button-primary"
@@ -120,20 +121,24 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
                   <span className="cashflow-copy">
                     <strong>{flow.kind === "windfall" ? flow.label.replace("Extra cash · ", "") : flow.label}</strong>
                     <small>
-                      {isForecast ? `Expected ${dateLabel(flow.expected_date)}` : `Received ${dateLabel(flow.occurred_at)}`}
-                      {flow.recurrence ? ` · ${recurrenceLabel[flow.recurrence]}` : ""}
-                    </small>
+                            {isForecast
+                              ? `Expected ${dateLabel(flow.expected_date)}`
+                              : flow.automatically_posted
+                                ? `Auto-posted to tracker ${dateLabel(flow.occurred_at)}`
+                                : `Received ${dateLabel(flow.occurred_at)}`}
+                            {flow.recurrence ? ` · ${recurrenceLabel[flow.recurrence]}` : ""}
+                          </small>
                   </span>
                   <span className={`cashflow-amount ${isOutflow ? "negative-text" : isForecast ? "forecast-text" : "positive-text"}`}>
                     {sign}{amount(flow.amount, flow.currency)}
                   </span>
-                  <span className={`status-pill ${isForecast ? "status-planned" : "status-confirmed"}`}>{isForecast ? "Forecast" : "Confirmed"}</span>
+                  <span className={`status-pill ${isForecast ? "status-planned" : "status-confirmed"}`}>{isForecast ? "Forecast" : flow.automatically_posted ? "Auto-posted" : "Confirmed"}</span>
                 </div>
               );
             })}
             {data.cash_flows.length === 0 && <p className="quiet-copy empty-cashflows">No upcoming or recorded cash flows yet.</p>}
           </div>
-          <div className="table-note"><Info size={15} /> Forecasts never enter available cash. This prototype does not confirm receipts or post transactions.</div>
+          <div className="table-note"><Info size={15} /> Forecasts never enter available cash. Automatic salary/bonus entries update only Northstar's tracked balance—not your bank—and are posted once when the app refreshes on or after the scheduled date.</div>
         </section>
         <aside className="cashflow-aside">
           <section className="panel next-income-card">
@@ -159,13 +164,13 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
               <div className="deposit-interest">Accrued interest <strong>{amount(deposit.accrued_interest, deposit.currency, 2)}</strong></div>
             </section>
           ))}
-          <div className="privacy-note"><Info size={15} /><span>Seeded events are samples. Your forecasts are stored locally; payroll and bank sync are not connected.</span></div>
+          <div className="privacy-note"><Info size={15} /><span>Northstar does not connect to payroll or your bank. Automatic credits are tracker-only estimates; stop or adjust them if your actual pay differs.</span></div>
         </aside>
       </div>
       <section className="panel schedule-panel">
         <div className="panel-heading">
           <div><div className="eyebrow">Recurring rules</div><h2>{data.cash_flow_schedules.length} active schedules</h2></div>
-          <span className="panel-kicker">Forecast-only · no account changes</span>
+          <span className="panel-kicker">Auto-credit applies only to salary and bonus rules</span>
         </div>
         {data.cash_flow_schedules.length > 0 ? (
           <div className="schedule-list">
@@ -179,6 +184,9 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
                   <small>
                     {schedule.kind} · {recurrenceLabel[schedule.recurrence]} · starts {dateLabel(schedule.start_date)}
                     {schedule.end_date ? ` · through ${dateLabel(schedule.end_date)}` : ""}
+                    {schedule.auto_post
+                      ? ` · credits ${data.accounts.find((account) => account.id === schedule.account_id)?.display_name ?? "selected account"}`
+                      : " · forecast only"}
                   </small>
                 </span>
                 <strong className="schedule-amount">{amount(schedule.amount, schedule.currency)}</strong>
@@ -187,7 +195,7 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
                   type="button"
                   onClick={() => void archiveSchedule(schedule)}
                   disabled={archivingId === schedule.id}
-                  aria-label={`Stop forecast schedule ${schedule.label}`}
+                  aria-label={`Stop schedule ${schedule.label}`}
                 >
                   <Archive size={14} /> {archivingId === schedule.id ? "Stopping…" : "Stop"}
                 </button>
@@ -195,11 +203,12 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
             ))}
           </div>
         ) : (
-          <p className="schedule-empty">No recurring rules yet. Add a forecast for salary, bills, bonuses, or other expected cash flows.</p>
+          <p className="schedule-empty">No active rules yet. Add salary or bonus to auto-credit a wallet, or create forecast-only rules for bills and other expected flows.</p>
         )}
       </section>
       {dialogOpen && (
         <CashFlowDialog
+          accounts={data.accounts}
           currency={currency}
           onClose={() => setDialogOpen(false)}
           onCreated={onChanged}

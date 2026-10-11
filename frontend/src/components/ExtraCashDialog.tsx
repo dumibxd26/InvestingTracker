@@ -23,19 +23,24 @@ export function ExtraCashDialog({
   onSaved,
 }: ExtraCashDialogProps) {
   const liquidAccounts = accounts.filter((account) => account.account_type !== "EMPLOYER_PLAN");
-  const [accountId, setAccountId] = useState(
-    liquidAccounts.find((account) => account.currency === baseCurrency)?.id ??
-      liquidAccounts[0]?.id ??
+  const liquidSubaccounts = liquidAccounts.flatMap((account) =>
+    account.subaccounts.map((subaccount) => ({ account, subaccount })),
+  );
+  const [subaccountId, setSubaccountId] = useState(
+    liquidSubaccounts.find(({ subaccount }) => subaccount.currency === baseCurrency)?.subaccount.id ??
+      liquidSubaccounts[0]?.subaccount.id ??
       "",
   );
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const selectedAccount = liquidAccounts.find((account) => account.id === accountId);
+  const selectedWallet = liquidSubaccounts.find(
+    ({ subaccount }) => subaccount.id === subaccountId,
+  );
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!accountId || !selectedAccount) {
-      setError("Add a bank, savings, or brokerage account before recording extra cash.");
+    if (!selectedWallet) {
+      setError("Add a bank, savings, or brokerage currency sub-account before recording extra cash.");
       return;
     }
     setError("");
@@ -43,7 +48,8 @@ export function ExtraCashDialog({
     const form = new FormData(event.currentTarget);
     try {
       await api.recordExtraCash({
-        account_id: accountId,
+        account_id: selectedWallet.account.id,
+        subaccount_id: selectedWallet.subaccount.id,
         source: String(form.get("source") ?? "").trim(),
         amount: String(form.get("amount") ?? ""),
         received_date: String(form.get("receivedDate") ?? ""),
@@ -90,22 +96,22 @@ export function ExtraCashDialog({
           <label className="form-field">
             <span>Deposit into</span>
             <select
-              value={accountId}
-              onChange={(event) => setAccountId(event.target.value)}
-              required={liquidAccounts.length > 0}
-              disabled={liquidAccounts.length === 0}
+              value={subaccountId}
+              onChange={(event) => setSubaccountId(event.target.value)}
+              required={liquidSubaccounts.length > 0}
+              disabled={liquidSubaccounts.length === 0}
             >
-              {liquidAccounts.map((account) => (
-                <option value={account.id} key={account.id}>
-                  {account.display_name} · {account.currency} · {account.account_type.toLowerCase().replace("_", " ")}
+              {liquidSubaccounts.map(({ account, subaccount }) => (
+                <option value={subaccount.id} key={subaccount.id}>
+                  {account.display_name} · {subaccount.currency} · {account.account_type.toLowerCase().replace("_", " ")}
                 </option>
               ))}
-              {liquidAccounts.length === 0 && <option value="">Add a liquid account first</option>}
+              {liquidSubaccounts.length === 0 && <option value="">Add a liquid currency sub-account first</option>}
             </select>
           </label>
           <div className="form-row">
             <label className="form-field">
-              <span>Amount received ({selectedAccount?.currency ?? baseCurrency})</span>
+              <span>Amount received ({selectedWallet?.subaccount.currency ?? baseCurrency})</span>
               <input name="amount" type="number" required min="0.01" max="100000000" step="0.01" placeholder="Enter amount received" />
             </label>
             <label className="form-field">
@@ -115,12 +121,12 @@ export function ExtraCashDialog({
           </div>
           <div className="account-storage-note">
             <CircleDollarSign size={15} />
-            <span>This receipt and the account cash balance are saved together in one database transaction. Submitting the same entry twice is protected against duplicate posting.</span>
+            <span>This receipt and the selected currency sub-account balance are saved together in one database transaction. Submitting the same entry twice is protected against duplicate posting.</span>
           </div>
           {error && <div className="inline-error" role="alert">{error}</div>}
           <div className="modal-actions">
             <button className="button button-secondary" type="button" onClick={onClose}>Cancel</button>
-            <button className="button button-primary" type="submit" disabled={saving || liquidAccounts.length === 0}>
+            <button className="button button-primary" type="submit" disabled={saving || liquidSubaccounts.length === 0}>
               {saving ? "Recording…" : "Record received cash"}
             </button>
           </div>

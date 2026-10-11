@@ -15,6 +15,8 @@ from app.database import SessionFactory, get_session
 from app.models import Currency, User
 from app.schemas import (
     AccountCreate,
+    AccountSubaccountCreate,
+    AccountSubaccountSummary,
     AccountSummary,
     AuthResponse,
     CashFlowScheduleCreate,
@@ -27,9 +29,12 @@ from app.schemas import (
     FlowResponse,
     GoalCreate,
     GoalResponse,
+    GoalUpdate,
     HoldingCreate,
     HoldingCreateResponse,
     HoldingUpdate,
+    InitialPortfolioRequest,
+    InitialPortfolioResponse,
     LoginRequest,
     MarketDataStatusResponse,
     MarketRefreshResponse,
@@ -41,19 +46,25 @@ from app.schemas import (
     RecommendationResponse,
     RegisterRequest,
     UserProfileResponse,
+    VestingGrantCreate,
 )
 from app.services import (
     archive_cash_flow_schedule,
+    archive_goal,
     authenticate_token,
     create_account,
+    create_account_subaccount,
     create_cash_flow_schedule,
     create_goal,
     create_holding,
+    create_vesting_grant,
     dashboard,
     delete_account,
     delete_holding,
+    delete_vesting_grant,
     get_policy_response,
     get_profile,
+    initialize_portfolio,
     list_accounts,
     list_cash_flow_schedules,
     list_cash_flows,
@@ -67,6 +78,7 @@ from app.services import (
     register_user,
     search_market_symbols,
     update_fixed_shares,
+    update_goal,
     update_holding,
     update_policy,
     update_profile,
@@ -192,6 +204,18 @@ def create_app(
     ) -> list[AccountSummary]:
         return list_accounts(session, current_user.id)
 
+    @app.post(
+        "/api/portfolio/initialize",
+        response_model=InitialPortfolioResponse,
+        status_code=201,
+    )
+    async def post_portfolio_initialize(
+        payload: InitialPortfolioRequest,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> InitialPortfolioResponse:
+        return await initialize_portfolio(session, current_user.id, payload)
+
     @app.post("/api/accounts", response_model=AccountSummary, status_code=201)
     def post_account(
         payload: AccountCreate,
@@ -199,6 +223,19 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> AccountSummary:
         return create_account(session, current_user.id, payload)
+
+    @app.post(
+        "/api/accounts/{account_id}/subaccounts",
+        response_model=AccountSubaccountSummary,
+        status_code=201,
+    )
+    def post_account_subaccount(
+        account_id: UUID,
+        payload: AccountSubaccountCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> AccountSubaccountSummary:
+        return create_account_subaccount(session, current_user.id, account_id, payload)
 
     @app.delete("/api/accounts/{account_id}", status_code=204)
     def remove_account(
@@ -261,6 +298,24 @@ def create_app(
         delete_holding(session, current_user.id, holding_id)
         return None
 
+    @app.post("/api/vesting-grants", status_code=201)
+    async def post_vesting_grant(
+        payload: VestingGrantCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict[str, UUID]:
+        grant_id = await create_vesting_grant(session, current_user.id, payload)
+        return {"id": grant_id}
+
+    @app.delete("/api/vesting-grants/{grant_id}", status_code=204)
+    def remove_vesting_grant(
+        grant_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        delete_vesting_grant(session, current_user.id, grant_id)
+        return None
+
     @app.get("/api/goals", response_model=list[GoalResponse])
     def get_goals(
         current_user: Annotated[User, Depends(get_current_user)],
@@ -284,6 +339,24 @@ def create_app(
     ) -> dict[str, dict[str, str]]:
         shares = update_fixed_shares(session, current_user.id, payload)
         return {"shares": {goal_id: str(weight) for goal_id, weight in shares.items()}}
+
+    @app.put("/api/goals/{goal_id}", response_model=GoalResponse)
+    def put_goal(
+        goal_id: UUID,
+        payload: GoalUpdate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> GoalResponse:
+        return update_goal(session, current_user.id, goal_id, payload)
+
+    @app.delete("/api/goals/{goal_id}", status_code=204)
+    def remove_goal(
+        goal_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        archive_goal(session, current_user.id, goal_id)
+        return None
 
     @app.get("/api/policy", response_model=PolicyResponse)
     def get_policy(
@@ -400,7 +473,10 @@ def create_app(
                     "quantity": str(item.quantity),
                     "latest_price": str(item.price),
                     "price_currency": item.price_currency.value,
-                    "market_value": str(item.market_value),
+                    "gross_market_value": str(item.gross_market_value),
+                    "estimated_after_tax_value": str(item.market_value),
+                    "estimated_sale_tax": str(item.estimated_sale_tax),
+                    "purchase_date": item.purchase_date.isoformat(),
                     "quote_source": item.quote_source,
                     "quote_observed_at": item.quote_observed_at.astimezone(UTC).isoformat(),
                     "market_open": item.is_market_open,

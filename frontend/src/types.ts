@@ -38,6 +38,24 @@ export interface GoalSummary {
   flexibility: "essential" | "flexible";
 }
 
+export interface GoalRecord {
+  id: string;
+  name: string;
+  goal_type: GoalType;
+  target_amount: string | null;
+  target_annual_income: string | null;
+  current_amount: string;
+  current_annual_income: string;
+  target_currency: Currency;
+  target_date: string | null;
+  priority: number;
+  risk_level: "low" | "moderate" | "high";
+  monthly_contribution: string;
+  fixed_percent: string | null;
+  flexibility: "essential" | "flexible";
+  is_active: boolean;
+}
+
 export interface UserProfile {
   id: string;
   username: string;
@@ -76,6 +94,9 @@ export interface HoldingSummary {
   instrument_type: "STOCK" | "ETF";
   quantity: string;
   average_cost: string;
+  purchase_date: string;
+  funding_currency: Currency | null;
+  funding_cost: string;
   price: string;
   price_currency: Currency;
   quote_source: string;
@@ -83,8 +104,10 @@ export interface HoldingSummary {
   is_market_open: boolean | null;
   change_since_refresh_percent: string | null;
   market_value: string;
+  gross_market_value: string;
+  estimated_sale_tax: string;
+  estimated_tax_rate: string;
   base_currency: Currency;
-  change_percent: string;
   is_demo: boolean;
 }
 
@@ -121,17 +144,25 @@ export interface MarketRefreshResult {
 
 export interface HoldingCreatePayload {
   account_id: string;
+  subaccount_id: string;
   symbol: string;
   mic_code: string | null;
   exchange: string;
   instrument_type: "STOCK" | "ETF";
   quantity: string;
   average_cost: string;
+  average_cost_currency: Currency;
+  purchase_date: string;
 }
 
 export interface HoldingUpdatePayload {
   quantity: string;
   average_cost: string;
+  average_cost_currency: Currency;
+  purchase_date?: string;
+  short_term_sale_tax_rate?: string;
+  long_term_sale_tax_rate?: string;
+  long_term_holding_period_days?: number;
 }
 
 export interface HoldingCreated {
@@ -140,6 +171,8 @@ export interface HoldingCreated {
   quantity: string;
   quote_price: string;
   quote_currency: Currency;
+  funding_currency: Currency | null;
+  funding_cost: string;
 }
 
 export interface AccountSummary {
@@ -151,6 +184,51 @@ export interface AccountSummary {
   cash_balance: string;
   position_count: number;
   is_sample: boolean;
+  subaccounts: AccountSubaccount[];
+}
+
+export interface AccountWealthSummary {
+  id: string;
+  display_name: string;
+  account_type: AccountType;
+  currency: Currency;
+  cash_value: string;
+  gross_holdings_value: string;
+  estimated_sale_tax: string;
+  after_tax_holdings_value: string;
+  fixed_deposit_value: string;
+  total_after_tax_value: string;
+}
+
+export interface AccountSubaccount {
+  id: string;
+  currency: Currency;
+  cash_balance: string;
+  is_primary: boolean;
+}
+
+export interface InitialPortfolioAccountPayload {
+  display_name: string;
+  provider_code: string;
+  account_type: AccountType;
+  subaccounts: { currency: Currency; opening_balance: string }[];
+}
+
+export interface InitialPortfolioHoldingPayload {
+  account_index: number;
+  symbol: string;
+  mic_code: string | null;
+  exchange: string;
+  instrument_type: "STOCK" | "ETF";
+  quantity: string;
+  average_cost: string;
+  average_cost_currency: Currency;
+  purchase_date: string;
+}
+
+export interface InitialPortfolioResponse {
+  accounts: AccountSummary[];
+  holdings: HoldingCreated[];
 }
 
 export interface CashFlow {
@@ -167,6 +245,7 @@ export interface CashFlow {
   reporting_currency: Currency | null;
   schedule_id: string | null;
   recurrence: Recurrence | null;
+  automatically_posted: boolean;
 }
 
 export interface CashFlowSchedule {
@@ -179,6 +258,16 @@ export interface CashFlowSchedule {
   start_date: string;
   end_date: string | null;
   is_active: boolean;
+  account_id: string | null;
+  subaccount_id: string | null;
+  auto_post: boolean;
+}
+
+export interface VestingTranche {
+  vest_date: string;
+  available_date: string;
+  units: string;
+  status: "scheduled" | "vested" | "released" | "forfeited";
 }
 
 export interface Allocation {
@@ -206,15 +295,33 @@ export interface Deposit {
 }
 
 export interface Vesting {
+  id: string;
   symbol: string;
   name: string;
   grant_type: "rsu" | "option";
+  grant_label: string | null;
+  grant_date: string | null;
+  total_units: string;
   units: string;
+  vested_units: string;
   vested_percent: string;
   next_vest_date: string | null;
+  strike_price: string | null;
+  strike_currency: Currency | null;
+  tax_rate_assumption: string;
+  short_term_sale_tax_rate: string;
+  long_term_sale_tax_rate: string;
+  long_term_holding_period_days: number;
   gross_value: string;
   estimated_net_value: string;
+  estimated_short_term_sale_value: string;
+  estimated_long_term_sale_value: string;
   currency: Currency;
+  price: string | null;
+  price_currency: Currency | null;
+  quote_source: string | null;
+  quote_observed_at: string | null;
+  tranches: VestingTranche[];
 }
 
 export interface Policy {
@@ -235,7 +342,8 @@ export interface Dashboard {
     fixed_deposits: string;
     unvested_equity_gross: string;
     unvested_equity_net_estimate: string;
-    unrealized_pnl_estimate: string;
+    unvested_equity_short_term_sale_estimate: string;
+    unvested_equity_long_term_sale_estimate: string;
     estimated_monthly_income: string;
     emergency_reserve_target: string;
     reserve_shortfall: string;
@@ -245,6 +353,7 @@ export interface Dashboard {
   allocation: Allocation[];
   chart: ChartPoint[];
   accounts: AccountSummary[];
+  account_wealth: AccountWealthSummary[];
   holdings: HoldingSummary[];
   market_fx_rates: MarketFxRate[];
   market_data_provider_configured: boolean;
@@ -306,6 +415,13 @@ export interface GoalCreatePayload {
   monthly_contribution: string;
   fixed_percent?: string;
   flexibility: "essential" | "flexible";
+  current_amount?: string;
+  current_annual_income?: string;
+}
+
+export interface GoalUpdatePayload extends GoalCreatePayload {
+  current_amount: string;
+  current_annual_income: string;
 }
 
 export interface AccountCreatePayload {
@@ -324,10 +440,33 @@ export interface CashFlowSchedulePayload {
   recurrence: Recurrence;
   start_date: string;
   end_date?: string;
+  account_id?: string;
+  subaccount_id?: string;
+  auto_post?: boolean;
+}
+
+export interface VestingGrantPayload {
+  symbol: string;
+  mic_code: string | null;
+  exchange: string;
+  grant_type: "rsu" | "option";
+  grant_label?: string;
+  grant_date?: string;
+  total_units: string;
+  duration_months?: number;
+  cliff_months?: number;
+  interval_months?: number;
+  tranches?: { vest_date: string; units: string }[];
+  strike_price?: string;
+  tax_rate_assumption: string;
+  short_term_sale_tax_rate: string;
+  long_term_sale_tax_rate: string;
+  long_term_holding_period_days: number;
 }
 
 export interface CashReceiptPayload {
   account_id: string;
+  subaccount_id: string;
   source: string;
   amount: string;
   received_date: string;

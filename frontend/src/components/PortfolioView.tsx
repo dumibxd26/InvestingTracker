@@ -12,9 +12,11 @@ import {
 import { ApiError, api } from "../api";
 import { AccountDialog } from "./AccountDialog";
 import { AddHoldingDialog } from "./AddHoldingDialog";
+import { AddSubaccountDialog } from "./AddSubaccountDialog";
 import { EditHoldingDialog } from "./EditHoldingDialog";
-import { amount, assetLabel, number } from "../format";
-import type { Currency, Dashboard, HoldingSummary } from "../types";
+import { InitialPortfolioDialog } from "./InitialPortfolioDialog";
+import { amount, assetLabel, dateLabel, number } from "../format";
+import type { AccountSummary, Currency, Dashboard, HoldingSummary } from "../types";
 
 interface PortfolioViewProps {
   data: Dashboard;
@@ -54,6 +56,8 @@ function timestamp(value: string): string {
 export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [holdingDialogOpen, setHoldingDialogOpen] = useState(false);
+  const [initialSetupOpen, setInitialSetupOpen] = useState(false);
+  const [addingSubaccountFor, setAddingSubaccountFor] = useState<AccountSummary | null>(null);
   const [editingHolding, setEditingHolding] = useState<HoldingSummary | null>(null);
   const [mutatingHoldingId, setMutatingHoldingId] = useState<string | null>(null);
   const [mutatingAccountId, setMutatingAccountId] = useState<string | null>(null);
@@ -72,7 +76,7 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
     try {
       const result = await api.refreshMarketData();
       setMarketMessage(
-        `Updated ${result.updated_symbols.length} holding quote(s) and ${result.updated_fx_pairs.length} FX pair(s).`,
+        `Updated ${result.updated_symbols.length} holding or grant quote(s) and ${result.updated_fx_pairs.length} FX pair(s).`,
       );
       if (result.errors.length) setMarketError(result.errors.join(" "));
       await onSaved();
@@ -88,7 +92,9 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   async function deleteHolding(holding: HoldingSummary) {
     if (
       !window.confirm(
-        `Remove ${holding.quantity} shares of ${holding.symbol} from ${holding.account_name}? This does not affect your actual brokerage account.`,
+        holding.funding_currency
+          ? `Remove ${holding.quantity} shares of ${holding.symbol} from ${holding.account_name} and restore ${amount(holding.funding_cost, holding.funding_currency, 2)} to its ${holding.funding_currency} funding wallet?\n\nThis is a bookkeeping reversal at recorded acquisition cost, not a market-price sale, and does not affect your actual brokerage account.`
+          : `Remove the imported ${holding.quantity} shares of ${holding.symbol} from ${holding.account_name}?\n\nThis removes only the holding record; it does not change the account's current cash balance or your actual brokerage account.`,
       )
     ) {
       return;
@@ -109,11 +115,14 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
     }
   }
 
-  async function deleteAccount(account: Dashboard["accounts"][number]) {
+  async function deleteAccount(account: AccountSummary) {
     if (account.is_sample) return;
+    const balances = account.subaccounts
+      .map((subaccount) => `${amount(subaccount.cash_balance, subaccount.currency, 2)}${subaccount.is_primary ? " (primary)" : ""}`)
+      .join(", ");
     if (
       !window.confirm(
-        `Remove "${account.display_name}" (${account.account_type}) and its ${amount(account.cash_balance, account.currency, 2)} balance from Northstar?\n\nAny stocks/ETFs and fixed deposits attached to it will also be removed from this tracker. Cash-flow history will be kept but detached from this account. This does not change your actual bank or broker account.`,
+        `Remove "${account.display_name}" (${account.account_type}) and its currency balances (${balances}) from Northstar?\n\nAny stocks/ETFs and fixed deposits attached to it will also be removed from this tracker. Active automatic salary/bonus schedules for this account will stop. Cash-flow history will be kept but detached from this account. This does not change your actual bank or broker account.`,
       )
     ) {
       return;
@@ -144,6 +153,14 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
         </div>
         <div className="portfolio-actions">
           <button
+            className={data.accounts.length === 0 ? "button button-primary" : "button button-secondary"}
+            type="button"
+            onClick={() => setInitialSetupOpen(true)}
+          >
+            <Building2 size={16} />
+            {data.accounts.length === 0 ? "Set up your portfolio" : "Quick portfolio setup"}
+          </button>
+          <button
             className="button button-secondary"
             type="button"
             onClick={() => setAccountDialogOpen(true)}
@@ -166,14 +183,9 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
       </div>
       <div className="metric-grid portfolio-metrics">
         <Metric
-          label="Invested assets"
+          label="Invested assets · estimated after-tax"
           value={amount(data.totals.invested_assets, currency)}
-          detail="Latest available market marks"
-        />
-        <Metric
-          label="Unrealized gain estimate"
-          value={amount(data.totals.unrealized_pnl_estimate, currency)}
-          detail="Based on saved average cost"
+          detail="After 3% tax estimate on positive gain"
         />
         <Metric
           label="Available cash"
@@ -239,10 +251,25 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                   </small>
                 </span>
                 <span className="account-card-balance">
-                  <strong>{amount(account.cash_balance, account.currency, 2)}</strong>
-                  <small>Cash balance · {account.position_count} positions</small>
+                  {account.subaccounts.map((subaccount) => (
+                    <strong key={subaccount.id}>
+                      {subaccount.currency} {amount(subaccount.cash_balance, subaccount.currency, 2)}
+                      {subaccount.is_primary ? " · primary" : ""}
+                    </strong>
+                  ))}
+                  <small>{account.subaccounts.length} currency wallet(s) · {account.position_count} positions</small>
                 </span>
                 <span className="account-card-actions">
+                  <button
+                    className="icon-button small"
+                    type="button"
+                    aria-label={`Add a currency sub-account to ${account.display_name}`}
+                    title="Add currency sub-account"
+                    onClick={() => setAddingSubaccountFor(account)}
+                    disabled={account.is_sample}
+                  >
+                    <Plus size={14} />
+                  </button>
                   <span className={`status-pill ${account.is_sample ? "status-planned" : "status-confirmed"}`}>
                     {account.is_sample ? "Sample" : "Manual"}
                   </span>
@@ -316,9 +343,9 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                 <th>Asset class</th>
                 <th className="align-right">Units</th>
                 <th className="align-right">Latest quote</th>
-                <th className="align-right">Market value</th>
+                <th>Purchase date</th>
+                <th className="align-right">Est. after-tax value</th>
                 <th className="align-right">Since refresh</th>
-                <th className="align-right">Gain vs. cost</th>
                 <th><span className="sr-only">Position actions</span></th>
               </tr>
             </thead>
@@ -334,25 +361,39 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                       </span>
                     </div>
                   </td>
-                  <td className="muted-cell">{holding.account_name}</td>
+                  <td className="muted-cell">
+                    {holding.account_name}
+                    {holding.funding_currency && (
+                      <small className="quote-timestamp">
+                        Paid from {holding.funding_currency} wallet · {amount(holding.funding_cost, holding.funding_currency, 2)}
+                      </small>
+                    )}
+                  </td>
                   <td><span className={`asset-tag asset-${holding.asset_class}`}>{assetLabel(holding.asset_class)}</span></td>
                   <td className="align-right tabular">{number(holding.quantity, 4)}</td>
                   <td className="align-right tabular">
                     <span>{amount(holding.price, holding.price_currency, 2)}</span>
                     <small className="quote-timestamp">
                       {holding.is_market_open === false ? "Market closed · " : ""}
-                      {holding.quote_source === "TWELVE_DATA" ? "Twelve Data · " : "Sample · "}
+                      {holding.quote_source === "TWELVE_DATA"
+                        ? "Twelve Data · "
+                        : holding.quote_source === "XTB_SCREENSHOT"
+                          ? "XTB screenshot mark · "
+                          : "Sample · "}
                       {timestamp(holding.quote_observed_at)}
                     </small>
                   </td>
-                  <td className="align-right tabular strong-cell">{amount(holding.market_value, currency)}</td>
+                  <td>{dateLabel(holding.purchase_date, { day: "numeric", month: "short", year: "numeric" })}</td>
+                  <td className="align-right tabular strong-cell">
+                    {amount(holding.market_value, currency)}
+                    <small className="quote-timestamp">
+                      Gross {amount(holding.gross_market_value, currency)} · est. tax {amount(holding.estimated_sale_tax, currency)} ({(Number(holding.estimated_tax_rate) * 100).toFixed(0)}% of positive gain)
+                    </small>
+                  </td>
                   <td className={`align-right tabular ${holding.change_since_refresh_percent === null ? "" : Number(holding.change_since_refresh_percent) >= 0 ? "positive-text" : "negative-text"}`}>
                     {holding.change_since_refresh_percent === null
                       ? "—"
                       : `${Number(holding.change_since_refresh_percent) >= 0 ? "+" : ""}${Number(holding.change_since_refresh_percent).toFixed(2)}%`}
-                  </td>
-                  <td className={`align-right tabular ${Number(holding.change_percent) >= 0 ? "positive-text" : "negative-text"}`}>
-                    {Number(holding.change_percent) >= 0 ? "+" : ""}{Number(holding.change_percent).toFixed(1)}%
                   </td>
                   <td className="holding-row-actions">
                     <button
@@ -384,10 +425,19 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
         <div className="table-note">
           <Clock3 size={15} />
           <span>
-            Provider quote times and plan latency apply. Refresh is manual only; no hourly job or
-            background polling runs.
+            Estimated after-tax value subtracts 3% of positive gain over average cost. Purchase dates use the recorded position date; values are estimates, not tax advice. Provider quote times and plan latency apply; manual refresh only.
           </span>
         </div>
+        {data.holdings.some((holding) => holding.quote_source === "XTB_SCREENSHOT") && (
+          <div className="table-note screenshot-mark-note">
+            <Info size={15} />
+            <span>
+              XTB screenshot marks were reconstructed from the shown account market values using
+              locally cached FX. They are approximate historical imports; refresh quotes to replace
+              them with provider data.
+            </span>
+          </div>
+        )}
       </section>
 
       <section className="panel concentration-panel">
@@ -413,10 +463,29 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
           onCreated={onSaved}
         />
       )}
+      {initialSetupOpen && (
+        <InitialPortfolioDialog
+          baseCurrency={data.base_currency}
+          marketDataConfigured={data.market_data_provider_configured}
+          marketFxRates={data.market_fx_rates}
+          usdPerEur={data.profile.usd_per_eur}
+          onClose={() => setInitialSetupOpen(false)}
+          onCreated={onSaved}
+        />
+      )}
+      {addingSubaccountFor && (
+        <AddSubaccountDialog
+          account={addingSubaccountFor}
+          onClose={() => setAddingSubaccountFor(null)}
+          onCreated={onSaved}
+        />
+      )}
       {holdingDialogOpen && (
         <AddHoldingDialog
           accounts={data.accounts}
           marketDataConfigured={data.market_data_provider_configured}
+          marketFxRates={data.market_fx_rates}
+          usdPerEur={data.profile.usd_per_eur}
           onClose={() => setHoldingDialogOpen(false)}
           onCreated={onSaved}
         />

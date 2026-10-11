@@ -52,7 +52,7 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
           <button className="icon-button" type="button" aria-label="Close" onClick={onClose}><X size={19} /></button>
         </div>
         <p className="modal-intro">
-          Set up a manual account and opening cash balance. This does not connect to a broker or import holdings.
+          Set up a bank or broker, then add currency sub-accounts for EUR, USD, or RON. The selected currency and opening cash create its first sub-account.
         </p>
         <form className="goal-form" onSubmit={handleSubmit}>
           <label className="form-field">
@@ -83,7 +83,7 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
           </div>
           <div className="form-row">
             <label className="form-field">
-              <span>Account currency</span>
+              <span>Initial sub-account currency</span>
               <select value={currency} onChange={(event) => setCurrency(event.target.value as Currency)}>
                 <option value="EUR">EUR · Euro</option>
                 <option value="USD">USD · US dollar</option>
@@ -91,7 +91,7 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
               </select>
             </label>
             <label className="form-field">
-              <span>{accountType === "EMPLOYER_PLAN" ? "Opening cash balance · unavailable" : "Opening cash balance"}</span>
+              <span>{accountType === "EMPLOYER_PLAN" ? "Opening cash balance · unavailable" : `Opening balance (${currency})`}</span>
               {accountType === "EMPLOYER_PLAN" ? (
                 <input name="openingCash" type="number" value="0" disabled />
               ) : (
@@ -101,7 +101,7 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
           </div>
           <div className="account-storage-note">
             <Landmark size={15} />
-            <span>Account details and opening cash are stored in this app’s PostgreSQL volume and survive container restarts. No sign-in or broker sync is enabled yet.</span>
+            <span>This creates the bank/broker and its first currency sub-account. Additional currencies can be added from the Portfolio page; no sign-in or broker sync is enabled.</span>
           </div>
           {error && <div className="inline-error" role="alert">{error}</div>}
           <div className="modal-actions">

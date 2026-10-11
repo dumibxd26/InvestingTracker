@@ -11,9 +11,15 @@ import type {
   CashFlowSchedulePayload,
   AccountCreatePayload,
   AccountSummary,
+  AccountSubaccount,
+  InitialPortfolioAccountPayload,
+  InitialPortfolioHoldingPayload,
+  InitialPortfolioResponse,
   Dashboard,
   FundingRule,
   GoalCreatePayload,
+  GoalRecord,
+  GoalUpdatePayload,
   ProfileUpdatePayload,
   Policy,
   RecommendationPreview,
@@ -22,6 +28,7 @@ import type {
   MarketRefreshResult,
   MarketSymbol,
   UserProfile,
+  VestingGrantPayload,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api";
@@ -142,6 +149,24 @@ export const api = {
   createAccount: (payload: AccountCreatePayload) =>
     request<AccountSummary>("/accounts", { method: "POST", body: JSON.stringify(payload) }),
 
+  initializePortfolio: (
+    accounts: InitialPortfolioAccountPayload[],
+    holdings: InitialPortfolioHoldingPayload[],
+  ) =>
+    request<InitialPortfolioResponse>("/portfolio/initialize", {
+      method: "POST",
+      body: JSON.stringify({ accounts, holdings }),
+    }),
+
+  createAccountSubaccount: (
+    accountId: string,
+    payload: { currency: Currency; opening_balance: string },
+  ) =>
+    request<AccountSubaccount>(`/accounts/${encodeURIComponent(accountId)}/subaccounts`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
   deleteAccount: (accountId: string) =>
     request<void>(`/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" }),
 
@@ -172,7 +197,18 @@ export const api = {
     request<MarketRefreshResult>("/market/refresh", { method: "POST" }),
 
   createGoal: (payload: GoalCreatePayload) =>
-    request(`/goals`, { method: "POST", body: JSON.stringify(payload) }),
+    request<GoalRecord>("/goals", { method: "POST", body: JSON.stringify(payload) }),
+
+  listGoals: () => request<GoalRecord[]>("/goals"),
+
+  updateGoal: (goalId: string, payload: GoalUpdatePayload) =>
+    request<GoalRecord>(`/goals/${encodeURIComponent(goalId)}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteGoal: (goalId: string) =>
+    request<void>(`/goals/${encodeURIComponent(goalId)}`, { method: "DELETE" }),
 
   updatePolicy: (payload: {
     funding_rule: FundingRule;
@@ -209,6 +245,15 @@ export const api = {
     request<CashFlowSchedule>(`/cash-flow-schedules/${encodeURIComponent(scheduleId)}`, {
       method: "DELETE",
     }),
+
+  createVestingGrant: (payload: VestingGrantPayload) =>
+    request<{ id: string }>("/vesting-grants", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteVestingGrant: (grantId: string) =>
+    request<void>(`/vesting-grants/${encodeURIComponent(grantId)}`, { method: "DELETE" }),
 
   recordExtraCash: (payload: CashReceiptPayload) =>
     request("/cash-flows/extra-cash", {

@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy import (
     Enum as SqlEnum,
@@ -170,11 +171,30 @@ class BrokerAccount(Base):
     account_type: Mapped[AccountType] = mapped_column(
         SqlEnum(AccountType, values_callable=enum_values, name="account_type"), nullable=False
     )
+
+
+class AccountSubaccount(Base):
+    __tablename__ = "account_subaccounts"
+    __table_args__ = (
+        UniqueConstraint("account_id", "currency", name="uq_account_subaccounts_currency"),
+        Index(
+            "uq_account_subaccounts_primary",
+            "account_id",
+            unique=True,
+            postgresql_where=text("is_primary"),
+            sqlite_where=text("is_primary"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
+    )
     currency: Mapped[Currency] = mapped_column(
-        SqlEnum(Currency, values_callable=enum_values, name="currency_code"),
-        nullable=False,
+        SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
     )
     cash_balance: Mapped[Decimal] = mapped_column(Numeric(20, 4), default=Decimal("0"))
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
 class Instrument(Base):
@@ -215,11 +235,21 @@ class Holding(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
     )
+    funding_subaccount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("account_subaccounts.id", ondelete="CASCADE"), nullable=True
+    )
     instrument_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("instruments.id"), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
     average_cost: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
-
-
+    purchase_date: Mapped[date] = mapped_column(
+        Date,
+        default=date(2025, 1, 1),
+        server_default=text("'2025-01-01'"),
+        nullable=False,
+    )
+    funding_cost: Mapped[Decimal] = mapped_column(
+        Numeric(20, 4), default=Decimal("0"), nullable=False
+    )
 class MarketPriceCache(Base):
     __tablename__ = "market_prices_cache"
     __table_args__ = (Index("ix_market_prices_latest", "instrument_id", "observed_at"),)
@@ -348,12 +378,23 @@ class CashFlowSchedule(Base):
             "end_date IS NULL OR end_date >= start_date",
             name="ck_cash_flow_schedules_end_after_start",
         ),
+        CheckConstraint(
+            "NOT auto_post OR (kind IN ('salary', 'bonus') "
+            "AND account_id IS NOT NULL AND subaccount_id IS NOT NULL)",
+            name="ck_cash_flow_schedules_auto_post_destination",
+        ),
         Index("ix_cash_flow_schedules_user_active", "user_id", "is_active"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("accounts_brokers.id", ondelete="SET NULL")
+    )
+    subaccount_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("account_subaccounts.id", ondelete="SET NULL")
     )
     label: Mapped[str] = mapped_column(String(100), nullable=False)
     kind: Mapped[FlowKind] = mapped_column(
@@ -370,6 +411,7 @@ class CashFlowSchedule(Base):
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date | None] = mapped_column(Date)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    auto_post: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -388,6 +430,12 @@ class CashFlow(Base):
     )
     account_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("accounts_brokers.id", ondelete="SET NULL")
+    )
+    subaccount_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("account_subaccounts.id", ondelete="SET NULL")
+    )
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("cash_flow_schedules.id", ondelete="SET NULL")
     )
     label: Mapped[str] = mapped_column(String(100), nullable=False)
     kind: Mapped[FlowKind] = mapped_column(
@@ -448,7 +496,8 @@ class VestingGrant(Base):
     grant_type: Mapped[GrantType] = mapped_column(
         SqlEnum(GrantType, values_callable=enum_values, name="grant_type"), nullable=False
     )
-    grant_date: Mapped[date] = mapped_column(Date, nullable=False)
+    grant_label: Mapped[str | None] = mapped_column(String(80))
+    grant_date: Mapped[date | None] = mapped_column(Date)
     total_units: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
     strike_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     strike_currency: Mapped[Currency | None] = mapped_column(
@@ -457,6 +506,15 @@ class VestingGrant(Base):
     expiration_date: Mapped[date | None] = mapped_column(Date)
     tax_rate_assumption: Mapped[Decimal] = mapped_column(
         Numeric(8, 6), default=Decimal("0"), nullable=False
+    )
+    short_term_sale_tax_rate: Mapped[Decimal] = mapped_column(
+        Numeric(8, 6), default=Decimal("0.06"), nullable=False
+    )
+    long_term_sale_tax_rate: Mapped[Decimal] = mapped_column(
+        Numeric(8, 6), default=Decimal("0.03"), nullable=False
+    )
+    long_term_holding_period_days: Mapped[int] = mapped_column(
+        Integer, default=365, nullable=False
     )
 
 

@@ -19,6 +19,24 @@
   --shadow: 0 2px 12px rgb(18 46 34 / 3%);
 }
 
+html[data-theme="dark"] .custom-tranche-editor,
+html[data-theme="dark"] .grant-tax-fields,
+html[data-theme="dark"] .vesting-sale-scenarios > div {
+  border-color: var(--line);
+  background: var(--panel);
+}
+
+html[data-theme="dark"] .custom-tranche-heading,
+html[data-theme="dark"] .vesting-sale-scenarios strong,
+html[data-theme="dark"] .vesting-schedule-details {
+  color: #c1d5c7;
+}
+
+html[data-theme="dark"] .setup-wallet-projection,
+html[data-theme="dark"] .setup-wallet-projection strong {
+  color: #a9c8ad;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1348,6 +1366,96 @@ a:focus-visible {
   margin-top: 13px;
 }
 
+.account-wealth-overview {
+  margin-bottom: 23px;
+  padding: 0;
+}
+
+.account-wealth-overview > .panel-heading {
+  padding: 18px 19px 0;
+}
+
+.account-wealth-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 15px 19px;
+}
+
+.account-wealth-card {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid #e8eee9;
+  border-radius: 12px;
+  background: #fbfcfa;
+}
+
+.account-wealth-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid #e9eee9;
+}
+
+.account-wealth-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  place-items: center;
+  border-radius: 9px;
+  color: #4e8064;
+  background: #eaf3eb;
+}
+
+.account-wealth-name {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.account-wealth-name strong {
+  overflow: hidden;
+  color: #405448;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-wealth-name small {
+  color: #91a096;
+  font-size: 8px;
+  text-transform: capitalize;
+}
+
+.account-wealth-total {
+  margin-left: auto;
+  color: #355b43;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.account-wealth-lines {
+  display: grid;
+  gap: 7px;
+  padding-top: 11px;
+}
+
+.account-wealth-lines > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #839087;
+  font-size: 8px;
+}
+
+.account-wealth-lines strong {
+  color: #53675a;
+  font-size: 9px;
+  text-align: right;
+}
+
 .account-card {
   display: grid;
   min-width: 0;
@@ -1770,6 +1878,19 @@ a:focus-visible {
 .goal-date {
   color: #96a29a;
   font-size: 9px;
+}
+
+.goal-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.goal-delete-button {
+  color: #9a625b;
+}
+
+.goal-list-error {
+  margin: 12px 19px 0;
 }
 
 .policy-section-heading {
@@ -2350,6 +2471,52 @@ a:focus-visible {
   border-top: 1px solid #edf0ed;
 }
 
+.custom-tranche-editor {
+  display: grid;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid #e6ece6;
+  border-radius: 11px;
+  background: #fbfcfa;
+}
+
+.custom-tranche-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #52675a;
+  font-size: 10px;
+}
+
+.custom-tranche-heading span {
+  color: #829087;
+  font-size: 9px;
+}
+
+.custom-tranche-row {
+  display: grid;
+  grid-template-columns: 1fr 0.8fr auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.custom-tranche-row .form-field {
+  margin: 0;
+}
+
+.grant-tax-fields {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid #e6ece6;
+  border-radius: 11px;
+}
+
+.grant-tax-fields .eyebrow {
+  font-size: 8px;
+}
+
 .settings-logout-row {
   display: flex;
   align-items: center;
@@ -2406,6 +2573,84 @@ a:focus-visible {
 .vesting-timeline strong {
   color: #617769;
   font-weight: 600;
+}
+
+.vesting-price-line {
+  margin: -4px 0 9px;
+  color: #87948b;
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.vesting-sale-scenarios {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.vesting-sale-scenarios > div {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #e9eee9;
+  border-radius: 9px;
+}
+
+.vesting-sale-scenarios small {
+  color: #8c9990;
+  font-size: 8px;
+}
+
+.vesting-sale-scenarios strong {
+  color: #486451;
+  font-size: 12px;
+}
+
+.vesting-schedule-details {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #edf0ed;
+  color: #617769;
+  font-size: 9px;
+}
+
+.vesting-schedule-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.vesting-tranche-list {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.vesting-tranche-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  align-items: center;
+  gap: 8px;
+  color: #748278;
+  font-size: 8px;
+}
+
+.cashflow-auto-post {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid #e5ebe5;
+  border-radius: 10px;
+  color: #506458;
+  font-size: 11px;
+}
+
+.cashflow-auto-post input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: #4e815d;
 }
 
 .deposits-panel {
@@ -3806,6 +4051,17 @@ a:focus-visible {
     grid-template-columns: 1fr;
   }
 
+  .account-wealth-grid {
+    grid-template-columns: 1fr;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .account-wealth-overview > .panel-heading {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
   .account-card {
     grid-template-columns: 31px minmax(0, 1fr) auto;
   }
@@ -4356,6 +4612,7 @@ html[data-theme="dark"] .panel,
 html[data-theme="dark"] .metric-card,
 html[data-theme="dark"] .goal-card,
 html[data-theme="dark"] .account-card,
+html[data-theme="dark"] .account-wealth-card,
 html[data-theme="dark"] .vesting-card,
 html[data-theme="dark"] .deposit-card,
 html[data-theme="dark"] .chat-panel,
@@ -4370,6 +4627,7 @@ html[data-theme="dark"] .next-step-panel,
 html[data-theme="dark"] .next-income-card,
 html[data-theme="dark"] .goals-explainer,
 html[data-theme="dark"] .account-card,
+html[data-theme="dark"] .account-wealth-card,
 html[data-theme="dark"] .vesting-card,
 html[data-theme="dark"] .deposit-card,
 html[data-theme="dark"] .schedule-row {
@@ -4385,6 +4643,9 @@ html[data-theme="dark"] .goal-title-row h3,
 html[data-theme="dark"] .instrument-cell strong,
 html[data-theme="dark"] .account-card-copy strong,
 html[data-theme="dark"] .account-card-balance strong,
+html[data-theme="dark"] .account-wealth-name strong,
+html[data-theme="dark"] .account-wealth-total,
+html[data-theme="dark"] .account-wealth-lines strong,
 html[data-theme="dark"] .next-income-card h2,
 html[data-theme="dark"] .deposit-mini-card h3,
 html[data-theme="dark"] .deposit-principal,
@@ -4398,6 +4659,10 @@ html[data-theme="dark"] .auth-form-wrap > h2 {
 
 html[data-theme="dark"] .page-intro p,
 html[data-theme="dark"] .metric-top,
+html[data-theme="dark"] .vesting-price-line,
+html[data-theme="dark"] .vesting-tranche-row,
+html[data-theme="dark"] .vesting-sale-scenarios small,
+html[data-theme="dark"] .cashflow-auto-post,
 html[data-theme="dark"] .metric-foot,
 html[data-theme="dark"] .goal-card-footer,
 html[data-theme="dark"] .goal-progress-copy span,
@@ -4423,6 +4688,8 @@ html[data-theme="dark"] .goal-type,
 html[data-theme="dark"] .instrument-cell small,
 html[data-theme="dark"] .account-card-copy small,
 html[data-theme="dark"] .account-card-balance small,
+html[data-theme="dark"] .account-wealth-name small,
+html[data-theme="dark"] .account-wealth-lines > div,
 html[data-theme="dark"] .data-timestamp,
 html[data-theme="dark"] .breadcrumbs,
 html[data-theme="dark"] .sidebar-label {
@@ -4626,10 +4893,47 @@ html[data-theme="dark"] .auth-mode-switch {
 html[data-theme="dark"] .market-search-input,
 html[data-theme="dark"] .market-search-result,
 html[data-theme="dark"] .selected-instrument,
-html[data-theme="dark"] .fx-rate-card {
+html[data-theme="dark"] .fx-rate-card,
+html[data-theme="dark"] .setup-account-card,
+html[data-theme="dark"] .setup-holding-row {
   border-color: #334438;
   color: #dce8df;
   background: #1d2b22;
+}
+
+html[data-theme="dark"] .portfolio-setup-banner {
+  border-color: #334438;
+  background: linear-gradient(100deg, #1d2b22, #202d24);
+}
+
+html[data-theme="dark"] .portfolio-setup-banner strong {
+  color: #dce8df;
+}
+
+html[data-theme="dark"] .portfolio-setup-banner p {
+  color: #a0afa5;
+}
+
+html[data-theme="dark"] .setup-section-heading h3,
+html[data-theme="dark"] .setup-account-title,
+html[data-theme="dark"] .setup-wallet-heading > span,
+html[data-theme="dark"] .setup-holding-topline,
+html[data-theme="dark"] .initial-funding-indicator strong {
+  color: #dce8df;
+}
+
+html[data-theme="dark"] .setup-wallet-heading select,
+html[data-theme="dark"] .setup-wallet-row input {
+  border-color: #334438;
+  color: #dce8df;
+  background: #17231b;
+}
+
+html[data-theme="dark"] .initial-funding-indicator,
+html[data-theme="dark"] .initial-setup-disclaimer,
+html[data-theme="dark"] .setup-market-note {
+  color: #b4c5b8;
+  background: #25352a;
 }
 
 html[data-theme="dark"] .market-result-details small,
@@ -4791,6 +5095,245 @@ html[data-theme="dark"] .page-footer {
 
 .holding-dialog {
   width: min(100%, 680px);
+}
+
+.initial-portfolio-dialog {
+  width: min(100%, 880px);
+}
+
+.portfolio-setup-banner {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin: -5px 0 15px;
+  padding: 15px;
+  border: 1px solid #dfeae0;
+  border-radius: 12px;
+  background: linear-gradient(100deg, #f3f8f2, #fbfcf9);
+}
+
+.portfolio-setup-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 11px;
+  color: #4e8064;
+  background: #e3efe4;
+}
+
+.portfolio-setup-banner > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.portfolio-setup-banner strong {
+  color: #304739;
+  font-size: 11px;
+}
+
+.portfolio-setup-banner p {
+  margin: 4px 0 0;
+  color: #78897e;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.initial-portfolio-form {
+  display: grid;
+  gap: 17px;
+}
+
+.setup-section {
+  display: grid;
+  gap: 10px;
+}
+
+.setup-section-heading,
+.setup-account-title,
+.setup-wallet-heading,
+.setup-holding-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.setup-section-heading h3 {
+  margin: 4px 0 0;
+  color: #2d4335;
+  font-size: 14px;
+}
+
+.button-small {
+  min-height: 30px;
+  padding: 6px 9px;
+  font-size: 9px;
+}
+
+.setup-account-list,
+.setup-holding-list {
+  display: grid;
+  gap: 9px;
+}
+
+.setup-account-card,
+.setup-holding-row {
+  display: grid;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid #e8eee8;
+  border-radius: 11px;
+  background: #fbfcfb;
+}
+
+.setup-account-title {
+  justify-content: flex-start;
+  color: #3d5647;
+  font-size: 10px;
+}
+
+.setup-account-number {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  place-items: center;
+  border-radius: 7px;
+  color: #426c51;
+  background: #eaf3eb;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.setup-remove-button {
+  margin-left: auto;
+  color: #a34e46;
+}
+
+.setup-wallets {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.setup-wallet-block {
+  display: grid;
+  gap: 4px;
+}
+
+.setup-wallet-projection {
+  padding-left: 4px;
+  color: #829087;
+  font-size: 8px;
+}
+
+.setup-wallet-projection strong {
+  color: #52745a;
+  font-weight: 600;
+}
+
+.setup-wallet-heading > span {
+  color: #65796b;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.setup-wallet-heading select {
+  max-width: 130px;
+  padding: 5px 7px;
+  border: 1px solid #dfe7e0;
+  border-radius: 7px;
+  color: #46634f;
+  background: #fff;
+  font: inherit;
+  font-size: 8px;
+}
+
+.setup-wallet-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.5fr) minmax(100px, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  color: #5c7162;
+  font-size: 9px;
+}
+
+.setup-wallet-row input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid #dfe7e0;
+  border-radius: 7px;
+  color: #304739;
+  background: #fff;
+  font: inherit;
+  font-size: 10px;
+}
+
+.setup-help-text {
+  color: #829087;
+  font-size: 8px;
+}
+
+.setup-holding-topline {
+  color: #46634f;
+  font-size: 10px;
+}
+
+.initial-funding-indicator {
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f2f7f2;
+}
+
+.initial-funding-indicator small {
+  color: #829087;
+  font-size: 8px;
+}
+
+.initial-funding-indicator strong {
+  overflow: hidden;
+  color: #46634f;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.initial-setup-disclaimer,
+.setup-market-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  color: #74857a;
+  background: #f5f8f5;
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.initial-setup-disclaimer svg {
+  flex: 0 0 auto;
+  color: #65836b;
+}
+
+.setup-market-note {
+  align-items: center;
+}
+
+.setup-market-note .market-status-dot {
+  flex: 0 0 auto;
+  margin: 0 3px;
+}
+
+.initial-portfolio-dialog .modal-actions {
+  margin-top: 0;
 }
 
 .market-search-input {
@@ -4984,6 +5527,19 @@ html[data-theme="dark"] .page-footer {
     flex-direction: column;
   }
 
+  .portfolio-setup-banner {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .portfolio-setup-banner > div {
+    flex: 1 1 calc(100% - 54px);
+  }
+
+  .portfolio-setup-banner .button {
+    margin-left: 50px;
+  }
+
   .portfolio-actions {
     width: 100%;
   }
@@ -4994,5 +5550,23 @@ html[data-theme="dark"] .page-footer {
 
   .quote-timestamp {
     white-space: normal;
+  }
+
+  .setup-section-heading {
+    align-items: flex-start;
+  }
+
+  .setup-account-card .form-row,
+  .setup-holding-row .form-row {
+    grid-template-columns: 1fr;
+  }
+
+  .setup-wallets {
+    grid-column: 1 / -1;
+  }
+
+  .initial-portfolio-dialog {
+    max-height: 94vh;
+    padding: 16px 13px;
   }
 }

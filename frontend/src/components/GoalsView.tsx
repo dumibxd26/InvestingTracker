@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, ArrowRight, Check, Plus, Save, SlidersHorizontal, Target } from "lucide-react";
+import { AlertCircle, ArrowRight, Check, Pencil, Plus, Save, SlidersHorizontal, Target, Trash2 } from "lucide-react";
 import { api, ApiError } from "../api";
 import { amount, dateLabel, goalLabel } from "../format";
-import type { AssetClass, Currency, Dashboard, FundingRule } from "../types";
+import type { AssetClass, Currency, Dashboard, FundingRule, GoalRecord } from "../types";
+import { GoalDialog } from "./GoalDialog";
 
 interface GoalsViewProps {
   data: Dashboard;
@@ -42,6 +43,10 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [goalError, setGoalError] = useState("");
+  const [editingGoal, setEditingGoal] = useState<GoalRecord | null>(null);
+  const [loadingGoalId, setLoadingGoalId] = useState<string | null>(null);
+  const [deletingGoalId, setDeletingGoalId] = useState<string | null>(null);
 
   useEffect(() => {
     setFundingRule(data.policy.funding_rule ?? "");
@@ -111,6 +116,43 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
     }
   }
 
+  async function editGoal(goalId: string) {
+    setGoalError("");
+    setLoadingGoalId(goalId);
+    try {
+      const goals = await api.listGoals();
+      const goal = goals.find((item) => item.id === goalId);
+      if (!goal) {
+        setGoalError("That active goal could not be found. Refresh and try again.");
+        return;
+      }
+      setEditingGoal(goal);
+    } catch (cause) {
+      setGoalError(cause instanceof ApiError ? cause.message : "The goal could not be loaded.");
+    } finally {
+      setLoadingGoalId(null);
+    }
+  }
+
+  async function deleteGoal(goal: Pick<GoalRecord, "id" | "name">) {
+    const fixedRuleNote = data.policy.funding_rule === "fixed_percentages"
+      ? "\n\nThe remaining fixed funding shares will be renormalized; if none remain to redistribute, the fixed-percentage rule will be cleared."
+      : "";
+    if (!window.confirm(`Delete “${goal.name}” from your active goals? Its history will be archived.${fixedRuleNote}`)) {
+      return;
+    }
+    setGoalError("");
+    setDeletingGoalId(goal.id);
+    try {
+      await api.deleteGoal(goal.id);
+      await onSaved();
+    } catch (cause) {
+      setGoalError(cause instanceof ApiError ? cause.message : "The goal could not be deleted.");
+    } finally {
+      setDeletingGoalId(null);
+    }
+  }
+
   return (
     <div className="page-content">
       <div className="page-intro compact-intro">
@@ -135,6 +177,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
           <div><div className="eyebrow">Your priorities</div><h2>{data.goals.length} active goals</h2></div>
           <span className="panel-kicker">You can change these any time</span>
         </div>
+        {goalError && <div className="inline-error goal-list-error" role="alert">{goalError}</div>}
         <div className="full-goals-list">
           {data.goals.map((goal) => {
             const target = goal.goal_type === "passive_income" ? goal.target_annual_income : goal.target_amount;
@@ -161,6 +204,28 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
                 <div className="full-goal-right">
                   <span className="monthly-needed">{amount(goal.monthly_contribution, currency)}<small>/ month planned</small></span>
                   <span className="goal-date">{goal.target_date ? dateLabel(goal.target_date, { month: "short", year: "numeric" }) : "Ongoing"}</span>
+                  <span className="goal-actions">
+                    <button
+                      className="icon-button small"
+                      type="button"
+                      aria-label={`Edit goal ${goal.name}`}
+                      title="Edit goal"
+                      onClick={() => void editGoal(goal.id)}
+                      disabled={loadingGoalId === goal.id || deletingGoalId === goal.id}
+                    >
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      className="icon-button small goal-delete-button"
+                      type="button"
+                      aria-label={`Delete goal ${goal.name}`}
+                      title="Delete goal"
+                      onClick={() => void deleteGoal(goal)}
+                      disabled={loadingGoalId === goal.id || deletingGoalId === goal.id}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </span>
                 </div>
               </article>
             );
@@ -266,6 +331,14 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
         <p>Goal progress is sample data entered for this prototype. Assets are not yet assigned to goals, and a goal’s displayed progress should not be treated as an account balance.</p>
         <span>Learn how it works <ArrowRight size={14} /></span>
       </section>
+      {editingGoal && (
+        <GoalDialog
+          currency={currency}
+          goal={editingGoal}
+          onClose={() => setEditingGoal(null)}
+          onCreated={onSaved}
+        />
+      )}
     </div>
   );
 }

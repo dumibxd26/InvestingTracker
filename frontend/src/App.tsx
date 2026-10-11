@@ -163,6 +163,14 @@ export default function App() {
   }, [reload, profile]);
 
   useEffect(() => {
+    if (!profile) return;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") void reload();
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, [profile, reload]);
+
+  useEffect(() => {
     document.title = `${pageTitles[activeView]} — Northstar`;
   }, [activeView]);
 
@@ -326,6 +334,7 @@ export default function App() {
                   onPreview={() => setAllocationOpen(true)}
                   onOpenGoals={() => setActiveView("goals")}
                   onOpenCashFlow={() => setActiveView("cashflow")}
+                  onOpenPortfolio={() => setActiveView("portfolio")}
                 />
               )}
               {activeView === "portfolio" && (
@@ -342,7 +351,9 @@ export default function App() {
               {activeView === "cashflow" && (
                 <CashFlowView data={data} currency={currency} onChanged={reload} />
               )}
-              {activeView === "compensation" && <CompensationView data={data} currency={currency} />}
+              {activeView === "compensation" && (
+                <CompensationView data={data} currency={currency} onSaved={reload} />
+              )}
               {activeView === "assistant" && <AssistantView data={data} currency={currency} />}
             </>
           ) : !error ? (

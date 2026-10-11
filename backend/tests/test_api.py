@@ -5,6 +5,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from app.cash_flow_logic import add_months
@@ -13,6 +14,7 @@ from app.database import Base, make_engine
 from app.main import create_app
 from app.market_data import ExchangeRateQuote, MarketQuote, MarketSymbol
 from app.models import (
+    AccountSubaccount,
     AssetClass,
     CashFlow,
     CompoundingFrequency,
@@ -93,6 +95,11 @@ def test_personal_financial_endpoints_require_a_valid_application_session(tmp_pa
             client.get("/api/cash-flows"),
             client.get("/api/cash-flow-schedules"),
             client.delete(f"/api/accounts/{uuid4()}"),
+            client.post("/api/portfolio/initialize", json={"accounts": []}),
+            client.post(
+                f"/api/accounts/{uuid4()}/subaccounts",
+                json={"currency": "USD", "opening_balance": "0"},
+            ),
             client.get("/api/market/status"),
             client.get("/api/market/search?q=MSFT"),
             client.post("/api/market/refresh"),
@@ -186,6 +193,10 @@ def test_users_cannot_see_each_others_accounts_or_goals(tmp_path) -> None:
         assert second.status_code == 201, second.text
         client.headers.update({"Authorization": f"Bearer {second.json()['access_token']}"})
         foreign_account_delete = client.delete(f"/api/accounts/{first_account_id}")
+        foreign_subaccount_create = client.post(
+            f"/api/accounts/{first_account_id}/subaccounts",
+            json={"currency": "USD", "opening_balance": "0"},
+        )
         second_dashboard = client.get("/api/dashboard").json()
 
         client.headers.update({"Authorization": f"Bearer {first.json()['access_token']}"})
@@ -197,6 +208,7 @@ def test_users_cannot_see_each_others_accounts_or_goals(tmp_path) -> None:
     assert Decimal(second_dashboard["totals"]["available_cash"]) == 0
     assert second_dashboard["goals"] == []
     assert foreign_account_delete.status_code == 404
+    assert foreign_subaccount_create.status_code == 404
     assert [account["display_name"] for account in first_accounts] == ["First owner bank"]
 
 
@@ -361,33 +373,56 @@ def test_search_and_add_holding_use_provider_results_and_quote_fx(monkeypatch, t
 
     with create_test_client(tmp_path) as client:
         search = client.get("/api/market/search?q=MSFT")
+        fx_profile = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "usd_per_eur": "1.25",
+            },
+        )
         account = client.post(
             "/api/accounts",
             json={
                 "display_name": "USD brokerage",
                 "provider_code": "MANUAL",
                 "account_type": "BROKERAGE",
-                "currency": "EUR",
-                "opening_cash": "0",
+                "currency": "USD",
+                "opening_cash": "2000",
             },
         )
+        eur_wallet = client.post(
+            f"/api/accounts/{account.json()['id']}/subaccounts",
+            json={"currency": "EUR", "opening_balance": "1000"},
+        )
+        holding_payload = {
+            "account_id": account.json()["id"],
+            "subaccount_id": eur_wallet.json()["id"],
+            "symbol": "MSFT",
+            "mic_code": "XNAS",
+            "exchange": "NASDAQ",
+            "instrument_type": "STOCK",
+            "quantity": "2",
+            "average_cost": "300",
+        }
+        insufficient = client.post(
+            "/api/holdings",
+            json={**holding_payload, "average_cost": "1100"},
+        )
+        before_buy_dashboard = client.get("/api/dashboard").json()
         added = client.post(
             "/api/holdings",
-            json={
-                "account_id": account.json()["id"],
-                "symbol": "MSFT",
-                "mic_code": "XNAS",
-                "exchange": "NASDAQ",
-                "instrument_type": "STOCK",
-                "quantity": "2",
-                "average_cost": "300",
-            },
+            json=holding_payload,
         )
         dashboard = client.get("/api/dashboard")
         holding_id = dashboard.json()["holdings"][0]["id"]
         update = client.put(
             f"/api/holdings/{holding_id}",
-            json={"quantity": "3", "average_cost": "350"},
+            json={
+                "quantity": "3",
+                "average_cost": "350",
+                "purchase_date": "2024-06-15",
+            },
         )
         updated_dashboard = client.get("/api/dashboard")
 
@@ -415,19 +450,45 @@ def test_search_and_add_holding_use_provider_results_and_quote_fx(monkeypatch, t
 
     assert search.status_code == 200, search.text
     assert search.json()["results"][0]["symbol"] == "MSFT"
+    assert fx_profile.status_code == 200, fx_profile.text
     assert account.status_code == 201, account.text
+    assert insufficient.status_code == 409
+    assert Decimal(before_buy_dashboard["totals"]["available_cash"]) == Decimal("2600.00")
     assert added.status_code == 201, added.text
-    assert Decimal(dashboard.json()["holdings"][0]["market_value"]) == Decimal("640.00")
+    assert added.json()["funding_currency"] == "EUR"
+    assert Decimal(added.json()["funding_cost"]) == Decimal("480.00")
+    assert dashboard.json()["holdings"][0]["purchase_date"] == date.today().isoformat()
+    assert Decimal(dashboard.json()["holdings"][0]["gross_market_value"]) == Decimal("640.00")
+    assert Decimal(dashboard.json()["holdings"][0]["estimated_sale_tax"]) == Decimal("4.80")
+    assert Decimal(dashboard.json()["holdings"][0]["market_value"]) == Decimal("635.20")
     assert dashboard.json()["holdings"][0]["quote_source"] == "TWELVE_DATA"
+    assert Decimal(dashboard.json()["totals"]["available_cash"]) == Decimal("2120.00")
     assert update.status_code == 204, update.text
     assert Decimal(updated_dashboard.json()["holdings"][0]["quantity"]) == Decimal("3")
     assert Decimal(updated_dashboard.json()["holdings"][0]["average_cost"]) == Decimal("350")
-    assert Decimal(updated_dashboard.json()["holdings"][0]["market_value"]) == Decimal("960.00")
+    assert updated_dashboard.json()["holdings"][0]["purchase_date"] == "2024-06-15"
+    assert (
+        Decimal(updated_dashboard.json()["holdings"][0]["gross_market_value"])
+        == Decimal("960.00")
+    )
+    assert Decimal(updated_dashboard.json()["holdings"][0]["estimated_sale_tax"]) == Decimal("3.60")
+    assert Decimal(updated_dashboard.json()["holdings"][0]["market_value"]) == Decimal("956.40")
+    assert Decimal(updated_dashboard.json()["totals"]["invested_assets"]) == Decimal("956.40")
+    assert Decimal(updated_dashboard.json()["totals"]["net_worth"]) == Decimal("2716.40")
+    assert Decimal(updated_dashboard.json()["totals"]["available_cash"]) == Decimal("1760.00")
+    account_value = updated_dashboard.json()["account_wealth"][0]
+    assert account_value["display_name"] == "USD brokerage"
+    assert Decimal(account_value["cash_value"]) == Decimal("1760.00")
+    assert Decimal(account_value["gross_holdings_value"]) == Decimal("960.00")
+    assert Decimal(account_value["estimated_sale_tax"]) == Decimal("3.60")
+    assert Decimal(account_value["after_tax_holdings_value"]) == Decimal("956.40")
+    assert Decimal(account_value["total_after_tax_value"]) == Decimal("2716.40")
     assert other_user_update.status_code == 404
     assert other_user_delete.status_code == 404
     assert missing_holding_delete.status_code == 404
     assert delete.status_code == 204, delete.text
     assert deleted_dashboard.json()["holdings"] == []
+    assert Decimal(deleted_dashboard.json()["totals"]["available_cash"]) == Decimal("2600.00")
 
 
 def test_foreign_currency_goal_schedule_and_fx_removal_need_a_manual_rate(tmp_path) -> None:
@@ -591,6 +652,136 @@ def test_creating_goals_and_changing_funding_policy(tmp_path) -> None:
     assert policy.json()["funding_rule"] == "proportional"
 
 
+def test_goal_can_be_updated_archived_and_is_user_scoped(tmp_path) -> None:
+    with create_test_client(tmp_path) as client:
+        created = client.post(
+            "/api/goals",
+            json={
+                "name": "Starter goal",
+                "goal_type": "purchase",
+                "target_amount": "10000",
+                "current_amount": "1000",
+                "target_currency": "EUR",
+                "priority": 4,
+                "risk_level": "low",
+                "monthly_contribution": "200",
+                "flexibility": "flexible",
+            },
+        )
+        goal_id = created.json()["id"]
+        updated = client.put(
+            f"/api/goals/{goal_id}",
+            json={
+                "name": "Home down payment",
+                "goal_type": "purchase",
+                "target_amount": "25000",
+                "current_amount": "4500",
+                "current_annual_income": "0",
+                "target_currency": "EUR",
+                "target_date": "2032-05-01",
+                "priority": 1,
+                "risk_level": "moderate",
+                "monthly_contribution": "500",
+                "fixed_percent": "0.4",
+                "flexibility": "essential",
+            },
+        )
+        owner_authorization = client.headers["Authorization"]
+        second_user = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"goal_owner_{uuid4().hex[:8]}",
+                "password": "another-long-test-passphrase",
+                "base_currency": "EUR",
+            },
+        )
+        client.headers.update(
+            {"Authorization": "Bearer " + second_user.json()["access_token"]}
+        )
+        other_user_update = client.put(
+            f"/api/goals/{goal_id}",
+            json={
+                "name": "Someone else's goal",
+                "goal_type": "purchase",
+                "target_amount": "1",
+                "target_currency": "EUR",
+                "priority": 1,
+                "risk_level": "low",
+                "monthly_contribution": "0",
+                "flexibility": "flexible",
+            },
+        )
+        other_user_delete = client.delete(f"/api/goals/{goal_id}")
+        client.headers.update({"Authorization": owner_authorization})
+        deleted = client.delete(f"/api/goals/{goal_id}")
+        active_goals = client.get("/api/goals")
+        dashboard = client.get("/api/dashboard")
+        repeated_delete = client.delete(f"/api/goals/{goal_id}")
+
+    assert created.status_code == 201, created.text
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["name"] == "Home down payment"
+    assert Decimal(updated.json()["target_amount"]) == 25000
+    assert Decimal(updated.json()["current_amount"]) == 4500
+    assert updated.json()["target_date"] == "2032-05-01"
+    assert second_user.status_code == 201, second_user.text
+    assert other_user_update.status_code == 404
+    assert other_user_delete.status_code == 404
+    assert deleted.status_code == 204
+    assert active_goals.json() == []
+    assert dashboard.json()["goals"] == []
+    assert repeated_delete.status_code == 404
+
+
+def test_archiving_goal_keeps_fixed_funding_shares_valid(tmp_path) -> None:
+    base_payload = {
+        "goal_type": "wealth",
+        "target_amount": "10000",
+        "target_currency": "EUR",
+        "priority": 1,
+        "risk_level": "moderate",
+        "monthly_contribution": "100",
+        "flexibility": "flexible",
+    }
+    with create_test_client(tmp_path) as client:
+        first = client.post(
+            "/api/goals",
+            json={**base_payload, "name": "First goal", "fixed_percent": "0.6"},
+        )
+        second = client.post(
+            "/api/goals",
+            json={**base_payload, "name": "Second goal", "priority": 2, "fixed_percent": "0.4"},
+        )
+        policy = client.put(
+            "/api/policy",
+            json={
+                "funding_rule": "fixed_percentages",
+                "emergency_reserve": "0",
+                "target_weights": {
+                    "equities": "0.70",
+                    "fixed_income": "0.15",
+                    "satellite": "0.15",
+                },
+            },
+        )
+        delete_first = client.delete(f"/api/goals/{first.json()['id']}")
+        after_first = client.get("/api/goals").json()
+        policy_after_first = client.get("/api/policy").json()
+        delete_second = client.delete(f"/api/goals/{second.json()['id']}")
+        policy_after_last = client.get("/api/policy").json()
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert policy.status_code == 200, policy.text
+    assert delete_first.status_code == 204
+    assert len(after_first) == 1
+    assert after_first[0]["id"] == second.json()["id"]
+    assert Decimal(after_first[0]["fixed_percent"]) == 1
+    assert policy_after_first["funding_rule"] == "fixed_percentages"
+    assert delete_second.status_code == 204
+    assert policy_after_last["funding_rule"] is None
+
+
 def test_policy_rejects_target_weights_that_do_not_sum_to_one(tmp_path) -> None:
     with create_test_client(tmp_path) as client:
         response = client.put(
@@ -643,6 +834,226 @@ def test_creating_an_account_persists_cash_and_rejects_duplicate_names(tmp_path)
     assert duplicate.status_code == 409
 
 
+def test_account_subaccounts_are_unique_and_balance_by_currency(tmp_path) -> None:
+    with create_test_client(tmp_path) as client:
+        profile = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "usd_per_eur": "1.25",
+            },
+        )
+        account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Multi-currency broker",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "100",
+            },
+        )
+        usd_wallet = client.post(
+            f"/api/accounts/{account.json()['id']}/subaccounts",
+            json={"currency": "USD", "opening_balance": "50"},
+        )
+        duplicate = client.post(
+            f"/api/accounts/{account.json()['id']}/subaccounts",
+            json={"currency": "USD", "opening_balance": "10"},
+        )
+        ron_wallet = client.post(
+            f"/api/accounts/{account.json()['id']}/subaccounts",
+            json={"currency": "RON", "opening_balance": "0"},
+        )
+        dashboard = client.get("/api/dashboard")
+        accounts = client.get("/api/accounts")
+
+    assert profile.status_code == 200, profile.text
+    assert account.status_code == 201, account.text
+    assert account.json()["subaccounts"][0]["is_primary"] is True
+    assert account.json()["subaccounts"][0]["currency"] == "EUR"
+    assert usd_wallet.status_code == 201, usd_wallet.text
+    assert duplicate.status_code == 409
+    assert ron_wallet.status_code == 201, ron_wallet.text
+    assert len(accounts.json()[0]["subaccounts"]) == 3
+    assert Decimal(dashboard.json()["totals"]["available_cash"]) == Decimal("140.00")
+
+
+def test_initial_portfolio_setup_creates_accounts_wallets_and_owned_stocks_atomically(
+    monkeypatch, tmp_path
+) -> None:
+    import app.services as services
+
+    class FakeTwelveDataClient:
+        def __init__(self, api_key: str, timeout_seconds: float = 10) -> None:
+            assert api_key == "test-provider-key"
+            assert timeout_seconds == 10
+
+        async def quote(
+            self, symbol: str, mic_code: str | None = None, exchange: str | None = None
+        ) -> MarketQuote:
+            assert symbol == "AAPL"
+            assert mic_code == "XNAS"
+            assert exchange == "NASDAQ"
+            return MarketQuote(
+                symbol="AAPL",
+                name="Apple Inc.",
+                price=Decimal("225"),
+                currency=Currency.USD,
+                observed_at=datetime(2026, 10, 11, 12, tzinfo=UTC),
+                is_market_open=True,
+                mic_code="XNAS",
+                exchange="NASDAQ",
+            )
+
+    monkeypatch.setattr(
+        services, "get_settings", lambda: Settings(twelve_data_api_key="test-provider-key")
+    )
+    monkeypatch.setattr(services, "TwelveDataClient", FakeTwelveDataClient)
+
+    with create_test_client(tmp_path) as client:
+        profile = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "usd_per_eur": "1.25",
+            },
+        )
+        initialized = client.post(
+            "/api/portfolio/initialize",
+            json={
+                "accounts": [
+                    {
+                        "display_name": "Daily bank",
+                        "provider_code": "MANUAL",
+                        "account_type": "BANK",
+                        "subaccounts": [{"currency": "EUR", "opening_balance": "1000"}],
+                    },
+                    {
+                        "display_name": "Main broker",
+                        "provider_code": "INTERACTIVE_BROKERS",
+                        "account_type": "BROKERAGE",
+                        "subaccounts": [
+                            {"currency": "USD", "opening_balance": "2000"},
+                            {"currency": "EUR", "opening_balance": "500"},
+                        ],
+                    },
+                ],
+                "holdings": [
+                    {
+                        "account_index": 1,
+                        "symbol": "AAPL",
+                        "mic_code": "XNAS",
+                        "exchange": "NASDAQ",
+                        "instrument_type": "STOCK",
+                        "quantity": "2",
+                        "average_cost": "300",
+                        "average_cost_currency": "EUR",
+                    }
+                ],
+            },
+        )
+        dashboard = client.get("/api/dashboard")
+
+    assert profile.status_code == 200, profile.text
+    assert initialized.status_code == 201, initialized.text
+    assert len(initialized.json()["accounts"]) == 2
+    broker = next(
+        account
+        for account in initialized.json()["accounts"]
+        if account["display_name"] == "Main broker"
+    )
+    assert {wallet["currency"] for wallet in broker["subaccounts"]} == {"USD", "EUR"}
+    assert [wallet["currency"] for wallet in broker["subaccounts"] if wallet["is_primary"]] == [
+        "USD"
+    ]
+    assert initialized.json()["holdings"][0]["symbol"] == "AAPL"
+    assert initialized.json()["holdings"][0]["funding_currency"] is None
+    assert Decimal(initialized.json()["holdings"][0]["funding_cost"]) == 0
+    snapshot = dashboard.json()
+    assert len(snapshot["accounts"]) == 2
+    assert snapshot["holdings"][0]["symbol"] == "AAPL"
+    assert Decimal(snapshot["holdings"][0]["average_cost"]) == Decimal("375.00")
+    assert snapshot["holdings"][0]["purchase_date"] == "2025-01-01"
+    assert Decimal(snapshot["totals"]["available_cash"]) == Decimal("3100.00")
+    assert Decimal(snapshot["totals"]["invested_assets"]) == Decimal("360.00")
+    assert "unrealized_pnl_estimate" not in snapshot["totals"]
+    assert "change_percent" not in snapshot["holdings"][0]
+
+
+def test_initial_portfolio_setup_preserves_current_cash_when_importing_owned_positions(
+    monkeypatch, tmp_path
+) -> None:
+    import app.services as services
+
+    class FakeTwelveDataClient:
+        def __init__(self, api_key: str, timeout_seconds: float = 10) -> None:
+            pass
+
+        async def quote(
+            self, symbol: str, mic_code: str | None = None, exchange: str | None = None
+        ) -> MarketQuote:
+            return MarketQuote(
+                symbol="MSFT",
+                name="Microsoft Corporation",
+                price=Decimal("400"),
+                currency=Currency.USD,
+                observed_at=datetime(2026, 10, 11, 12, tzinfo=UTC),
+                is_market_open=True,
+                mic_code="XNAS",
+                exchange="NASDAQ",
+            )
+
+    monkeypatch.setattr(
+        services, "get_settings", lambda: Settings(twelve_data_api_key="test-provider-key")
+    )
+    monkeypatch.setattr(services, "TwelveDataClient", FakeTwelveDataClient)
+
+    with create_test_client(tmp_path) as client:
+        client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "usd_per_eur": "1.25",
+            },
+        )
+        response = client.post(
+            "/api/portfolio/initialize",
+            json={
+                "accounts": [
+                    {
+                        "display_name": "My broker",
+                        "provider_code": "MANUAL",
+                        "account_type": "BROKERAGE",
+                        "subaccounts": [{"currency": "USD", "opening_balance": "100"}],
+                    }
+                ],
+                "holdings": [
+                    {
+                        "account_index": 0,
+                        "symbol": "MSFT",
+                        "mic_code": "XNAS",
+                        "exchange": "NASDAQ",
+                        "instrument_type": "STOCK",
+                        "quantity": "1",
+                        "average_cost": "200",
+                    }
+                ],
+            },
+        )
+        accounts = client.get("/api/accounts").json()
+        dashboard = client.get("/api/dashboard").json()
+
+    assert response.status_code == 201, response.text
+    assert [account["display_name"] for account in accounts] == ["My broker"]
+    assert Decimal(dashboard["accounts"][0]["subaccounts"][0]["cash_balance"]) == Decimal("100")
+    assert dashboard["holdings"][0]["symbol"] == "MSFT"
+    assert Decimal(dashboard["totals"]["available_cash"]) == Decimal("80.00")
+
+
 def test_deleting_account_removes_attached_assets_but_preserves_cash_flow_history(tmp_path) -> None:
     with create_test_client(tmp_path) as client:
         user_id = UUID(client.get("/api/auth/me").json()["id"])
@@ -671,6 +1082,13 @@ def test_deleting_account_removes_attached_assets_but_preserves_cash_flow_histor
         assert cash_flow.status_code == 201, cash_flow.text
 
         with client.app.state.session_factory() as session:
+            primary_subaccount = session.scalar(
+                select(AccountSubaccount).where(
+                    AccountSubaccount.account_id == account_id,
+                    AccountSubaccount.is_primary.is_(True),
+                )
+            )
+            assert primary_subaccount is not None
             instrument = Instrument(
                 symbol=f"DEL{uuid4().hex[:8].upper()}",
                 name="Test security",
@@ -685,6 +1103,7 @@ def test_deleting_account_removes_attached_assets_but_preserves_cash_flow_histor
             holding = Holding(
                 user_id=user_id,
                 account_id=account_id,
+                funding_subaccount_id=primary_subaccount.id,
                 instrument_id=instrument.id,
                 quantity=Decimal("2"),
                 average_cost=Decimal("10"),
@@ -722,6 +1141,7 @@ def test_deleting_account_removes_attached_assets_but_preserves_cash_flow_histor
     assert any(flow["id"] == cash_flow.json()["id"] for flow in dashboard["cash_flows"])
     assert history is not None
     assert history.account_id is None
+    assert history.subaccount_id is None
     assert remaining_holding is None
     assert remaining_deposit is None
 
@@ -854,11 +1274,14 @@ def test_recurring_salary_generates_forecasts_without_changing_available_cash(tm
         "end_date": end_date.isoformat(),
     }
     with create_test_client(tmp_path) as client:
-        balance_before = client.get("/api/dashboard").json()["totals"]["available_cash"]
+        before_dashboard = client.get("/api/dashboard").json()
+        balance_before = before_dashboard["totals"]["available_cash"]
+        wealth_before = before_dashboard["totals"]["net_worth"]
         created = client.post("/api/cash-flow-schedules", json=payload)
         flows = client.get("/api/cash-flows?months=12")
         dashboard = client.get("/api/dashboard").json()
         balance_after = dashboard["totals"]["available_cash"]
+        wealth_after = dashboard["totals"]["net_worth"]
 
     assert created.status_code == 201, created.text
     assert flows.status_code == 200, flows.text
@@ -873,6 +1296,7 @@ def test_recurring_salary_generates_forecasts_without_changing_available_cash(tm
     assert all(flow["direction"] == "inflow" for flow in occurrences)
     assert all(flow["amount"] == "5200.0000" for flow in occurrences)
     assert balance_after == balance_before
+    assert wealth_after == wealth_before
     assert any(flow["schedule_id"] == schedule_id for flow in dashboard["cash_flows"])
 
 
@@ -928,3 +1352,264 @@ def test_cash_flow_schedule_rejects_end_date_before_start_and_long_projection(tm
 
     assert invalid_schedule.status_code == 422
     assert excessive_horizon.status_code == 422
+
+
+def test_scheduled_salary_credits_selected_wallet_once_when_due(tmp_path) -> None:
+    today = date.today()
+    with create_test_client(tmp_path) as client:
+        account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Salary account",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "1000",
+            },
+        )
+        wallet_id = account.json()["subaccounts"][0]["id"]
+        schedule = client.post(
+            "/api/cash-flow-schedules",
+            json={
+                "label": "Monthly salary",
+                "kind": "salary",
+                "amount": "5200",
+                "currency": "EUR",
+                "recurrence": "monthly",
+                "start_date": today.isoformat(),
+                "end_date": add_months(today, 2).isoformat(),
+                "account_id": account.json()["id"],
+                "subaccount_id": wallet_id,
+                "auto_post": True,
+            },
+        )
+        first_dashboard = client.get("/api/dashboard")
+        first_flows = client.get("/api/cash-flows?months=12")
+        second_dashboard = client.get("/api/dashboard")
+        second_flows = client.get("/api/cash-flows?months=12")
+
+    assert account.status_code == 201, account.text
+    assert schedule.status_code == 201, schedule.text
+    assert schedule.json()["auto_post"] is True
+    assert schedule.json()["account_id"] == account.json()["id"]
+    assert Decimal(first_dashboard.json()["accounts"][0]["subaccounts"][0]["cash_balance"]) == 6200
+    assert Decimal(second_dashboard.json()["accounts"][0]["subaccounts"][0]["cash_balance"]) == 6200
+    auto_credits = [
+        flow
+        for flow in second_flows.json()
+        if flow["schedule_id"] == schedule.json()["id"] and flow["automatically_posted"]
+    ]
+    assert len(auto_credits) == 1
+    assert auto_credits[0]["status"] == "confirmed"
+    assert auto_credits[0]["expected_date"] == today.isoformat()
+    assert len(
+        [
+            flow
+            for flow in first_flows.json()
+            if flow["schedule_id"] == schedule.json()["id"] and flow["automatically_posted"]
+        ]
+    ) == 1
+
+
+def test_scheduled_income_rejects_non_salary_kind_for_automatic_credit(tmp_path) -> None:
+    with create_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/cash-flow-schedules",
+            json={
+                "label": "Automatic rent",
+                "kind": "bill",
+                "amount": "100",
+                "currency": "EUR",
+                "recurrence": "monthly",
+                "start_date": date.today().isoformat(),
+                "account_id": str(uuid4()),
+                "subaccount_id": str(uuid4()),
+                "auto_post": True,
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_vesting_grant_uses_quote_and_generated_cliff_schedule(monkeypatch, tmp_path) -> None:
+    import app.services as services
+
+    class FakeTwelveDataClient:
+        def __init__(self, api_key: str, timeout_seconds: float = 10) -> None:
+            assert api_key == "test-provider-key"
+
+        async def quote(
+            self, symbol: str, mic_code: str | None = None, exchange: str | None = None
+        ) -> MarketQuote:
+            assert symbol == "MSFT"
+            return MarketQuote(
+                symbol="MSFT",
+                name="Microsoft Corporation",
+                price=Decimal("400"),
+                currency=Currency.USD,
+                observed_at=datetime(2026, 10, 11, 12, tzinfo=UTC),
+                is_market_open=True,
+                mic_code="XNAS",
+                exchange="NASDAQ",
+            )
+
+        async def exchange_rate(self, pair: str) -> ExchangeRateQuote:
+            raise AssertionError(f"Unexpected FX lookup: {pair}")
+
+    monkeypatch.setattr(
+        services, "get_settings", lambda: Settings(twelve_data_api_key="test-provider-key")
+    )
+    monkeypatch.setattr(services, "TwelveDataClient", FakeTwelveDataClient)
+    grant_date = add_months(date.today(), -12)
+    with create_test_client(tmp_path) as client:
+        profile = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "usd_per_eur": "1.25",
+            },
+        )
+        created = client.post(
+            "/api/vesting-grants",
+            json={
+                "symbol": "MSFT",
+                "mic_code": "XNAS",
+                "exchange": "NASDAQ",
+                "grant_type": "rsu",
+                "grant_date": grant_date.isoformat(),
+                "total_units": "120",
+                "duration_months": 48,
+                "cliff_months": 12,
+                "interval_months": 3,
+                "tax_rate_assumption": "0.3",
+            },
+        )
+        dashboard = client.get("/api/dashboard")
+        removed = client.delete(f"/api/vesting-grants/{created.json()['id']}")
+        after_delete = client.get("/api/dashboard")
+
+    assert profile.status_code == 200, profile.text
+    assert created.status_code == 201, created.text
+    assert dashboard.status_code == 200, dashboard.text
+    grant = dashboard.json()["vesting"][0]
+    assert grant["symbol"] == "MSFT"
+    assert Decimal(grant["total_units"]) == 120
+    assert Decimal(grant["vested_units"]) == 30
+    assert Decimal(grant["vested_percent"]) == 25
+    assert Decimal(grant["units"]) == 90
+    assert Decimal(grant["price"]) == 400
+    assert Decimal(grant["gross_value"]) == 28800
+    assert Decimal(grant["estimated_net_value"]) == 20160
+    assert Decimal(grant["short_term_sale_tax_rate"]) == Decimal("0.06")
+    assert Decimal(grant["long_term_sale_tax_rate"]) == Decimal("0.03")
+    assert grant["long_term_holding_period_days"] == 365
+    assert Decimal(grant["estimated_short_term_sale_value"]) == 27072
+    assert Decimal(grant["estimated_long_term_sale_value"]) == 27936
+    assert Decimal(dashboard.json()["totals"]["unvested_equity_gross"]) == 28800
+    assert Decimal(dashboard.json()["totals"]["net_worth"]) == 0
+    assert len(grant["tranches"]) == 13
+    assert grant["tranches"][0]["status"] == "vested"
+    assert removed.status_code == 204
+    assert after_delete.json()["vesting"] == []
+
+
+def test_named_grant_accepts_custom_vesting_dates_and_sale_tax_rates(monkeypatch, tmp_path) -> None:
+    import app.services as services
+
+    class FakeTwelveDataClient:
+        def __init__(self, api_key: str, timeout_seconds: float = 10) -> None:
+            assert api_key == "test-provider-key"
+
+        async def quote(
+            self, symbol: str, mic_code: str | None = None, exchange: str | None = None
+        ) -> MarketQuote:
+            assert symbol == "MSFT"
+            return MarketQuote(
+                symbol="MSFT",
+                name="Microsoft Corporation",
+                price=Decimal("535"),
+                currency=Currency.USD,
+                observed_at=datetime(2026, 10, 11, 12, tzinfo=UTC),
+                is_market_open=True,
+                mic_code="XNAS",
+                exchange="NASDAQ",
+            )
+
+    monkeypatch.setattr(
+        services, "get_settings", lambda: Settings(twelve_data_api_key="test-provider-key")
+    )
+    monkeypatch.setattr(services, "TwelveDataClient", FakeTwelveDataClient)
+    first_vest = add_months(date.today(), 2)
+    second_vest = add_months(date.today(), 5)
+    payload = {
+        "symbol": "MSFT",
+        "mic_code": "XNAS",
+        "exchange": "NASDAQ",
+        "grant_type": "rsu",
+        "grant_label": "On-Hire",
+        "grant_date": date.today().isoformat(),
+        "total_units": "20",
+        "tranches": [
+            {"vest_date": first_vest.isoformat(), "units": "9"},
+            {"vest_date": second_vest.isoformat(), "units": "11"},
+        ],
+        "tax_rate_assumption": "0.05",
+        "short_term_sale_tax_rate": "0.06",
+        "long_term_sale_tax_rate": "0.03",
+        "long_term_holding_period_days": 365,
+    }
+    fy26_payload = {
+        **payload,
+        "grant_label": "FY26 Annual SA",
+        "grant_date": "2026-09-01",
+        "total_units": "1",
+        "tranches": [
+            {"vest_date": add_months(date.today(), 5).isoformat(), "units": "1"}
+        ],
+        "short_term_sale_tax_rate": "0.40",
+    }
+    with create_test_client(tmp_path) as client:
+        profile = client.put(
+            "/api/profile",
+            json={"display_name": "Test user", "base_currency": "USD"},
+        )
+        invalid_total = client.post(
+            "/api/vesting-grants",
+            json={**payload, "total_units": "21"},
+        )
+        created = client.post("/api/vesting-grants", json=payload)
+        fy26_created = client.post("/api/vesting-grants", json=fy26_payload)
+        dashboard = client.get("/api/dashboard")
+
+    assert profile.status_code == 200, profile.text
+    assert invalid_total.status_code == 422
+    assert created.status_code == 201, created.text
+    assert fy26_created.status_code == 201, fy26_created.text
+    grants = {grant["grant_label"]: grant for grant in dashboard.json()["vesting"]}
+    grant = grants["On-Hire"]
+    assert grant["grant_label"] == "On-Hire"
+    assert Decimal(grant["total_units"]) == 20
+    assert Decimal(grant["units"]) == 20
+    assert Decimal(grant["gross_value"]) == 10700
+    assert Decimal(grant["estimated_net_value"]) == 10165
+    assert Decimal(grant["estimated_short_term_sale_value"]) == 10058
+    assert Decimal(grant["estimated_long_term_sale_value"]) == 10379
+    assert [tranche["vest_date"] for tranche in grant["tranches"]] == [
+        first_vest.isoformat(),
+        second_vest.isoformat(),
+    ]
+    fy26 = grants["FY26 Annual SA"]
+    assert fy26["grant_date"] == "2026-09-01"
+    assert Decimal(fy26["short_term_sale_tax_rate"]) == Decimal("0.40")
+    assert Decimal(fy26["long_term_sale_tax_rate"]) == Decimal("0.03")
+    assert Decimal(fy26["estimated_short_term_sale_value"]) == 321
+    assert Decimal(fy26["estimated_long_term_sale_value"]) == Decimal("518.95")
+    assert (
+        Decimal(dashboard.json()["totals"]["unvested_equity_short_term_sale_estimate"])
+        == 10379
+    )
+    assert (
+        Decimal(dashboard.json()["totals"]["unvested_equity_long_term_sale_estimate"])
+        == Decimal("10897.95")
+    )

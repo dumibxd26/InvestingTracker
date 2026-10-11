@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 import { ApiError, api } from "../api";
-import type { HoldingSummary } from "../types";
+import type { Currency, HoldingSummary } from "../types";
 
 interface EditHoldingDialogProps {
   holding: HoldingSummary;
@@ -12,6 +12,10 @@ interface EditHoldingDialogProps {
 export function EditHoldingDialog({ holding, onClose, onSaved }: EditHoldingDialogProps) {
   const [quantity, setQuantity] = useState(holding.quantity);
   const [averageCost, setAverageCost] = useState(holding.average_cost);
+  const [averageCostCurrency, setAverageCostCurrency] = useState<Currency>(
+    holding.price_currency,
+  );
+  const [purchaseDate, setPurchaseDate] = useState(holding.purchase_date);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -20,7 +24,12 @@ export function EditHoldingDialog({ holding, onClose, onSaved }: EditHoldingDial
     setSaving(true);
     setError("");
     try {
-      await api.updateHolding(holding.id, { quantity, average_cost: averageCost });
+      await api.updateHolding(holding.id, {
+        quantity,
+        average_cost: averageCost,
+        average_cost_currency: averageCostCurrency,
+        purchase_date: purchaseDate,
+      });
       await onSaved();
       onClose();
     } catch (cause) {
@@ -53,8 +62,11 @@ export function EditHoldingDialog({ holding, onClose, onSaved }: EditHoldingDial
           </button>
         </div>
         <p className="modal-intro">
-          Update the total shares held and weighted average cost per share. The market quote is
-          unchanged; refresh quotes separately to retrieve a new provider price.
+          Update the total shares, average cost, and purchase date. The tax estimate uses average cost and this purchase date.
+          {holding.funding_currency
+            ? " Any cost-basis change is converted and applied to the original funding wallet."
+            : " This position was imported as already owned, so editing it will not change cash."}
+          {" "}The market quote is unchanged.
         </p>
         <form className="goal-form" onSubmit={submit}>
           <label className="form-field">
@@ -70,15 +82,37 @@ export function EditHoldingDialog({ holding, onClose, onSaved }: EditHoldingDial
             />
           </label>
           <label className="form-field">
-            <span>Average cost per share ({holding.price_currency})</span>
+            <span>Average cost per share</span>
+            <div className="average-cost-input">
+              <input
+                type="number"
+                min="0.00000001"
+                max="100000000"
+                step="any"
+                required
+                value={averageCost}
+                onChange={(event) => setAverageCost(event.target.value)}
+              />
+              <select
+                aria-label="Average cost currency"
+                value={averageCostCurrency}
+                onChange={(event) =>
+                  setAverageCostCurrency(event.target.value as Currency)
+                }
+              >
+                <option value="EUR">EUR</option>
+                <option value="USD">USD</option>
+                <option value="RON">RON</option>
+              </select>
+            </div>
+          </label>
+          <label className="form-field">
+            <span>Purchase date</span>
             <input
-              type="number"
-              min="0.00000001"
-              max="100000000"
-              step="any"
+              type="date"
               required
-              value={averageCost}
-              onChange={(event) => setAverageCost(event.target.value)}
+              value={purchaseDate}
+              onChange={(event) => setPurchaseDate(event.target.value)}
             />
           </label>
           {error && <div className="inline-error" role="alert">{error}</div>}
