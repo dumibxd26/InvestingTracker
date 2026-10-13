@@ -53,6 +53,8 @@ from app.schemas import (
     StockPurchasePlanCreate,
     StockSaleCreate,
     StockSaleResponse,
+    StockTransferCreate,
+    StockTransferResponse,
     SubaccountInterestUpdate,
     UserProfileResponse,
     VestingGrantCreate,
@@ -93,6 +95,7 @@ from app.services import (
     search_market_symbols,
     sell_holding,
     transfer_cash,
+    transfer_stock,
     update_fixed_shares,
     update_goal,
     update_holding,
@@ -355,6 +358,19 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> CashTransferResponse:
         return transfer_cash(session, current_user.id, payload)
+
+    @app.post(
+        "/api/holdings/{holding_id}/transfer",
+        response_model=StockTransferResponse,
+        status_code=201,
+    )
+    def post_holding_transfer(
+        holding_id: UUID,
+        payload: StockTransferCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> StockTransferResponse:
+        return transfer_stock(session, current_user.id, holding_id, payload)
 
     @app.post("/api/vesting-grants", status_code=201)
     async def post_vesting_grant(

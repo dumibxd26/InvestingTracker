@@ -208,7 +208,15 @@ export interface StockSaleRecord {
   credited_subaccount_id: string;
 }
 
-export interface CashTransferPayload {
+export type TransferFeeSide = "SOURCE" | "DESTINATION";
+
+export interface TransferFeePayload {
+  fee_amount?: string;
+  fee_currency?: Currency;
+  fee_side?: TransferFeeSide;
+}
+
+export interface CashTransferPayload extends TransferFeePayload {
   idempotency_key: string;
   source_subaccount_id: string;
   destination_subaccount_id: string;
@@ -228,6 +236,32 @@ export interface CashTransferRecord {
   source_amount: string;
   destination_amount: string;
   transfer_date: string;
+  fee_amount: string | null;
+  fee_currency: Currency | null;
+  fee_side: TransferFeeSide | null;
+}
+
+export interface StockTransferPayload extends TransferFeePayload {
+  idempotency_key: string;
+  destination_account_id: string;
+  transfer_date: string;
+  quantity?: string;
+}
+
+export interface StockTransferRecord {
+  id: string;
+  symbol: string;
+  source_account_id: string;
+  destination_account_id: string;
+  source_account_name: string;
+  destination_account_name: string;
+  quantity: string;
+  average_cost: string;
+  cost_basis: string;
+  transfer_date: string;
+  fee_amount: string | null;
+  fee_currency: Currency | null;
+  fee_side: TransferFeeSide | null;
 }
 
 export interface HoldingCreated {

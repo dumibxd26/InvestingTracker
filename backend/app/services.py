@@ -60,6 +60,7 @@ from app.models import (
     RiskLevel,
     StockPurchasePlan,
     StockSale,
+    StockTransfer,
     TrancheStatus,
     User,
     ValuationSnapshot,
@@ -116,7 +117,10 @@ from app.schemas import (
     StockPurchasePlanSummary,
     StockSaleCreate,
     StockSaleResponse,
+    StockTransferCreate,
+    StockTransferResponse,
     SubaccountInterestUpdate,
+    TransferFeeInput,
     UserProfileResponse,
     VestingGrantCreate,
     VestingSummary,
@@ -1174,6 +1178,17 @@ def _cash_transfer_response(
         source_amount=transfer.source_amount,
         destination_amount=transfer.destination_amount,
         transfer_date=transfer.transfer_date,
+        fee_amount=transfer.fee_amount,
+        fee_currency=transfer.fee_currency,
+        fee_side=transfer.fee_side,
+    )
+
+
+def _transfer_fee_matches(record: CashTransfer | StockTransfer, payload: TransferFeeInput) -> bool:
+    return (
+        record.fee_amount == payload.fee_amount
+        and record.fee_currency == payload.fee_currency
+        and record.fee_side == payload.fee_side
     )
 
 
@@ -1193,6 +1208,7 @@ def transfer_cash(
             or existing.destination_subaccount_id != payload.destination_subaccount_id
             or existing.transfer_date != payload.transfer_date
             or existing.source_amount != payload.source_amount
+            or not _transfer_fee_matches(existing, payload)
             or (
                 payload.destination_amount is not None
                 and existing.destination_amount != payload.destination_amount
@@ -1266,7 +1282,34 @@ def transfer_cash(
             )
         destination_amount = payload.destination_amount
 
-    if source.cash_balance < payload.source_amount:
+    fee_amount = payload.fee_amount
+    source_debit = payload.source_amount
+    destination_credit = destination_amount
+    if fee_amount is not None:
+        if payload.fee_side == "SOURCE":
+            if payload.fee_currency != source.currency:
+                raise HTTPException(
+                    status_code=422,
+                    detail="A fee charged to the source must use the source wallet's currency",
+                )
+            source_debit += fee_amount
+        else:
+            if payload.fee_currency != destination.currency:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "A fee charged to the destination must use the destination "
+                        "wallet's currency"
+                    ),
+                )
+            if destination_amount <= fee_amount:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The fee must be smaller than the amount received",
+                )
+            destination_credit -= fee_amount
+
+    if source.cash_balance < source_debit:
         raise HTTPException(
             status_code=422,
             detail=(
@@ -1284,11 +1327,14 @@ def transfer_cash(
         source_currency=source.currency,
         destination_amount=destination_amount,
         destination_currency=destination.currency,
+        fee_amount=fee_amount,
+        fee_currency=payload.fee_currency,
+        fee_side=payload.fee_side,
         transfer_date=payload.transfer_date,
     )
     session.add(transfer)
-    source.cash_balance -= payload.source_amount
-    destination.cash_balance += destination_amount
+    source.cash_balance -= source_debit
+    destination.cash_balance += destination_credit
     try:
         session.commit()
     except IntegrityError as error:
@@ -1300,6 +1346,229 @@ def transfer_cash(
     session.refresh(transfer)
     return _cash_transfer_response(
         transfer, source_account.display_name, destination_account.display_name
+    )
+
+
+def _stock_transfer_response(
+    transfer: StockTransfer,
+    symbol: str,
+    source_account_name: str,
+    destination_account_name: str,
+) -> StockTransferResponse:
+    return StockTransferResponse(
+        id=transfer.id,
+        symbol=symbol,
+        source_account_id=transfer.source_account_id,
+        destination_account_id=transfer.destination_account_id,
+        source_account_name=source_account_name,
+        destination_account_name=destination_account_name,
+        quantity=transfer.quantity,
+        average_cost=transfer.average_cost,
+        cost_basis=transfer.cost_basis,
+        transfer_date=transfer.transfer_date,
+        fee_amount=transfer.fee_amount,
+        fee_currency=transfer.fee_currency,
+        fee_side=transfer.fee_side,
+    )
+
+
+def transfer_stock(
+    session: Session,
+    user_id: uuid.UUID,
+    holding_id: uuid.UUID,
+    payload: StockTransferCreate,
+) -> StockTransferResponse:
+    user = _get_user(session, user_id)
+    existing = session.scalar(
+        select(StockTransfer).where(
+            StockTransfer.user_id == user.id,
+            StockTransfer.client_request_id == payload.idempotency_key,
+        )
+    )
+    if existing is not None:
+        if (
+            existing.destination_account_id != payload.destination_account_id
+            or existing.transfer_date != payload.transfer_date
+            or (payload.quantity is not None and existing.quantity != payload.quantity)
+            or not _transfer_fee_matches(existing, payload)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This transfer idempotency key was already used for different data",
+            )
+        instrument = session.get(Instrument, existing.instrument_id)
+        source_account = session.get(BrokerAccount, existing.source_account_id)
+        destination_account = session.get(BrokerAccount, existing.destination_account_id)
+        return _stock_transfer_response(
+            existing,
+            instrument.symbol if instrument else "",
+            source_account.display_name if source_account else "",
+            destination_account.display_name if destination_account else "",
+        )
+
+    holding = session.scalar(
+        select(Holding)
+        .where(Holding.id == holding_id, Holding.user_id == user.id)
+        .with_for_update()
+    )
+    if holding is None:
+        raise HTTPException(status_code=404, detail="Holding was not found")
+    source_account = session.get(BrokerAccount, holding.account_id)
+    if source_account is None:
+        raise HTTPException(status_code=409, detail="The holding's account is unavailable")
+    destination_account = session.scalar(
+        select(BrokerAccount).where(
+            BrokerAccount.id == payload.destination_account_id,
+            BrokerAccount.user_id == user.id,
+        )
+    )
+    if destination_account is None:
+        raise HTTPException(status_code=404, detail="Destination account was not found")
+    if destination_account.id == source_account.id:
+        raise HTTPException(status_code=422, detail="Choose a different destination account")
+    if AccountType.EMPLOYER_PLAN in (
+        source_account.account_type,
+        destination_account.account_type,
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Employer-plan accounts cannot take part in stock transfers",
+        )
+    instrument = session.get(Instrument, holding.instrument_id)
+    if instrument is None:
+        raise HTTPException(status_code=409, detail="The position's instrument is unavailable")
+
+    linked_goal = session.scalar(
+        select(GoalHoldingAllocation.id).where(GoalHoldingAllocation.holding_id == holding.id)
+    )
+    if linked_goal is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This position is assigned to a goal; unassign it before transferring it",
+        )
+
+    today = datetime.now(UTC).date()
+    if payload.transfer_date > today:
+        raise HTTPException(status_code=422, detail="Transfer date cannot be in the future")
+    if payload.transfer_date < holding.purchase_date:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Transfer date cannot be before the purchase date "
+                f"({holding.purchase_date.isoformat()})"
+            ),
+        )
+    quantity = payload.quantity if payload.quantity is not None else holding.quantity
+    if quantity > holding.quantity:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Only {holding.quantity:f} units are held; cannot transfer {quantity:f}",
+        )
+    is_full_transfer = quantity == holding.quantity
+
+    fee_wallet: AccountSubaccount | None = None
+    if payload.fee_amount is not None:
+        fee_account = source_account if payload.fee_side == "SOURCE" else destination_account
+        fee_wallet = session.scalar(
+            select(AccountSubaccount)
+            .where(
+                AccountSubaccount.account_id == fee_account.id,
+                AccountSubaccount.currency == payload.fee_currency,
+            )
+            .with_for_update()
+        )
+        if fee_wallet is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{fee_account.display_name} has no {payload.fee_currency.value} wallet "
+                    "to pay the fee from"
+                ),
+            )
+        if fee_wallet.cash_balance < payload.fee_amount:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Insufficient balance for the fee: {fee_wallet.currency.value} "
+                    f"{fee_wallet.cash_balance:.2f} available"
+                ),
+            )
+
+    average_cost = holding.average_cost
+    cost_basis = round_money(quantity * average_cost)
+    destination_holding = session.scalar(
+        select(Holding)
+        .where(
+            Holding.user_id == user.id,
+            Holding.account_id == destination_account.id,
+            Holding.instrument_id == instrument.id,
+        )
+        .with_for_update()
+    )
+    if destination_holding is None:
+        destination_holding = Holding(
+            user_id=user.id,
+            account_id=destination_account.id,
+            funding_subaccount_id=None,
+            instrument_id=instrument.id,
+            quantity=quantity,
+            average_cost=average_cost,
+            purchase_date=holding.purchase_date,
+            risk_tier=holding.risk_tier,
+            expected_annual_return=holding.expected_annual_return,
+            funding_cost=ZERO,
+            sale_tax_rate=holding.sale_tax_rate,
+        )
+        session.add(destination_holding)
+    else:
+        total_quantity = destination_holding.quantity + quantity
+        destination_holding.average_cost = (
+            destination_holding.quantity * destination_holding.average_cost
+            + quantity * average_cost
+        ) / total_quantity
+        destination_holding.quantity = total_quantity
+        destination_holding.purchase_date = min(
+            destination_holding.purchase_date, holding.purchase_date
+        )
+
+    transfer = StockTransfer(
+        user_id=user.id,
+        client_request_id=payload.idempotency_key,
+        instrument_id=instrument.id,
+        source_account_id=source_account.id,
+        destination_account_id=destination_account.id,
+        quantity=quantity,
+        average_cost=average_cost,
+        cost_basis=cost_basis,
+        fee_amount=payload.fee_amount,
+        fee_currency=payload.fee_currency,
+        fee_side=payload.fee_side,
+        transfer_date=payload.transfer_date,
+    )
+    session.add(transfer)
+
+    if is_full_transfer:
+        session.delete(holding)
+    else:
+        remaining_quantity = holding.quantity - quantity
+        holding.funding_cost = round_money(
+            holding.funding_cost * remaining_quantity / holding.quantity
+        )
+        holding.quantity = remaining_quantity
+
+    if fee_wallet is not None and payload.fee_amount is not None:
+        fee_wallet.cash_balance -= payload.fee_amount
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This transfer was already recorded; refresh the portfolio.",
+        ) from error
+    session.refresh(transfer)
+    return _stock_transfer_response(
+        transfer, instrument.symbol, source_account.display_name, destination_account.display_name
     )
 
 

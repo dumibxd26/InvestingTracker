@@ -3,6 +3,13 @@ import { X } from "lucide-react";
 import { ApiError, api } from "../api";
 import { amount } from "../format";
 import type { AccountSummary, AccountSubaccount } from "../types";
+import {
+  TransferFeeFields,
+  emptyFeeDraft,
+  feePayload,
+  resolveFee,
+  type FeeDraft,
+} from "./TransferFeeFields";
 
 interface TransferCashDialogProps {
   accounts: AccountSummary[];
@@ -45,6 +52,7 @@ export function TransferCashDialog({
   const [transferDate, setTransferDate] = useState(todayIsoDate());
   const [sourceAmount, setSourceAmount] = useState("");
   const [destinationAmount, setDestinationAmount] = useState("");
+  const [fee, setFee] = useState<FeeDraft>(emptyFeeDraft);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -56,12 +64,24 @@ export function TransferCashDialog({
       : false;
   const parsedSource = Number(sourceAmount);
   const sourceValid = parsedSource > 0 && source !== undefined && parsedSource <= Number(source.wallet.cash_balance);
+  const resolvedFee =
+    source !== undefined && destination !== undefined
+      ? resolveFee(fee, [source.wallet.currency], [destination.wallet.currency])
+      : null;
+  const receivedAmount = crossCurrency ? Number(destinationAmount) : parsedSource;
+  const feeValid =
+    resolvedFee === null ||
+    (resolvedFee.amount > 0 &&
+      (resolvedFee.side === "SOURCE"
+        ? parsedSource + resolvedFee.amount <= Number(source?.wallet.cash_balance ?? 0)
+        : resolvedFee.amount < receivedAmount));
   const canSubmit =
     source !== undefined &&
     destination !== undefined &&
     source.wallet.id !== destination.wallet.id &&
     sourceValid &&
-    (!crossCurrency || Number(destinationAmount) > 0);
+    (!crossCurrency || Number(destinationAmount) > 0) &&
+    feeValid;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -76,6 +96,7 @@ export function TransferCashDialog({
         transfer_date: transferDate,
         source_amount: sourceAmount,
         ...(crossCurrency ? { destination_amount: destinationAmount } : {}),
+        ...feePayload(resolvedFee),
       });
       await onSaved(
         `Moved ${amount(record.source_amount, record.source_currency, 2)} from ${record.source_account_name} to ${record.destination_account_name} (${amount(record.destination_amount, record.destination_currency, 2)} received).`,
@@ -200,6 +221,16 @@ export function TransferCashDialog({
                 />
               </label>
             )}
+            <TransferFeeFields
+              value={fee}
+              onChange={setFee}
+              sourceLabel={source ? `${source.accountName} · ${source.wallet.currency}` : "Source wallet"}
+              destinationLabel={
+                destination ? `${destination.accountName} · ${destination.wallet.currency}` : "Destination wallet"
+              }
+              sourceCurrencies={source ? [source.wallet.currency] : []}
+              destinationCurrencies={destination ? [destination.wallet.currency] : []}
+            />
             <p className="quiet-copy">
               {source && sourceAmount && !sourceValid
                 ? `Only ${amount(source.wallet.cash_balance, source.wallet.currency, 2)} is available in this wallet.`
@@ -207,6 +238,12 @@ export function TransferCashDialog({
                   ? "The wallets use different currencies, so enter the amount the destination actually received."
                   : "Both wallets use the same currency, so the received amount equals the amount sent."}
             </p>
+            {resolvedFee && !feeValid && (
+              <div className="inline-error" role="alert">
+                A fee must be above zero. A source-side fee has to fit in the source balance together
+                with the amount sent, and a destination-side fee must be smaller than the amount received.
+              </div>
+            )}
             {source && destination && source.wallet.id === destination.wallet.id && (
               <div className="inline-error" role="alert">Choose two different wallets.</div>
             )}

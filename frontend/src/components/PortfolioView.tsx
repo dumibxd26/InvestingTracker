@@ -25,6 +25,7 @@ import { InitialPortfolioDialog } from "./InitialPortfolioDialog";
 import { SavingsInterestDialog } from "./SavingsInterestDialog";
 import { SellHoldingDialog } from "./SellHoldingDialog";
 import { TransferCashDialog } from "./TransferCashDialog";
+import { TransferStockDialog } from "./TransferStockDialog";
 import { amount, assetLabel, dateLabel, number } from "../format";
 import type { AccountSummary, Currency, Dashboard, HoldingSummary } from "../types";
 
@@ -74,6 +75,7 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [deletingDepositId, setDeletingDepositId] = useState<string | null>(null);
   const [editingHolding, setEditingHolding] = useState<HoldingSummary | null>(null);
   const [sellingHolding, setSellingHolding] = useState<HoldingSummary | null>(null);
+  const [transferringHolding, setTransferringHolding] = useState<HoldingSummary | null>(null);
   const [transferDialog, setTransferDialog] = useState<{ sourceId?: string } | null>(null);
   const [mutatingHoldingId, setMutatingHoldingId] = useState<string | null>(null);
   const [mutatingAccountId, setMutatingAccountId] = useState<string | null>(null);
@@ -535,6 +537,23 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                         <Banknote size={14} />
                       </button>
                     )}
+                    {data.accounts.find((account) => account.id === holding.account_id)?.account_type !==
+                      "EMPLOYER_PLAN" && (
+                      <button
+                        className="icon-button small"
+                        type="button"
+                        aria-label={`Transfer ${holding.symbol} position`}
+                        title={
+                          holding.assigned_goal_id
+                            ? "Unlink this holding from its goal before transferring"
+                            : "Move to another account"
+                        }
+                        onClick={() => setTransferringHolding(holding)}
+                        disabled={mutatingHoldingId === holding.id || holding.assigned_goal_id !== null}
+                      >
+                        <ArrowLeftRight size={14} />
+                      </button>
+                    )}
                     <button
                       className="icon-button small holding-delete-button"
                       type="button"
@@ -651,6 +670,17 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
             setHoldingMessage(
               `${sellingHolding.symbol} sale recorded; proceeds credited to the ${sellingHolding.price_currency} wallet in ${sellingHolding.account_name}.`,
             );
+          }}
+        />
+      )}
+      {transferringHolding && (
+        <TransferStockDialog
+          holding={transferringHolding}
+          accounts={data.accounts}
+          onClose={() => setTransferringHolding(null)}
+          onSaved={async (message) => {
+            await onSaved();
+            setHoldingMessage(message);
           }}
         />
       )}

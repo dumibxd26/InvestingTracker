@@ -2481,3 +2481,306 @@ def test_cash_transfers_reject_other_users_wallets_and_employer_plans(tmp_path) 
 
     assert foreign_source.status_code == 404
     assert employer_transfer.status_code == 422
+
+
+def _wallet_balance(client: TestClient, account_id: str, currency: str) -> Decimal:
+    account = next(item for item in client.get("/api/accounts").json() if item["id"] == account_id)
+    wallet = next(item for item in account["subaccounts"] if item["currency"] == currency)
+    return Decimal(wallet["cash_balance"])
+
+
+def test_cash_transfer_fee_is_debited_from_the_chosen_side(tmp_path) -> None:
+    today = datetime.now(UTC).date().isoformat()
+    with create_test_client(tmp_path) as client:
+        client.put(
+            "/api/profile",
+            json={"display_name": "Test user", "base_currency": "EUR", "usd_per_eur": "1.25"},
+        )
+        xtb = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "XTB",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "1000",
+            },
+        ).json()
+        ing = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "ING",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "0",
+            },
+        ).json()
+        xtb_eur_id = xtb["subaccounts"][0]["id"]
+        ing_eur_id = ing["subaccounts"][0]["id"]
+        base = {
+            "source_subaccount_id": xtb_eur_id,
+            "destination_subaccount_id": ing_eur_id,
+            "transfer_date": today,
+        }
+
+        source_fee = client.post(
+            "/api/cash-transfers",
+            json={
+                **base,
+                "idempotency_key": str(uuid4()),
+                "source_amount": "300",
+                "fee_amount": "5",
+                "fee_currency": "EUR",
+                "fee_side": "SOURCE",
+            },
+        )
+        destination_fee = client.post(
+            "/api/cash-transfers",
+            json={
+                **base,
+                "idempotency_key": str(uuid4()),
+                "source_amount": "100",
+                "fee_amount": "2",
+                "fee_currency": "EUR",
+                "fee_side": "DESTINATION",
+            },
+        )
+        wrong_currency = client.post(
+            "/api/cash-transfers",
+            json={
+                **base,
+                "idempotency_key": str(uuid4()),
+                "source_amount": "10",
+                "fee_amount": "1",
+                "fee_currency": "USD",
+                "fee_side": "SOURCE",
+            },
+        )
+        incomplete_fee = client.post(
+            "/api/cash-transfers",
+            json={
+                **base,
+                "idempotency_key": str(uuid4()),
+                "source_amount": "10",
+                "fee_amount": "1",
+            },
+        )
+        fee_too_large = client.post(
+            "/api/cash-transfers",
+            json={
+                **base,
+                "idempotency_key": str(uuid4()),
+                "source_amount": "2",
+                "fee_amount": "2",
+                "fee_currency": "EUR",
+                "fee_side": "DESTINATION",
+            },
+        )
+        cannot_cover_fee = client.post(
+            "/api/cash-transfers",
+            json={
+                **base,
+                "idempotency_key": str(uuid4()),
+                "source_amount": "590",
+                "fee_amount": "10",
+                "fee_currency": "EUR",
+                "fee_side": "SOURCE",
+            },
+        )
+        replay_key = str(uuid4())
+        replay_payload = {
+            **base,
+            "idempotency_key": replay_key,
+            "source_amount": "50",
+            "fee_amount": "1",
+            "fee_currency": "EUR",
+            "fee_side": "SOURCE",
+        }
+        first_replay = client.post("/api/cash-transfers", json=replay_payload)
+        changed_fee = client.post(
+            "/api/cash-transfers", json={**replay_payload, "fee_amount": "3"}
+        )
+        xtb_balance = _wallet_balance(client, xtb["id"], "EUR")
+        ing_balance = _wallet_balance(client, ing["id"], "EUR")
+
+    assert source_fee.status_code == 201, source_fee.text
+    assert source_fee.json()["fee_side"] == "SOURCE"
+    assert Decimal(source_fee.json()["fee_amount"]) == Decimal("5")
+    assert destination_fee.status_code == 201, destination_fee.text
+    assert wrong_currency.status_code == 422
+    assert incomplete_fee.status_code == 422
+    assert fee_too_large.status_code == 422
+    assert cannot_cover_fee.status_code == 422
+    assert first_replay.status_code == 201, first_replay.text
+    assert changed_fee.status_code == 409
+    # XTB: 1000 - 305 (source fee) - 100 - 50 - 1 (replay) = 544
+    # ING: 300 + (100 - 2) + 50 = 448
+    assert xtb_balance == Decimal("544")
+    assert ing_balance == Decimal("448")
+
+
+def test_stock_transfer_moves_position_between_accounts_with_optional_fee(
+    monkeypatch, tmp_path
+) -> None:
+    import app.services as services
+
+    monkeypatch.setattr(
+        services, "get_settings", lambda: Settings(twelve_data_api_key="test-provider-key")
+    )
+    monkeypatch.setattr(services, "TwelveDataClient", _StockSaleFakeTwelveDataClient)
+    today = datetime.now(UTC).date()
+    with create_test_client(tmp_path) as client:
+        client.put(
+            "/api/profile",
+            json={"display_name": "Test user", "base_currency": "EUR", "usd_per_eur": "1.25"},
+        )
+        broker = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "IBKR",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "10000",
+            },
+        ).json()
+        bank = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "ING",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "500",
+            },
+        ).json()
+        bought = client.post(
+            "/api/holdings",
+            json={
+                "account_id": broker["id"],
+                "subaccount_id": broker["subaccounts"][0]["id"],
+                "symbol": "MSFT",
+                "mic_code": "XNAS",
+                "exchange": "NASDAQ",
+                "instrument_type": "STOCK",
+                "quantity": "10",
+                "average_cost": "400",
+                "average_cost_currency": "USD",
+                "purchase_date": (today - timedelta(days=60)).isoformat(),
+            },
+        )
+        assert bought.status_code == 201, bought.text
+
+        def msft_quantity(account_name: str) -> Decimal | None:
+            for holding in client.get("/api/dashboard").json()["holdings"]:
+                if holding["symbol"] == "MSFT" and holding["account_name"] == account_name:
+                    return Decimal(holding["quantity"])
+            return None
+
+        holding_id = next(
+            holding["id"]
+            for holding in client.get("/api/dashboard").json()["holdings"]
+            if holding["symbol"] == "MSFT"
+        )
+        transfer_path = f"/api/holdings/{holding_id}/transfer"
+        partial = {
+            "idempotency_key": str(uuid4()),
+            "destination_account_id": bank["id"],
+            "transfer_date": today.isoformat(),
+            "quantity": "4",
+            "fee_amount": "5",
+            "fee_currency": "EUR",
+            "fee_side": "DESTINATION",
+        }
+        moved = client.post(transfer_path, json=partial)
+        replay = client.post(transfer_path, json=partial)
+        mismatch = client.post(transfer_path, json={**partial, "fee_amount": "6"})
+        too_many = client.post(
+            transfer_path,
+            json={**partial, "idempotency_key": str(uuid4()), "quantity": "7"},
+        )
+        same_account = client.post(
+            transfer_path,
+            json={
+                **partial,
+                "idempotency_key": str(uuid4()),
+                "destination_account_id": broker["id"],
+            },
+        )
+        future = client.post(
+            transfer_path,
+            json={
+                **partial,
+                "idempotency_key": str(uuid4()),
+                "transfer_date": (today + timedelta(days=1)).isoformat(),
+            },
+        )
+        too_early = client.post(
+            transfer_path,
+            json={
+                **partial,
+                "idempotency_key": str(uuid4()),
+                "transfer_date": (today - timedelta(days=90)).isoformat(),
+            },
+        )
+        no_wallet_for_fee = client.post(
+            transfer_path,
+            json={**partial, "idempotency_key": str(uuid4()), "fee_currency": "USD"},
+        )
+        incomplete_fee = client.post(
+            transfer_path,
+            json={**partial, "idempotency_key": str(uuid4()), "fee_currency": None},
+        )
+        after_partial = (msft_quantity("IBKR"), msft_quantity("ING"))
+        bank_eur_after_partial = _wallet_balance(client, bank["id"], "EUR")
+
+        merged = client.post(
+            transfer_path,
+            json={
+                "idempotency_key": str(uuid4()),
+                "destination_account_id": bank["id"],
+                "transfer_date": today.isoformat(),
+                "quantity": "3",
+            },
+        )
+        after_merge = (msft_quantity("IBKR"), msft_quantity("ING"))
+
+        broker_eur_before_close = _wallet_balance(client, broker["id"], "EUR")
+        closing = client.post(
+            transfer_path,
+            json={
+                "idempotency_key": str(uuid4()),
+                "destination_account_id": bank["id"],
+                "transfer_date": today.isoformat(),
+                "fee_amount": "2",
+                "fee_currency": "EUR",
+                "fee_side": "SOURCE",
+            },
+        )
+        broker_eur_after_close = _wallet_balance(client, broker["id"], "EUR")
+        after_close = (msft_quantity("IBKR"), msft_quantity("ING"))
+
+    assert moved.status_code == 201, moved.text
+    assert Decimal(moved.json()["quantity"]) == Decimal("4")
+    assert Decimal(moved.json()["average_cost"]) == Decimal("400")
+    assert Decimal(moved.json()["cost_basis"]) == Decimal("1600")
+    assert moved.json()["source_account_name"] == "IBKR"
+    assert moved.json()["destination_account_name"] == "ING"
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["id"] == moved.json()["id"]
+    assert mismatch.status_code == 409
+    assert too_many.status_code == 422
+    assert same_account.status_code == 422
+    assert future.status_code == 422
+    assert too_early.status_code == 422
+    assert no_wallet_for_fee.status_code == 422
+    assert incomplete_fee.status_code == 422
+    assert after_partial == (Decimal("6"), Decimal("4"))
+    assert bank_eur_after_partial == Decimal("495")
+    assert merged.status_code == 201, merged.text
+    assert after_merge == (Decimal("3"), Decimal("7"))
+    assert closing.status_code == 201, closing.text
+    assert closing.json()["fee_side"] == "SOURCE"
+    assert after_close == (None, Decimal("10"))
+    assert broker_eur_before_close - broker_eur_after_close == Decimal("2")

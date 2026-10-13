@@ -843,7 +843,20 @@ class StockSaleResponse(BaseModel):
     credited_subaccount_id: UUID
 
 
-class CashTransferCreate(BaseModel):
+class TransferFeeInput(BaseModel):
+    fee_amount: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000"))
+    fee_currency: Currency | None = None
+    fee_side: Literal["SOURCE", "DESTINATION"] | None = None
+
+    @model_validator(mode="after")
+    def _fee_fields_together(self) -> "TransferFeeInput":
+        values = (self.fee_amount, self.fee_currency, self.fee_side)
+        if any(value is not None for value in values) and any(value is None for value in values):
+            raise ValueError("A fee needs an amount, a currency and a side together")
+        return self
+
+
+class CashTransferCreate(TransferFeeInput):
     idempotency_key: UUID
     source_subaccount_id: UUID
     destination_subaccount_id: UUID
@@ -863,6 +876,32 @@ class CashTransferResponse(BaseModel):
     source_amount: Decimal
     destination_amount: Decimal
     transfer_date: date
+    fee_amount: Decimal | None = None
+    fee_currency: Currency | None = None
+    fee_side: Literal["SOURCE", "DESTINATION"] | None = None
+
+
+class StockTransferCreate(TransferFeeInput):
+    idempotency_key: UUID
+    destination_account_id: UUID
+    transfer_date: date
+    quantity: Decimal | None = Field(default=None, gt=0, le=Decimal("1000000000"))
+
+
+class StockTransferResponse(BaseModel):
+    id: UUID
+    symbol: str
+    source_account_id: UUID
+    destination_account_id: UUID
+    source_account_name: str
+    destination_account_name: str
+    quantity: Decimal
+    average_cost: Decimal
+    cost_basis: Decimal
+    transfer_date: date
+    fee_amount: Decimal | None = None
+    fee_currency: Currency | None = None
+    fee_side: Literal["SOURCE", "DESTINATION"] | None = None
 
 
 class StockPurchasePlanCreate(BaseModel):

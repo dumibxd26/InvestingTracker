@@ -708,6 +708,14 @@ class CashTransfer(Base):
             "source_subaccount_id <> destination_subaccount_id",
             name="ck_cash_transfers_distinct_wallets",
         ),
+        CheckConstraint(
+            "fee_amount IS NULL OR fee_amount > 0",
+            name="ck_cash_transfers_fee_positive",
+        ),
+        CheckConstraint(
+            "fee_side IS NULL OR fee_side IN ('SOURCE', 'DESTINATION')",
+            name="ck_cash_transfers_fee_side",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -729,6 +737,57 @@ class CashTransfer(Base):
     destination_currency: Mapped[Currency] = mapped_column(
         SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
     )
+    fee_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    fee_currency: Mapped[Currency | None] = mapped_column(
+        SqlEnum(Currency, values_callable=enum_values, name="currency_code")
+    )
+    fee_side: Mapped[str | None] = mapped_column(String(12))
+    transfer_date: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+class StockTransfer(Base):
+    __tablename__ = "stock_transfers"
+    __table_args__ = (
+        UniqueConstraint("user_id", "client_request_id", name="uq_stock_transfers_request"),
+        Index("ix_stock_transfers_user_date", "user_id", "transfer_date"),
+        CheckConstraint("quantity > 0", name="ck_stock_transfers_quantity_positive"),
+        CheckConstraint(
+            "source_account_id <> destination_account_id",
+            name="ck_stock_transfers_distinct_accounts",
+        ),
+        CheckConstraint(
+            "fee_amount IS NULL OR fee_amount > 0",
+            name="ck_stock_transfers_fee_positive",
+        ),
+        CheckConstraint(
+            "fee_side IS NULL OR fee_side IN ('SOURCE', 'DESTINATION')",
+            name="ck_stock_transfers_fee_side",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    client_request_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    instrument_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("instruments.id"), nullable=False)
+    source_account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
+    )
+    destination_account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
+    )
+    quantity: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    average_cost: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    cost_basis: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    fee_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    fee_currency: Mapped[Currency | None] = mapped_column(
+        SqlEnum(Currency, values_callable=enum_values, name="currency_code")
+    )
+    fee_side: Mapped[str | None] = mapped_column(String(12))
     transfer_date: Mapped[date] = mapped_column(Date, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
