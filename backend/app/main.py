@@ -22,6 +22,8 @@ from app.schemas import (
     CashFlowScheduleCreate,
     CashFlowScheduleResponse,
     CashReceiptCreate,
+    CashTransferCreate,
+    CashTransferResponse,
     ChatRequest,
     ChatResponse,
     DashboardResponse,
@@ -90,6 +92,7 @@ from app.services import (
     register_user,
     search_market_symbols,
     sell_holding,
+    transfer_cash,
     update_fixed_shares,
     update_goal,
     update_holding,
@@ -344,6 +347,14 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> StockSaleResponse:
         return sell_holding(session, current_user.id, holding_id, payload)
+
+    @app.post("/api/cash-transfers", response_model=CashTransferResponse, status_code=201)
+    def post_cash_transfer(
+        payload: CashTransferCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> CashTransferResponse:
+        return transfer_cash(session, current_user.id, payload)
 
     @app.post("/api/vesting-grants", status_code=201)
     async def post_vesting_grant(

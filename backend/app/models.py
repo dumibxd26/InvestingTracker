@@ -697,6 +697,44 @@ class StockSale(Base):
     )
 
 
+class CashTransfer(Base):
+    __tablename__ = "cash_transfers"
+    __table_args__ = (
+        UniqueConstraint("user_id", "client_request_id", name="uq_cash_transfers_request"),
+        Index("ix_cash_transfers_user_date", "user_id", "transfer_date"),
+        CheckConstraint("source_amount > 0", name="ck_cash_transfers_source_positive"),
+        CheckConstraint("destination_amount > 0", name="ck_cash_transfers_destination_positive"),
+        CheckConstraint(
+            "source_subaccount_id <> destination_subaccount_id",
+            name="ck_cash_transfers_distinct_wallets",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    client_request_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    source_subaccount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("account_subaccounts.id", ondelete="CASCADE"), nullable=False
+    )
+    destination_subaccount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("account_subaccounts.id", ondelete="CASCADE"), nullable=False
+    )
+    source_amount: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    source_currency: Mapped[Currency] = mapped_column(
+        SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
+    )
+    destination_amount: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    destination_currency: Mapped[Currency] = mapped_column(
+        SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
+    )
+    transfer_date: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 class ValuationSnapshot(Base):
     __tablename__ = "valuation_snapshots"
     __table_args__ = (Index("ix_valuation_snapshot_user_time", "user_id", "observed_at"),)

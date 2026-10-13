@@ -843,6 +843,28 @@ class StockSaleResponse(BaseModel):
     credited_subaccount_id: UUID
 
 
+class CashTransferCreate(BaseModel):
+    idempotency_key: UUID
+    source_subaccount_id: UUID
+    destination_subaccount_id: UUID
+    transfer_date: date
+    source_amount: Decimal = Field(gt=0, le=Decimal("100000000"))
+    destination_amount: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000"))
+
+
+class CashTransferResponse(BaseModel):
+    id: UUID
+    source_subaccount_id: UUID
+    destination_subaccount_id: UUID
+    source_account_name: str
+    destination_account_name: str
+    source_currency: Currency
+    destination_currency: Currency
+    source_amount: Decimal
+    destination_amount: Decimal
+    transfer_date: date
+
+
 class StockPurchasePlanCreate(BaseModel):
     name: str | None = Field(default=None, max_length=80)
     symbol: str = Field(min_length=1, max_length=24)

@@ -36,6 +36,7 @@ from app.models import (
     BrokerAccount,
     CashFlow,
     CashFlowSchedule,
+    CashTransfer,
     CompoundingFrequency,
     Currency,
     FixedDeposit,
@@ -77,6 +78,8 @@ from app.schemas import (
     CashFlowScheduleCreate,
     CashFlowScheduleResponse,
     CashReceiptCreate,
+    CashTransferCreate,
+    CashTransferResponse,
     ChartPoint,
     DepositSummary,
     FixedDepositCreate,
@@ -1153,6 +1156,151 @@ def sell_holding(
         ) from error
     session.refresh(sale)
     return _stock_sale_response(sale, instrument.symbol)
+
+
+def _cash_transfer_response(
+    transfer: CashTransfer,
+    source_account_name: str,
+    destination_account_name: str,
+) -> CashTransferResponse:
+    return CashTransferResponse(
+        id=transfer.id,
+        source_subaccount_id=transfer.source_subaccount_id,
+        destination_subaccount_id=transfer.destination_subaccount_id,
+        source_account_name=source_account_name,
+        destination_account_name=destination_account_name,
+        source_currency=transfer.source_currency,
+        destination_currency=transfer.destination_currency,
+        source_amount=transfer.source_amount,
+        destination_amount=transfer.destination_amount,
+        transfer_date=transfer.transfer_date,
+    )
+
+
+def transfer_cash(
+    session: Session, user_id: uuid.UUID, payload: CashTransferCreate
+) -> CashTransferResponse:
+    user = _get_user(session, user_id)
+    existing = session.scalar(
+        select(CashTransfer).where(
+            CashTransfer.user_id == user.id,
+            CashTransfer.client_request_id == payload.idempotency_key,
+        )
+    )
+    if existing is not None:
+        if (
+            existing.source_subaccount_id != payload.source_subaccount_id
+            or existing.destination_subaccount_id != payload.destination_subaccount_id
+            or existing.transfer_date != payload.transfer_date
+            or existing.source_amount != payload.source_amount
+            or (
+                payload.destination_amount is not None
+                and existing.destination_amount != payload.destination_amount
+            )
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This transfer idempotency key was already used for different data",
+            )
+        source = session.get(AccountSubaccount, existing.source_subaccount_id)
+        destination = session.get(AccountSubaccount, existing.destination_subaccount_id)
+        if source is None or destination is None:
+            raise HTTPException(status_code=409, detail="The transfer's wallets are unavailable")
+        source_account = session.get(BrokerAccount, source.account_id)
+        destination_account = session.get(BrokerAccount, destination.account_id)
+        return _cash_transfer_response(
+            existing,
+            source_account.display_name if source_account else "",
+            destination_account.display_name if destination_account else "",
+        )
+
+    if payload.source_subaccount_id == payload.destination_subaccount_id:
+        raise HTTPException(status_code=422, detail="Choose two different wallets")
+
+    today = datetime.now(UTC).date()
+    if payload.transfer_date > today:
+        raise HTTPException(status_code=422, detail="Transfer date cannot be in the future")
+
+    wallet_ids = sorted([payload.source_subaccount_id, payload.destination_subaccount_id])
+    locked = {
+        wallet.id: wallet
+        for wallet in session.scalars(
+            select(AccountSubaccount)
+            .where(AccountSubaccount.id.in_(wallet_ids))
+            .order_by(AccountSubaccount.id)
+            .with_for_update()
+        )
+    }
+    source = locked.get(payload.source_subaccount_id)
+    destination = locked.get(payload.destination_subaccount_id)
+    if source is None or destination is None:
+        raise HTTPException(status_code=404, detail="Wallet was not found")
+
+    source_account = session.get(BrokerAccount, source.account_id)
+    destination_account = session.get(BrokerAccount, destination.account_id)
+    if source_account is None or destination_account is None:
+        raise HTTPException(status_code=409, detail="A wallet's account is unavailable")
+    if source_account.user_id != user.id or destination_account.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Wallet was not found")
+    if AccountType.EMPLOYER_PLAN in (
+        source_account.account_type,
+        destination_account.account_type,
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Employer-plan accounts cannot take part in cash transfers",
+        )
+
+    if source.currency == destination.currency:
+        destination_amount = payload.destination_amount or payload.source_amount
+        if destination_amount != payload.source_amount:
+            raise HTTPException(
+                status_code=422,
+                detail="Both wallets use the same currency, so the amounts must match",
+            )
+    else:
+        if payload.destination_amount is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Enter the amount received, because the wallets use different currencies",
+            )
+        destination_amount = payload.destination_amount
+
+    if source.cash_balance < payload.source_amount:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Insufficient balance: {source.currency.value} "
+                f"{source.cash_balance:.2f} available"
+            ),
+        )
+
+    transfer = CashTransfer(
+        user_id=user.id,
+        client_request_id=payload.idempotency_key,
+        source_subaccount_id=source.id,
+        destination_subaccount_id=destination.id,
+        source_amount=payload.source_amount,
+        source_currency=source.currency,
+        destination_amount=destination_amount,
+        destination_currency=destination.currency,
+        transfer_date=payload.transfer_date,
+    )
+    session.add(transfer)
+    source.cash_balance -= payload.source_amount
+    destination.cash_balance += destination_amount
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This transfer was already recorded; refresh the portfolio.",
+        ) from error
+    session.refresh(transfer)
+    return _cash_transfer_response(
+        transfer, source_account.display_name, destination_account.display_name
+    )
 
 
 def _save_market_fx_quote(session: Session, quote: ExchangeRateQuote) -> None:

@@ -34,6 +34,8 @@ import type {
   SubaccountInterestPayload,
   StockSalePayload,
   StockSaleRecord,
+  CashTransferPayload,
+  CashTransferRecord,
   UserProfile,
   VestingGrantPayload,
 } from "./types";
@@ -232,6 +234,12 @@ export const api = {
 
   sellHolding: (holdingId: string, payload: StockSalePayload) =>
     request<StockSaleRecord>(`/holdings/${encodeURIComponent(holdingId)}/sell`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  transferCash: (payload: CashTransferPayload) =>
+    request<CashTransferRecord>("/cash-transfers", {
       method: "POST",
       body: JSON.stringify(payload),
     }),

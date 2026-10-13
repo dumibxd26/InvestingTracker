@@ -2285,3 +2285,199 @@ def test_selling_a_holding_credits_proceeds_to_the_broker_currency_wallet(
     assert Decimal(closing.json()["realized_pnl"]) == Decimal("150")
     assert all(holding["symbol"] != "MSFT" for holding in after_close["holdings"])
     assert usd_wallet_cash(after_close) == Decimal("4230")
+
+def test_cash_transfers_move_balances_between_wallets_with_guards(tmp_path) -> None:
+    today = datetime.now(UTC).date()
+    with create_test_client(tmp_path) as client:
+        client.put(
+            "/api/profile",
+            json={"display_name": "Test user", "base_currency": "EUR", "usd_per_eur": "1.25"},
+        )
+        xtb = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "XTB",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "1000",
+            },
+        ).json()
+        xtb_usd = client.post(
+            f"/api/accounts/{xtb['id']}/subaccounts",
+            json={"currency": "USD", "opening_balance": "200"},
+        ).json()
+        ing = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "ING",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "0",
+            },
+        ).json()
+        xtb_eur_id = xtb["subaccounts"][0]["id"]
+        ing_eur_id = ing["subaccounts"][0]["id"]
+        xtb_usd_id = xtb_usd["id"]
+        transfer_path = "/api/cash-transfers"
+
+        same_currency = {
+            "idempotency_key": str(uuid4()),
+            "source_subaccount_id": xtb_eur_id,
+            "destination_subaccount_id": ing_eur_id,
+            "transfer_date": today.isoformat(),
+            "source_amount": "300",
+        }
+        moved = client.post(transfer_path, json=same_currency)
+        replay = client.post(transfer_path, json=same_currency)
+        mismatch = client.post(transfer_path, json={**same_currency, "source_amount": "310"})
+        mismatched_destination = client.post(
+            transfer_path,
+            json={**same_currency, "idempotency_key": str(uuid4()), "destination_amount": "250"},
+        )
+        insufficient = client.post(
+            transfer_path,
+            json={**same_currency, "idempotency_key": str(uuid4()), "source_amount": "5000"},
+        )
+        same_wallet = client.post(
+            transfer_path,
+            json={
+                **same_currency,
+                "idempotency_key": str(uuid4()),
+                "destination_subaccount_id": xtb_eur_id,
+            },
+        )
+        future = client.post(
+            transfer_path,
+            json={
+                **same_currency,
+                "idempotency_key": str(uuid4()),
+                "transfer_date": (today + timedelta(days=1)).isoformat(),
+            },
+        )
+        cross_missing = client.post(
+            transfer_path,
+            json={
+                "idempotency_key": str(uuid4()),
+                "source_subaccount_id": xtb_usd_id,
+                "destination_subaccount_id": ing_eur_id,
+                "transfer_date": today.isoformat(),
+                "source_amount": "50",
+            },
+        )
+        cross_currency = client.post(
+            transfer_path,
+            json={
+                "idempotency_key": str(uuid4()),
+                "source_subaccount_id": xtb_usd_id,
+                "destination_subaccount_id": ing_eur_id,
+                "transfer_date": today.isoformat(),
+                "source_amount": "50",
+                "destination_amount": "40",
+            },
+        )
+        accounts = client.get("/api/accounts").json()
+
+    def balance(subaccount_id: str) -> Decimal:
+        for account in accounts:
+            for subaccount in account["subaccounts"]:
+                if subaccount["id"] == subaccount_id:
+                    return Decimal(subaccount["cash_balance"])
+        raise AssertionError(f"wallet {subaccount_id} missing")
+
+    assert moved.status_code == 201, moved.text
+    assert moved.json()["source_account_name"] == "XTB"
+    assert moved.json()["destination_account_name"] == "ING"
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["id"] == moved.json()["id"]
+    assert mismatch.status_code == 409
+    assert mismatched_destination.status_code == 422
+    assert insufficient.status_code == 422
+    assert same_wallet.status_code == 422
+    assert future.status_code == 422
+    assert cross_missing.status_code == 422
+    assert cross_currency.status_code == 201, cross_currency.text
+    assert Decimal(cross_currency.json()["destination_amount"]) == Decimal("40")
+    assert balance(xtb_eur_id) == Decimal("700")
+    assert balance(ing_eur_id) == Decimal("340")
+    assert balance(xtb_usd_id) == Decimal("150")
+
+
+def test_cash_transfers_reject_other_users_wallets_and_employer_plans(tmp_path) -> None:
+    with create_test_client(tmp_path, authenticated=False) as client:
+        first = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"transfer_owner_{uuid4().hex[:8]}",
+                "password": "correct-horse-battery-transfer1",
+                "base_currency": "EUR",
+            },
+        )
+        assert first.status_code == 201, first.text
+        first_token = first.json()["access_token"]
+        client.headers.update({"Authorization": "Bearer " + first_token})
+        mine = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Mine",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "100",
+            },
+        ).json()
+        employer = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Employer plan",
+                "provider_code": "MANUAL",
+                "account_type": "EMPLOYER_PLAN",
+                "currency": "EUR",
+                "opening_cash": "0",
+            },
+        ).json()
+        second = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"transfer_other_{uuid4().hex[:8]}",
+                "password": "correct-horse-battery-transfer2",
+                "base_currency": "EUR",
+            },
+        )
+        assert second.status_code == 201, second.text
+        client.headers.update({"Authorization": "Bearer " + second.json()["access_token"]})
+        other = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Other",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "0",
+            },
+        ).json()
+        foreign_source = client.post(
+            "/api/cash-transfers",
+            json={
+                "idempotency_key": str(uuid4()),
+                "source_subaccount_id": mine["subaccounts"][0]["id"],
+                "destination_subaccount_id": other["subaccounts"][0]["id"],
+                "transfer_date": date.today().isoformat(),
+                "source_amount": "10",
+            },
+        )
+        client.headers.update({"Authorization": "Bearer " + first_token})
+        employer_transfer = client.post(
+            "/api/cash-transfers",
+            json={
+                "idempotency_key": str(uuid4()),
+                "source_subaccount_id": mine["subaccounts"][0]["id"],
+                "destination_subaccount_id": employer["subaccounts"][0]["id"],
+                "transfer_date": date.today().isoformat(),
+                "source_amount": "10",
+            },
+        )
+
+    assert foreign_source.status_code == 404
+    assert employer_transfer.status_code == 422

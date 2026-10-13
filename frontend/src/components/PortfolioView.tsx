@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  ArrowLeftRight,
   ArrowUpRight,
   Banknote,
   Building2,
@@ -23,6 +24,7 @@ import { ExtraCashDialog } from "./ExtraCashDialog";
 import { InitialPortfolioDialog } from "./InitialPortfolioDialog";
 import { SavingsInterestDialog } from "./SavingsInterestDialog";
 import { SellHoldingDialog } from "./SellHoldingDialog";
+import { TransferCashDialog } from "./TransferCashDialog";
 import { amount, assetLabel, dateLabel, number } from "../format";
 import type { AccountSummary, Currency, Dashboard, HoldingSummary } from "../types";
 
@@ -72,6 +74,7 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [deletingDepositId, setDeletingDepositId] = useState<string | null>(null);
   const [editingHolding, setEditingHolding] = useState<HoldingSummary | null>(null);
   const [sellingHolding, setSellingHolding] = useState<HoldingSummary | null>(null);
+  const [transferDialog, setTransferDialog] = useState<{ sourceId?: string } | null>(null);
   const [mutatingHoldingId, setMutatingHoldingId] = useState<string | null>(null);
   const [mutatingAccountId, setMutatingAccountId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -348,6 +351,17 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                   >
                     <Plus size={13} /> Currency
                   </button>
+                  {account.account_type !== "EMPLOYER_PLAN" && (
+                    <button
+                      className="button button-quiet button-small"
+                      type="button"
+                      onClick={() => setTransferDialog({ sourceId: account.subaccounts[0]?.id })}
+                      disabled={account.is_sample || account.subaccounts.length === 0}
+                      title="Move cash from one wallet to another wallet, e.g. XTB to ING"
+                    >
+                      <ArrowLeftRight size={13} /> Transfer
+                    </button>
+                  )}
                   {(account.account_type === "BANK" || account.account_type === "SAVINGS") && (
                     <button
                       className="button button-quiet button-small"
@@ -637,6 +651,17 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
             setHoldingMessage(
               `${sellingHolding.symbol} sale recorded; proceeds credited to the ${sellingHolding.price_currency} wallet in ${sellingHolding.account_name}.`,
             );
+          }}
+        />
+      )}
+      {transferDialog && (
+        <TransferCashDialog
+          accounts={data.accounts}
+          initialSourceId={transferDialog.sourceId}
+          onClose={() => setTransferDialog(null)}
+          onSaved={async (message) => {
+            await onSaved();
+            setAccountMessage(message);
           }}
         />
       )}

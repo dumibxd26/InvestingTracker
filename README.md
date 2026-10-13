@@ -98,6 +98,7 @@ API tests use isolated SQLite temporary databases; the Docker stack uses Postgre
 | `POST /api/holdings` | Add a selected stock/ETF listing, record its quote, and convert/debit the purchase cost from the chosen EUR/USD/RON sub-account |
 | `PUT /api/holdings/{id}` / `DELETE /api/holdings/{id}` | Update a position and apply the converted cost-basis difference, or remove it and restore its recorded funding-currency cost |
 | `POST /api/holdings/{id}/sell` | Record a sale of all or part of a position at a user-entered after-tax price per unit in the holding's currency; credits proceeds to that currency's wallet in the same account (idempotent via `idempotency_key`; employer-plan holdings cannot be sold) |
+| `POST /api/cash-transfers` | Move cash between two of the user's wallets (for example XTB EUR to ING RON); same-currency transfers move the same amount, cross-currency transfers take a user-entered received amount with no automatic FX. Balances only: no trade or cash-flow record is created. Idempotent via `idempotency_key`; employer-plan wallets are not allowed |
 | `POST /api/market/refresh` | Manually refresh held symbols and EUR/USD/RON FX rates |
 | `GET /api/projections/portfolio?target_date=2036-10-11` | Deterministic editable-return projection for current account assets; excludes forecasts and unvested awards |
 | `GET /api/goals` / `POST /api/goals` | List or add a goal |
@@ -136,7 +137,8 @@ The default Compose port bindings are loopback-only. Do not expose this service 
 
 ## Financial and product boundaries
 
-- The application no longer seeds demo users or sample financial records. Historical sample rows from an older shared profile are preserved but inaccessible through the new user-scoped APIs.
+- Account-to-account transfers (for example XTB to ING) only move `cash_balance` between two existing wallets. They create no trades, no `CashFlow` rows, and no fees. They are reserved as the base for future spending links.
+- The application no longer seeds demo users or sample financial records. Historical sample rows from an older shared profile are preserved but inaccessible through the new user-scoped APIs.
 - The Overview investment treemap groups identical normalized ticker symbols across accounts/listings, sizes each tile by its combined estimated after-tax market value, and colors it by its combined estimated after-tax gain/loss percentage. Existing holdings are backfilled at a 5% nominal return assumption; new ETFs default to X/6% and individual stocks to Y/5%. Users can edit risk tier and return per holding. These starting values are placeholders, not provider-derived ratings or expected performance.
 - Portfolio projections apply each holding's user-entered effective annual total-return assumption, hold current FX constant, keep ordinary cash flat (except savings wallets with a monthly interest rate), and accrue deposits only to maturity (without assuming reinvestment). They exclude unvested awards, future cash flows and additional contributions. The risk tiers are qualitative labels, not historical volatility or probability-of-loss estimates; no crypto instrument type or historical volatility analysis is implemented yet. Projection results are not promises or investment advice.
 - New profiles start without a funding rule, asset-class weights, reserve target, balances, or goals; the user chooses these before an allocation preview is enabled.

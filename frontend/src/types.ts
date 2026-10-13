@@ -208,6 +208,28 @@ export interface StockSaleRecord {
   credited_subaccount_id: string;
 }
 
+export interface CashTransferPayload {
+  idempotency_key: string;
+  source_subaccount_id: string;
+  destination_subaccount_id: string;
+  transfer_date: string;
+  source_amount: string;
+  destination_amount?: string;
+}
+
+export interface CashTransferRecord {
+  id: string;
+  source_subaccount_id: string;
+  destination_subaccount_id: string;
+  source_account_name: string;
+  destination_account_name: string;
+  source_currency: Currency;
+  destination_currency: Currency;
+  source_amount: string;
+  destination_amount: string;
+  transfer_date: string;
+}
+
 export interface HoldingCreated {
   symbol: string;
   account_name: string;
