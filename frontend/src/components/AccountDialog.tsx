@@ -3,6 +3,8 @@ import { Landmark, X } from "lucide-react";
 import { ApiError, api } from "../api";
 import type { AccountType, Currency, UserProfile } from "../types";
 
+type InterestModel = "SAME_ACCOUNT" | "SEPARATE_ACCOUNT";
+
 interface AccountDialogProps {
   profile: UserProfile;
   onClose: () => void;
@@ -14,6 +16,11 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
   const [accountType, setAccountType] = useState<AccountType>("BROKERAGE");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [interestModel, setInterestModel] = useState<InterestModel>("SAME_ACCOUNT");
+  const [interestRateEntered, setInterestRateEntered] = useState(false);
+  const supportsInterest = accountType !== "EMPLOYER_PLAN";
+  const offersInterestModel = accountType === "BANK";
+  const separateInterestAccount = offersInterestModel && interestModel === "SEPARATE_ACCOUNT";
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -21,6 +28,13 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
     setSaving(true);
     const form = new FormData(event.currentTarget);
     const providerCode = String(form.get("provider") ?? "MANUAL");
+    const interestPercent = supportsInterest ? String(form.get("interestPercent") ?? "").trim() : "";
+    const interestFields = interestPercent
+      ? {
+          annual_interest_rate: String(Number(interestPercent) / 100),
+          interest_start_date: String(form.get("interestStart") || ""),
+        }
+      : {};
 
     try {
       await api.createAccount({
@@ -29,7 +43,28 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
         account_type: accountType,
         currency,
         opening_cash: String(form.get("openingCash") || "0"),
+        ...(separateInterestAccount ? {} : interestFields),
       });
+      if (separateInterestAccount && interestPercent) {
+        try {
+          await api.createAccount({
+            display_name: String(form.get("interestAccountName") ?? "").trim(),
+            provider_code: providerCode,
+            account_type: "SAVINGS",
+            currency,
+            opening_cash: "0",
+            ...interestFields,
+          });
+        } catch (cause) {
+          await onCreated();
+          setError(
+            `The spending account was saved, but its interest account could not be created: ${
+              cause instanceof ApiError ? cause.message : "unknown error"
+            }. Add it from the Portfolio page.`,
+          );
+          return;
+        }
+      }
       await onCreated();
       onClose();
     } catch (cause) {
@@ -99,6 +134,68 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
               )}
             </label>
           </div>
+          {supportsInterest && (
+            <div className="grant-tax-fields">
+              <div className="eyebrow">Economy account interest · optional</div>
+              {offersInterestModel && (
+                <fieldset className="interest-model-choice">
+                  <legend>Where is the interest paid?</legend>
+                  <label className="interest-model-option">
+                    <input
+                      type="radio"
+                      name="interestModel"
+                      checked={interestModel === "SAME_ACCOUNT"}
+                      onChange={() => setInterestModel("SAME_ACCOUNT")}
+                    />
+                    <span>This bank account is also the interest account (Salt, XTB)</span>
+                  </label>
+                  <label className="interest-model-option">
+                    <input
+                      type="radio"
+                      name="interestModel"
+                      checked={interestModel === "SEPARATE_ACCOUNT"}
+                      onChange={() => setInterestModel("SEPARATE_ACCOUNT")}
+                    />
+                    <span>Separate interest account, apart from spending (ING, BT)</span>
+                  </label>
+                </fieldset>
+              )}
+              {separateInterestAccount && (
+                <label className="form-field">
+                  <span>Interest account name</span>
+                  <input
+                    name="interestAccountName"
+                    required={interestRateEntered}
+                    minLength={2}
+                    maxLength={80}
+                    placeholder="e.g. ING savings"
+                  />
+                </label>
+              )}
+              <div className="form-row">
+                <label className="form-field">
+                  <span>Annual interest rate (%)</span>
+                  <input
+                    name="interestPercent"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.01"
+                    placeholder="e.g. 3.5"
+                    onChange={(event) => setInterestRateEntered(event.target.value.trim() !== "")}
+                  />
+                </label>
+                <label className="form-field">
+                  <span>Interest counts from</span>
+                  <input name="interestStart" type="date" defaultValue={new Date().toLocaleDateString("sv-SE")} />
+                </label>
+              </div>
+              <p className="quiet-copy">The yearly rate is divided by 12 and credited to the balance once a month on the same day of the month. Leave the rate blank for no interest. It is an estimate, not a bank connection.</p>
+              {separateInterestAccount && (
+                <p className="quiet-copy">The interest account is created as a savings account in the same currency, starting at 0. The spending account earns no interest. Move money into the interest account with Add funds on the Portfolio page.</p>
+              )}
+            </div>
+          )}
           <div className="account-storage-note">
             <Landmark size={15} />
             <span>This creates the bank/broker and its first currency sub-account. Additional currencies can be added from the Portfolio page; no sign-in or broker sync is enabled.</span>

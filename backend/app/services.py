@@ -57,6 +57,7 @@ from app.models import (
     RateBasis,
     Recommendation,
     RiskLevel,
+    StockPurchasePlan,
     TrancheStatus,
     User,
     ValuationSnapshot,
@@ -107,6 +108,9 @@ from app.schemas import (
     RecommendationRequest,
     RecommendationResponse,
     RegisterRequest,
+    StockPurchasePlanCreate,
+    StockPurchasePlanSummary,
+    SubaccountInterestUpdate,
     UserProfileResponse,
     VestingGrantCreate,
     VestingSummary,
@@ -117,6 +121,9 @@ from app.security import create_access_token, digest_access_token, hash_password
 ZERO = Decimal("0")
 ONE = Decimal("1")
 CENT = Decimal("0.01")
+SAVINGS_INTEREST_SOURCE = "SAVINGS_INTEREST"
+MAX_INTEREST_CATCH_UP_MONTHS = 600
+DEFAULT_SALE_TAX_RATE = Decimal("0.03")
 
 
 def _get_user(session: Session, user_id: uuid.UUID) -> User:
@@ -434,10 +441,10 @@ async def create_holding(
     )
     if account is None:
         raise HTTPException(status_code=404, detail="Selected investment account was not found")
-    if account.account_type not in {AccountType.BROKERAGE, AccountType.EMPLOYER_PLAN}:
+    if account.account_type == AccountType.SAVINGS:
         raise HTTPException(
             status_code=422,
-            detail="Stocks and ETFs can only be added to brokerage or employer-plan accounts",
+            detail="Stocks and ETFs cannot be added to a savings account",
         )
 
     client = _market_client()
@@ -1197,8 +1204,33 @@ def get_policy_response(session: Session, user_id: uuid.UUID) -> PolicyResponse:
     )
 
 
+def _subaccount_summary(subaccount: AccountSubaccount) -> AccountSubaccountSummary:
+    return AccountSubaccountSummary(
+        id=subaccount.id,
+        currency=subaccount.currency,
+        cash_balance=subaccount.cash_balance,
+        is_primary=subaccount.is_primary,
+        annual_interest_rate=subaccount.annual_interest_rate,
+        interest_start_date=subaccount.interest_start_date,
+    )
+
+
+def _resolve_interest_settings(
+    account_type: AccountType, rate: Decimal | None, start_date: date | None
+) -> tuple[Decimal | None, date | None]:
+    if rate is None:
+        return None, None
+    if account_type == AccountType.EMPLOYER_PLAN:
+        raise HTTPException(
+            status_code=422,
+            detail="Employer-plan accounts cannot earn cash interest.",
+        )
+    return rate, start_date or date.today()
+
+
 def list_accounts(session: Session, user_id: uuid.UUID) -> list[AccountSummary]:
     user = _get_user(session, user_id)
+    _post_due_savings_interest(session, user.id)
     accounts = list(
         session.scalars(
             select(BrokerAccount)
@@ -1235,12 +1267,7 @@ def list_accounts(session: Session, user_id: uuid.UUID) -> list[AccountSummary]:
             position_count=position_counts.get(account.id, 0),
             is_sample=account.provider_code == "SAMPLE",
             subaccounts=[
-                AccountSubaccountSummary(
-                    id=subaccount.id,
-                    currency=subaccount.currency,
-                    cash_balance=subaccount.cash_balance,
-                    is_primary=subaccount.is_primary,
-                )
+                _subaccount_summary(subaccount)
                 for subaccount in subaccounts_by_account[account.id]
             ],
         )
@@ -1250,6 +1277,9 @@ def list_accounts(session: Session, user_id: uuid.UUID) -> list[AccountSummary]:
 
 def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate) -> AccountSummary:
     user = _get_user(session, user_id)
+    interest_rate, interest_start = _resolve_interest_settings(
+        payload.account_type, payload.annual_interest_rate, payload.interest_start_date
+    )
     if payload.opening_cash and not _can_convert(
         payload.currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
     ):
@@ -1274,6 +1304,8 @@ def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate)
             currency=payload.currency,
             cash_balance=payload.opening_cash,
             is_primary=True,
+            annual_interest_rate=interest_rate,
+            interest_start_date=interest_start,
         )
         session.add(primary_subaccount)
         session.commit()
@@ -1294,14 +1326,7 @@ def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate)
         cash_balance=primary_subaccount.cash_balance,
         position_count=0,
         is_sample=False,
-        subaccounts=[
-            AccountSubaccountSummary(
-                id=primary_subaccount.id,
-                currency=primary_subaccount.currency,
-                cash_balance=primary_subaccount.cash_balance,
-                is_primary=True,
-            )
-        ],
+        subaccounts=[_subaccount_summary(primary_subaccount)],
     )
 
 
@@ -1345,11 +1370,16 @@ def create_account_subaccount(
                 "in this currency."
             ),
         )
+    interest_rate, interest_start = _resolve_interest_settings(
+        account.account_type, payload.annual_interest_rate, payload.interest_start_date
+    )
     subaccount = AccountSubaccount(
         account_id=account.id,
         currency=payload.currency,
         cash_balance=payload.opening_balance,
         is_primary=False,
+        annual_interest_rate=interest_rate,
+        interest_start_date=interest_start,
     )
     session.add(subaccount)
     try:
@@ -1361,12 +1391,40 @@ def create_account_subaccount(
             detail=f"This account already has a {payload.currency.value} sub-account.",
         ) from error
     session.refresh(subaccount)
-    return AccountSubaccountSummary(
-        id=subaccount.id,
-        currency=subaccount.currency,
-        cash_balance=subaccount.cash_balance,
-        is_primary=subaccount.is_primary,
+    return _subaccount_summary(subaccount)
+
+
+def update_subaccount_interest(
+    session: Session,
+    user_id: uuid.UUID,
+    account_id: uuid.UUID,
+    subaccount_id: uuid.UUID,
+    payload: SubaccountInterestUpdate,
+) -> AccountSubaccountSummary:
+    _get_user(session, user_id)
+    row = session.execute(
+        select(AccountSubaccount, BrokerAccount)
+        .join(BrokerAccount, BrokerAccount.id == AccountSubaccount.account_id)
+        .where(
+            AccountSubaccount.id == subaccount_id,
+            BrokerAccount.id == account_id,
+            BrokerAccount.user_id == user_id,
+        )
+        .with_for_update(of=AccountSubaccount)
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Account wallet was not found")
+    subaccount, account = row
+    if account.provider_code == "SAMPLE":
+        raise HTTPException(status_code=409, detail="Legacy sample accounts cannot be edited")
+    rate, start_date = _resolve_interest_settings(
+        account.account_type, payload.annual_interest_rate, payload.interest_start_date
     )
+    subaccount.annual_interest_rate = rate
+    subaccount.interest_start_date = start_date
+    session.commit()
+    session.refresh(subaccount)
+    return _subaccount_summary(subaccount)
 
 
 def delete_account(session: Session, user_id: uuid.UUID, account_id: uuid.UUID) -> None:
@@ -1796,6 +1854,78 @@ def _post_due_cash_flow_schedules(
                     expected_date=occurrence,
                     occurred_at=occurred_at,
                     source_system="SCHEDULED_CASH_FLOW",
+                    source_event_id=source_event_id,
+                )
+            )
+            changed = True
+    if changed:
+        session.commit()
+
+
+def _monthly_payment_dates(start_date: date, through: date) -> list[date]:
+    dates: list[date] = []
+    for month_index in range(1, MAX_INTEREST_CATCH_UP_MONTHS + 1):
+        payment_date = add_months(start_date, month_index)
+        if payment_date > through:
+            break
+        dates.append(payment_date)
+    return dates
+
+
+def _post_due_savings_interest(
+    session: Session, user_id: uuid.UUID, as_of: date | None = None
+) -> None:
+    today = as_of or date.today()
+    rows = session.execute(
+        select(AccountSubaccount, BrokerAccount)
+        .join(BrokerAccount, BrokerAccount.id == AccountSubaccount.account_id)
+        .where(
+            BrokerAccount.user_id == user_id,
+            AccountSubaccount.annual_interest_rate.is_not(None),
+            AccountSubaccount.annual_interest_rate > ZERO,
+            AccountSubaccount.interest_start_date.is_not(None),
+            AccountSubaccount.interest_start_date < today,
+        )
+        .order_by(AccountSubaccount.id)
+        .with_for_update(of=AccountSubaccount)
+    ).all()
+    changed = False
+    for subaccount, account in rows:
+        assert subaccount.annual_interest_rate is not None
+        assert subaccount.interest_start_date is not None
+        for payment_date in _monthly_payment_dates(subaccount.interest_start_date, today):
+            source_event_id = f"{subaccount.id}:{payment_date.isoformat()}"
+            existing = session.scalar(
+                select(CashFlow.id).where(
+                    CashFlow.user_id == user_id,
+                    CashFlow.source_system == SAVINGS_INTEREST_SOURCE,
+                    CashFlow.source_event_id == source_event_id,
+                )
+            )
+            if existing is not None:
+                continue
+            interest = round_money(
+                subaccount.cash_balance * subaccount.annual_interest_rate / Decimal(12)
+            )
+            if interest <= ZERO:
+                continue
+            subaccount.cash_balance += interest
+            session.add(
+                CashFlow(
+                    user_id=user_id,
+                    account_id=account.id,
+                    subaccount_id=subaccount.id,
+                    label=f"Monthly interest · {account.display_name}",
+                    kind=FlowKind.INTEREST,
+                    status=FlowStatus.CONFIRMED,
+                    amount=interest,
+                    currency=subaccount.currency,
+                    expected_date=payment_date,
+                    occurred_at=datetime.combine(
+                        payment_date, datetime.min.time(), tzinfo=UTC
+                    )
+                    + timedelta(hours=12),
+                    source_system=SAVINGS_INTEREST_SOURCE,
                     source_event_id=source_event_id,
                 )
             )
@@ -2502,6 +2632,327 @@ def update_fixed_shares(
     return {str(goal_id): percentage for goal_id, percentage in requested.items()}
 
 
+def _latest_instrument_quote(
+    session: Session, instrument_id: uuid.UUID
+) -> MarketPriceCache | None:
+    return session.scalar(
+        select(MarketPriceCache)
+        .where(MarketPriceCache.instrument_id == instrument_id)
+        .order_by(MarketPriceCache.received_at.desc(), MarketPriceCache.id.desc())
+        .limit(1)
+    )
+
+
+def _plan_economics(
+    shares: Decimal, market_price: Decimal, discount_rate: Decimal, receipt_tax_rate: Decimal
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    purchase_price = market_price * (ONE - discount_rate)
+    purchase_cost = shares * purchase_price
+    discount_benefit = shares * market_price * discount_rate
+    receipt_tax = discount_benefit * receipt_tax_rate
+    return purchase_price, purchase_cost, discount_benefit, receipt_tax
+
+
+async def create_purchase_plan(
+    session: Session, user_id: uuid.UUID, payload: StockPurchasePlanCreate
+) -> uuid.UUID:
+    user = _get_user(session, user_id)
+    account = session.scalar(
+        select(BrokerAccount).where(
+            BrokerAccount.id == payload.account_id, BrokerAccount.user_id == user.id
+        )
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Selected share account was not found")
+    if account.account_type == AccountType.SAVINGS:
+        raise HTTPException(
+            status_code=422,
+            detail="Purchased shares cannot be held in a savings account",
+        )
+    wallet_row = session.execute(
+        select(AccountSubaccount, BrokerAccount)
+        .join(BrokerAccount, BrokerAccount.id == AccountSubaccount.account_id)
+        .where(
+            AccountSubaccount.id == payload.subaccount_id,
+            BrokerAccount.user_id == user.id,
+        )
+    ).first()
+    if wallet_row is None:
+        raise HTTPException(status_code=404, detail="Selected paying wallet was not found")
+    wallet, wallet_account = wallet_row
+    if wallet_account.account_type == AccountType.EMPLOYER_PLAN:
+        raise HTTPException(
+            status_code=422,
+            detail="Employer-plan accounts cannot hold the cash that pays for the shares",
+        )
+
+    client = _market_client()
+    try:
+        quote = await client.quote(payload.symbol, payload.mic_code, payload.exchange)
+    except MarketDataProviderError as error:
+        _raise_provider_error(error)
+    fx_rates = _fx_matrix(session, user)
+    await _ensure_fx_conversion(session, client, quote.currency, user.base_currency, fx_rates)
+    await _ensure_fx_conversion(session, client, quote.currency, wallet.currency, fx_rates)
+
+    symbol = quote.symbol.upper()
+    mic = (quote.mic_code or payload.mic_code or "UNKNOWN").upper()
+    exchange = quote.exchange or payload.exchange or ""
+    instrument = session.scalar(
+        select(Instrument).where(Instrument.symbol == symbol, Instrument.mic == mic)
+    )
+    if instrument is None:
+        instrument = Instrument(
+            symbol=symbol,
+            name=quote.name,
+            asset_class=AssetClass.EQUITIES,
+            currency=quote.currency,
+            mic=mic,
+            exchange=exchange,
+            instrument_type="STOCK",
+            estimated_annual_yield=ZERO,
+            is_demo=False,
+        )
+        session.add(instrument)
+        session.flush()
+    elif instrument.currency != quote.currency or instrument.instrument_type != "STOCK":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{symbol} is already tracked using a different listing. "
+                "Select its existing stock exchange listing."
+            ),
+        )
+    else:
+        instrument.name = quote.name
+        instrument.is_demo = False
+
+    plan = StockPurchasePlan(
+        user_id=user.id,
+        account_id=account.id,
+        funding_subaccount_id=wallet.id,
+        instrument_id=instrument.id,
+        name=payload.name or f"{symbol} purchase",
+        shares=payload.shares,
+        purchase_date=payload.purchase_date,
+        discount_rate=payload.discount_rate,
+        receipt_tax_rate=payload.receipt_tax_rate,
+        sale_profit_tax_rate=payload.sale_profit_tax_rate,
+        reference_price=payload.reference_price,
+        status="scheduled",
+    )
+    session.add(plan)
+    session.add(
+        MarketPriceCache(
+            instrument_id=instrument.id,
+            price=quote.price,
+            currency=quote.currency,
+            source=PROVIDER_NAME,
+            feed_type="QUOTE",
+            observed_at=quote.observed_at,
+            is_market_open=quote.is_market_open,
+        )
+    )
+    session.flush()
+    plan_id = plan.id
+    session.commit()
+    return plan_id
+
+
+def delete_purchase_plan(session: Session, user_id: uuid.UUID, plan_id: uuid.UUID) -> None:
+    plan = session.scalar(
+        select(StockPurchasePlan).where(
+            StockPurchasePlan.id == plan_id, StockPurchasePlan.user_id == user_id
+        )
+    )
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Share purchase plan was not found")
+    session.delete(plan)
+    session.commit()
+
+
+def _execute_due_purchase_plans(
+    session: Session, user_id: uuid.UUID, today: date
+) -> list[str]:
+    plans = list(
+        session.scalars(
+            select(StockPurchasePlan)
+            .where(
+                StockPurchasePlan.user_id == user_id,
+                StockPurchasePlan.status == "scheduled",
+                StockPurchasePlan.purchase_date <= today,
+            )
+            .order_by(StockPurchasePlan.purchase_date, StockPurchasePlan.id)
+            .with_for_update()
+        )
+    )
+    if not plans:
+        return []
+    user = _get_user(session, user_id)
+    fx_rates = _fx_matrix(session, user)
+    warnings: list[str] = []
+    changed = False
+    for plan in plans:
+        instrument = session.get(Instrument, plan.instrument_id)
+        wallet = session.scalar(
+            select(AccountSubaccount)
+            .where(AccountSubaccount.id == plan.funding_subaccount_id)
+            .with_for_update()
+        )
+        if instrument is None or wallet is None:
+            continue
+        quote = _latest_instrument_quote(session, instrument.id)
+        market_price = plan.reference_price or (quote.price if quote is not None else None)
+        if market_price is None:
+            warnings.append(
+                f"“{plan.name}” is due but {instrument.symbol} has no price. Add a reference "
+                "price or refresh quotes."
+            )
+            continue
+        _, purchase_cost, _, receipt_tax = _plan_economics(
+            plan.shares, market_price, plan.discount_rate, plan.receipt_tax_rate
+        )
+        try:
+            wallet_cost = round_money(
+                _to_base(
+                    purchase_cost + receipt_tax,
+                    instrument.currency,
+                    wallet.currency,
+                    user.usd_per_eur,
+                    fx_rates,
+                )
+            )
+        except HTTPException:
+            warnings.append(
+                f"“{plan.name}” is due but no FX rate converts {instrument.currency.value} to "
+                f"{wallet.currency.value}. Refresh market data."
+            )
+            continue
+        if wallet.cash_balance < wallet_cost:
+            warnings.append(
+                f"“{plan.name}” is due but the paying {wallet.currency.value} wallet has "
+                f"{wallet.cash_balance:.2f}; {wallet_cost:.2f} is needed for the discounted "
+                "purchase and tax at receipt."
+            )
+            continue
+        holding = session.scalar(
+            select(Holding).where(
+                Holding.user_id == user_id,
+                Holding.account_id == plan.account_id,
+                Holding.instrument_id == instrument.id,
+            )
+        )
+        if holding is None:
+            holding = Holding(
+                user_id=user_id,
+                account_id=plan.account_id,
+                instrument_id=instrument.id,
+                quantity=plan.shares,
+                average_cost=market_price,
+                purchase_date=plan.purchase_date,
+                risk_tier="Y",
+                expected_annual_return=Decimal("0.05"),
+                funding_cost=ZERO,
+                sale_tax_rate=plan.sale_profit_tax_rate,
+            )
+            session.add(holding)
+        else:
+            total_quantity = holding.quantity + plan.shares
+            existing_rate = (
+                holding.sale_tax_rate
+                if holding.sale_tax_rate is not None
+                else DEFAULT_SALE_TAX_RATE
+            )
+            holding.sale_tax_rate = (
+                holding.quantity * existing_rate + plan.shares * plan.sale_profit_tax_rate
+            ) / total_quantity
+            holding.average_cost = (
+                holding.quantity * holding.average_cost + plan.shares * market_price
+            ) / total_quantity
+            weighted_ordinal = (
+                Decimal(holding.purchase_date.toordinal()) * holding.quantity
+                + Decimal(plan.purchase_date.toordinal()) * plan.shares
+            ) / total_quantity
+            holding.purchase_date = date.fromordinal(
+                int(weighted_ordinal.to_integral_value(rounding=ROUND_HALF_UP))
+            )
+            holding.quantity = total_quantity
+        session.flush()
+        wallet.cash_balance -= wallet_cost
+        plan.status = "executed"
+        plan.holding_id = holding.id
+        plan.executed_price = market_price
+        plan.executed_cost = wallet_cost
+        plan.executed_at = datetime.now(UTC)
+        changed = True
+    if changed:
+        session.commit()
+    return warnings
+
+
+def _purchase_plan_summaries(
+    session: Session,
+    user: User,
+    base_currency: Currency,
+    fx_rates: dict[tuple[Currency, Currency], Decimal],
+    latest_quotes: dict[uuid.UUID, MarketPriceCache],
+) -> list[StockPurchasePlanSummary]:
+    rows = session.execute(
+        select(StockPurchasePlan, Instrument, BrokerAccount, AccountSubaccount)
+        .join(Instrument, Instrument.id == StockPurchasePlan.instrument_id)
+        .join(BrokerAccount, BrokerAccount.id == StockPurchasePlan.account_id)
+        .join(AccountSubaccount, AccountSubaccount.id == StockPurchasePlan.funding_subaccount_id)
+        .where(StockPurchasePlan.user_id == user.id)
+        .order_by(StockPurchasePlan.purchase_date, StockPurchasePlan.name)
+    ).all()
+    summaries: list[StockPurchasePlanSummary] = []
+    for plan, instrument, account, wallet in rows:
+        quote = latest_quotes.get(instrument.id)
+        market_price = plan.executed_price or plan.reference_price or (
+            quote.price if quote is not None else None
+        )
+        if market_price is None:
+            continue
+        purchase_price, purchase_cost, benefit, receipt_tax = _plan_economics(
+            plan.shares, market_price, plan.discount_rate, plan.receipt_tax_rate
+        )
+
+        def to_report(value: Decimal, currency: Currency = instrument.currency) -> Decimal:
+            return round_money(
+                _to_base(value, currency, base_currency, user.usd_per_eur, fx_rates)
+            )
+
+        summaries.append(
+            StockPurchasePlanSummary(
+                id=plan.id,
+                name=plan.name,
+                symbol=instrument.symbol,
+                instrument_name=instrument.name,
+                account_id=account.id,
+                account_name=account.display_name,
+                funding_currency=wallet.currency,
+                shares=plan.shares,
+                purchase_date=plan.purchase_date,
+                discount_rate=plan.discount_rate,
+                receipt_tax_rate=plan.receipt_tax_rate,
+                sale_profit_tax_rate=plan.sale_profit_tax_rate,
+                status="executed" if plan.status == "executed" else "scheduled",
+                price_currency=instrument.currency,
+                market_price=market_price,
+                purchase_price=purchase_price,
+                price_is_estimate=plan.status != "executed" and plan.reference_price is None,
+                reporting_currency=base_currency,
+                market_value=to_report(plan.shares * market_price),
+                purchase_cost=to_report(purchase_cost),
+                gross_discount_benefit=to_report(benefit),
+                receipt_tax=to_report(receipt_tax),
+                net_benefit=to_report(benefit - receipt_tax),
+                holding_id=plan.holding_id,
+            )
+        )
+    return summaries
+
+
 def dashboard(
     session: Session, user_id: uuid.UUID, requested_currency: Currency | None = None
 ) -> dict[str, Any]:
@@ -2513,6 +2964,8 @@ def dashboard(
     now = datetime.now(UTC)
     today = date.today()
     _post_due_cash_flow_schedules(session, user.id, today)
+    _post_due_savings_interest(session, user.id, today)
+    purchase_plan_warnings = _execute_due_purchase_plans(session, user.id, today)
 
     quote_rows = list(
         session.scalars(
@@ -2567,7 +3020,7 @@ def dashboard(
     sample_data = bool(holding_rows) and all(
         instrument.is_demo for _, instrument, _, _ in holding_rows
     )
-    warnings: list[str] = []
+    warnings: list[str] = list(purchase_plan_warnings)
     if sample_data:
         warnings.extend(
             [
@@ -2607,7 +3060,11 @@ def dashboard(
             ZERO,
             native_value - holding.quantity * holding.average_cost,
         )
-        sale_tax_rate = Decimal("0.03")
+        sale_tax_rate = (
+            holding.sale_tax_rate
+            if holding.sale_tax_rate is not None
+            else DEFAULT_SALE_TAX_RATE
+        )
         sale_tax = _to_base(
             taxable_gain * sale_tax_rate,
             quote.currency,
@@ -3133,6 +3590,9 @@ def dashboard(
         "cash_flow_schedules": cash_flow_schedules,
         "deposits": deposits,
         "vesting": vesting,
+        "purchase_plans": _purchase_plan_summaries(
+            session, user, base_currency, fx_rates, latest_quotes
+        ),
         "warnings": warnings,
         "policy": PolicyResponse(
             funding_rule=policy.funding_rule,
@@ -3171,6 +3631,12 @@ def portfolio_projection(
     fx_rates = _fx_matrix(session, user)
     current_accounts = snapshot["account_wealth"]
     holdings = snapshot["holdings"]
+    savings_wallets = [
+        (account.id, subaccount)
+        for account in snapshot["accounts"]
+        for subaccount in account.subaccounts
+        if subaccount.annual_interest_rate and subaccount.interest_start_date is not None
+    ]
     deposits = list(session.scalars(select(FixedDeposit).where(FixedDeposit.user_id == user.id)))
 
     def project_at(projection_date: date) -> list[ProjectionAccountValue]:
@@ -3178,6 +3644,22 @@ def portfolio_projection(
         cash_by_account = {
             account.id: account.cash_value for account in current_accounts
         }
+        for account_id, wallet in savings_wallets:
+            assert wallet.annual_interest_rate is not None
+            assert wallet.interest_start_date is not None
+            future_payments = len(
+                _monthly_payment_dates(wallet.interest_start_date, projection_date)
+            ) - len(_monthly_payment_dates(wallet.interest_start_date, today))
+            if future_payments <= 0:
+                continue
+            monthly_growth = (ONE + wallet.annual_interest_rate / Decimal(12)) ** future_payments
+            cash_by_account[account_id] = cash_by_account.get(account_id, ZERO) + _to_base(
+                wallet.cash_balance * (monthly_growth - ONE),
+                wallet.currency,
+                base_currency,
+                usd_per_eur,
+                fx_rates,
+            )
         holding_by_account: dict[uuid.UUID, Decimal] = {}
         for holding in holdings:
             growth_factor = compound_growth_factor(
@@ -3199,7 +3681,9 @@ def portfolio_projection(
                 usd_per_eur,
                 fx_rates,
             )
-            future_tax = max(ZERO, future_gross_base - cost_basis_base) * Decimal("0.03")
+            future_tax = max(ZERO, future_gross_base - cost_basis_base) * (
+                holding.estimated_tax_rate
+            )
             projected_value = future_gross_base - future_tax
             holding_by_account[holding.account_id] = (
                 holding_by_account.get(holding.account_id, ZERO) + projected_value
@@ -3301,12 +3785,14 @@ def portfolio_projection(
                 "in listing currency. Current FX rates are held constant."
             ),
             (
-                "The model applies the current 3% estimate to positive projected holding gains. "
-                "Cash stays flat; deposits accrue to maturity and are not reinvested."
+                "Each holding uses its own sale-tax estimate on positive projected gains "
+                "(3% by default, or the rate set by a share purchase plan). Savings wallets "
+                "with a monthly interest rate compound each month; other cash stays flat and "
+                "deposits accrue to maturity without reinvestment."
             ),
             (
-                "Unvested awards, future cash-flow forecasts, and additional contributions "
-                "are excluded."
+                "Unvested awards, scheduled share purchases, future cash-flow forecasts, and "
+                "additional contributions are excluded."
             ),
             (
                 "Risk tiers are qualitative placeholders: ETFs default to X and individual "
@@ -3320,6 +3806,7 @@ def portfolio_projection(
 def list_cash_flows(session: Session, user_id: uuid.UUID, months: int = 12) -> list[FlowResponse]:
     user = _get_user(session, user_id)
     _post_due_cash_flow_schedules(session, user.id)
+    _post_due_savings_interest(session, user.id)
     return _project_cash_flows(
         session, user.id, user.base_currency, user.usd_per_eur, _fx_matrix(session, user), months
     )

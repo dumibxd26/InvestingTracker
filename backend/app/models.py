@@ -195,6 +195,8 @@ class AccountSubaccount(Base):
     )
     cash_balance: Mapped[Decimal] = mapped_column(Numeric(20, 4), default=Decimal("0"))
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    annual_interest_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 8))
+    interest_start_date: Mapped[date | None] = mapped_column(Date)
 
 
 class Instrument(Base):
@@ -261,6 +263,9 @@ class Holding(Base):
     funding_cost: Mapped[Decimal] = mapped_column(
         Numeric(20, 4), default=Decimal("0"), nullable=False
     )
+    sale_tax_rate: Mapped[Decimal | None] = mapped_column(Numeric(8, 6))
+
+
 class MarketPriceCache(Base):
     __tablename__ = "market_prices_cache"
     __table_args__ = (Index("ix_market_prices_latest", "instrument_id", "observed_at"),)
@@ -609,6 +614,48 @@ class VestingTranche(Base):
         SqlEnum(TrancheStatus, values_callable=enum_values, name="tranche_status"),
         default=TrancheStatus.SCHEDULED,
         nullable=False,
+    )
+
+
+class StockPurchasePlan(Base):
+    __tablename__ = "stock_purchase_plans"
+    __table_args__ = (
+        Index("ix_stock_purchase_plans_user_date", "user_id", "purchase_date"),
+        CheckConstraint("status IN ('scheduled', 'executed')", name="ck_stock_purchase_status"),
+        CheckConstraint(
+            "discount_rate >= 0 AND discount_rate < 1", name="ck_stock_purchase_discount"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
+    )
+    funding_subaccount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("account_subaccounts.id", ondelete="CASCADE"), nullable=False
+    )
+    instrument_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("instruments.id"), nullable=False)
+    holding_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("holdings.id", ondelete="SET NULL")
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    shares: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    purchase_date: Mapped[date] = mapped_column(Date, nullable=False)
+    discount_rate: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    receipt_tax_rate: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    sale_profit_tax_rate: Mapped[Decimal] = mapped_column(Numeric(8, 6), nullable=False)
+    reference_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    status: Mapped[str] = mapped_column(
+        String(12), default="scheduled", server_default="scheduled", nullable=False
+    )
+    executed_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    executed_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
 
 

@@ -228,6 +228,55 @@ export interface AccountSubaccount {
   currency: Currency;
   cash_balance: string;
   is_primary: boolean;
+  annual_interest_rate: string | null;
+  interest_start_date: string | null;
+}
+
+export interface StockPurchasePlan {
+  id: string;
+  name: string;
+  symbol: string;
+  instrument_name: string;
+  account_id: string;
+  account_name: string;
+  funding_currency: Currency;
+  shares: string;
+  purchase_date: string;
+  discount_rate: string;
+  receipt_tax_rate: string;
+  sale_profit_tax_rate: string;
+  status: "scheduled" | "executed";
+  price_currency: Currency;
+  market_price: string;
+  purchase_price: string;
+  price_is_estimate: boolean;
+  reporting_currency: Currency;
+  market_value: string;
+  purchase_cost: string;
+  gross_discount_benefit: string;
+  receipt_tax: string;
+  net_benefit: string;
+  holding_id: string | null;
+}
+
+export interface StockPurchasePlanPayload {
+  name?: string;
+  symbol: string;
+  mic_code: string | null;
+  exchange: string;
+  account_id: string;
+  subaccount_id: string;
+  shares: string;
+  purchase_date: string;
+  discount_rate: string;
+  receipt_tax_rate: string;
+  sale_profit_tax_rate: string;
+  reference_price?: string;
+}
+
+export interface SubaccountInterestPayload {
+  annual_interest_rate: string | null;
+  interest_start_date: string | null;
 }
 
 export interface InitialPortfolioAccountPayload {
@@ -394,6 +443,7 @@ export interface Dashboard {
   cash_flow_schedules: CashFlowSchedule[];
   deposits: Deposit[];
   vesting: Vesting[];
+  purchase_plans: StockPurchasePlan[];
   warnings: string[];
   policy: Policy;
 }
@@ -519,6 +569,8 @@ export interface AccountCreatePayload {
   account_type: AccountType;
   currency: Currency;
   opening_cash: string;
+  annual_interest_rate?: string;
+  interest_start_date?: string;
 }
 
 export interface CashFlowSchedulePayload {

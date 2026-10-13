@@ -6,6 +6,7 @@ import type { AccountSummary, Currency } from "../types";
 interface ExtraCashDialogProps {
   accounts: AccountSummary[];
   baseCurrency: Currency;
+  initialAccountId?: string;
   onClose: () => void;
   onSaved: () => Promise<void>;
 }
@@ -19,6 +20,7 @@ function localDateValue(): string {
 export function ExtraCashDialog({
   accounts,
   baseCurrency,
+  initialAccountId,
   onClose,
   onSaved,
 }: ExtraCashDialogProps) {
@@ -26,8 +28,12 @@ export function ExtraCashDialog({
   const liquidSubaccounts = liquidAccounts.flatMap((account) =>
     account.subaccounts.map((subaccount) => ({ account, subaccount })),
   );
+  const preferredWallets = initialAccountId
+    ? liquidSubaccounts.filter(({ account }) => account.id === initialAccountId)
+    : liquidSubaccounts;
   const [subaccountId, setSubaccountId] = useState(
-    liquidSubaccounts.find(({ subaccount }) => subaccount.currency === baseCurrency)?.subaccount.id ??
+    preferredWallets.find(({ subaccount }) => subaccount.currency === baseCurrency)?.subaccount.id ??
+      preferredWallets[0]?.subaccount.id ??
       liquidSubaccounts[0]?.subaccount.id ??
       "",
   );
@@ -89,7 +95,7 @@ export function ExtraCashDialog({
               required
               minLength={2}
               maxLength={100}
-              placeholder="e.g. Tax refund or freelance payment"
+              placeholder="e.g. Annual bonus, tax refund, or gift"
               autoFocus
             />
           </label>

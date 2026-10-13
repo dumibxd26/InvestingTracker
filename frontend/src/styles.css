@@ -3059,6 +3059,33 @@ a:focus-visible {
   font-size: 8px;
 }
 
+.interest-model-choice {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.interest-model-choice legend {
+  padding: 0;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.interest-model-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.interest-model-option input {
+  margin-top: 3px;
+}
+
 .settings-logout-row {
   display: flex;
   align-items: center;
@@ -6115,5 +6142,99 @@ html[data-theme="dark"] .page-footer {
   .initial-portfolio-dialog {
     max-height: 94vh;
     padding: 16px 13px;
+  }
+}
+
+.account-card-actions {
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+}
+
+.purchase-plan-list {
+  display: grid;
+  gap: 10px;
+  padding: 0 16px 13px;
+}
+
+.purchase-plan-card {
+  padding: 13px;
+  border: 1px solid #edf0ed;
+  border-radius: 12px;
+  background: #fcfdfb;
+}
+
+.purchase-plan-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 10px;
+}
+
+.purchase-plan-title {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+
+.purchase-plan-title strong {
+  color: #3c5144;
+  font-size: 11px;
+}
+
+.purchase-plan-title small {
+  color: #87948b;
+  font-size: 8px;
+}
+
+.purchase-plan-values {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.purchase-plan-values > div {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid #e9eee9;
+  border-radius: 9px;
+}
+
+.purchase-plan-values small {
+  color: #8c9990;
+  font-size: 8px;
+}
+
+.purchase-plan-values strong {
+  color: #486451;
+  font-size: 12px;
+}
+
+html[data-theme="dark"] .purchase-plan-card {
+  border-color: #2b4033;
+  background: linear-gradient(145deg, #1a2a20, #18231d);
+}
+
+html[data-theme="dark"] .purchase-plan-values > div {
+  border-color: #2b4033;
+}
+
+html[data-theme="dark"] .purchase-plan-title strong,
+html[data-theme="dark"] .purchase-plan-values strong {
+  color: #e5eee8;
+}
+
+html[data-theme="dark"] .purchase-plan-title small,
+html[data-theme="dark"] .purchase-plan-values small {
+  color: #9db0a4;
+}
+
+@media (max-width: 900px) {
+  .account-card-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
   }
 }

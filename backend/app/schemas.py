@@ -90,6 +90,8 @@ class AccountCreate(BaseModel):
     account_type: AccountType
     currency: Currency
     opening_cash: Decimal = Field(default=Decimal("0"), ge=0, le=Decimal("100000000"))
+    annual_interest_rate: Decimal | None = Field(default=None, ge=0, le=1)
+    interest_start_date: date | None = None
 
     @field_validator("display_name")
     @classmethod
@@ -113,6 +115,11 @@ class AccountCreate(BaseModel):
             raise ValueError(
                 "Employer-plan assets are tracked as holdings or grants, not available cash"
             )
+        if (
+            self.annual_interest_rate is not None
+            and self.account_type == AccountType.EMPLOYER_PLAN
+        ):
+            raise ValueError("Employer-plan accounts cannot earn cash interest")
         return self
 
 
@@ -121,6 +128,8 @@ class AccountSubaccountSummary(BaseModel):
     currency: Currency
     cash_balance: Decimal
     is_primary: bool
+    annual_interest_rate: Decimal | None = None
+    interest_start_date: date | None = None
 
 
 class AccountSummary(BaseModel):
@@ -153,6 +162,13 @@ class AccountSubaccountCreate(BaseModel):
     opening_balance: Decimal = Field(
         default=Decimal("0"), ge=0, le=Decimal("100000000")
     )
+    annual_interest_rate: Decimal | None = Field(default=None, ge=0, le=1)
+    interest_start_date: date | None = None
+
+
+class SubaccountInterestUpdate(BaseModel):
+    annual_interest_rate: Decimal | None = Field(default=None, ge=0, le=1)
+    interest_start_date: date | None = None
 
 
 class InitialPortfolioSubaccount(BaseModel):
@@ -226,10 +242,8 @@ class InitialPortfolioRequest(BaseModel):
             if holding.account_index >= len(self.accounts):
                 raise ValueError("A holding references an account that does not exist")
             account = self.accounts[holding.account_index]
-            if account.account_type not in {AccountType.BROKERAGE, AccountType.EMPLOYER_PLAN}:
-                raise ValueError(
-                    "Stocks and ETFs must belong to a brokerage or employer-plan account"
-                )
+            if account.account_type == AccountType.SAVINGS:
+                raise ValueError("Stocks and ETFs cannot belong to a savings account")
         return self
 
 
@@ -809,6 +823,64 @@ class VestingGrantCreate(BaseModel):
         return self
 
 
+class StockPurchasePlanCreate(BaseModel):
+    name: str | None = Field(default=None, max_length=80)
+    symbol: str = Field(min_length=1, max_length=24)
+    mic_code: str | None = Field(default=None, max_length=8)
+    exchange: str | None = Field(default=None, max_length=80)
+    account_id: UUID
+    subaccount_id: UUID
+    shares: Decimal = Field(gt=0, le=Decimal("1000000000"))
+    purchase_date: date
+    discount_rate: Decimal = Field(ge=0, lt=1)
+    receipt_tax_rate: Decimal = Field(default=Decimal("0.45"), ge=0, le=1)
+    sale_profit_tax_rate: Decimal = Field(default=Decimal("0.10"), ge=0, le=1)
+    reference_price: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000"))
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_plan_symbol(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("Symbol is required")
+        return normalized
+
+    @field_validator("name")
+    @classmethod
+    def normalize_plan_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class StockPurchasePlanSummary(BaseModel):
+    id: UUID
+    name: str
+    symbol: str
+    instrument_name: str
+    account_id: UUID
+    account_name: str
+    funding_currency: Currency
+    shares: Decimal
+    purchase_date: date
+    discount_rate: Decimal
+    receipt_tax_rate: Decimal
+    sale_profit_tax_rate: Decimal
+    status: Literal["scheduled", "executed"]
+    price_currency: Currency
+    market_price: Decimal
+    purchase_price: Decimal
+    price_is_estimate: bool
+    reporting_currency: Currency
+    market_value: Decimal
+    purchase_cost: Decimal
+    gross_discount_benefit: Decimal
+    receipt_tax: Decimal
+    net_benefit: Decimal
+    holding_id: UUID | None
+
+
 class DashboardResponse(BaseModel):
     base_currency: Currency
     profile: UserProfileResponse
@@ -829,6 +901,7 @@ class DashboardResponse(BaseModel):
     cash_flow_schedules: list[CashFlowScheduleResponse]
     deposits: list[DepositSummary]
     vesting: list[VestingSummary]
+    purchase_plans: list[StockPurchasePlanSummary] = Field(default_factory=list)
     warnings: list[str]
     policy: PolicyResponse
 

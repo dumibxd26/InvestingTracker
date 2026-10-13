@@ -1981,3 +1981,169 @@ def test_portfolio_projection_uses_position_return_assumption_and_account_values
     assert projection["timeline"][-1]["date"] == target_date.isoformat()
     assert any("not a prediction" in warning for warning in projection["warnings"])
     assert past_date.status_code == 422
+
+
+def test_savings_wallet_credits_monthly_interest_once_and_projects_growth(tmp_path) -> None:
+    start_date = add_months(date.today(), -3)
+    with create_test_client(tmp_path) as client:
+        created = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Economy account",
+                "provider_code": "MANUAL",
+                "account_type": "SAVINGS",
+                "currency": "EUR",
+                "opening_cash": "1200",
+                "annual_interest_rate": "0.12",
+                "interest_start_date": start_date.isoformat(),
+            },
+        )
+        first = client.get("/api/dashboard")
+        second = client.get("/api/dashboard")
+        brokerage = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Broker",
+                "provider_code": "MANUAL",
+                "account_type": "EMPLOYER_PLAN",
+                "currency": "EUR",
+                "annual_interest_rate": "0.02",
+            },
+        )
+        projection = client.get(
+            f"/api/projections/portfolio?target_date={add_months(date.today(), 12).isoformat()}"
+        )
+        account_id = created.json()["id"]
+        wallet_id = created.json()["subaccounts"][0]["id"]
+        cleared = client.put(
+            f"/api/accounts/{account_id}/subaccounts/{wallet_id}/interest",
+            json={},
+        )
+        stopped = client.get("/api/dashboard")
+
+    assert created.status_code == 201, created.text
+    assert first.status_code == 200 and second.status_code == 200
+    wallet = first.json()["accounts"][0]["subaccounts"][0]
+    assert Decimal(wallet["annual_interest_rate"]) == Decimal("0.12")
+    assert Decimal(wallet["cash_balance"]) == Decimal("1236.36")
+    assert Decimal(second.json()["accounts"][0]["subaccounts"][0]["cash_balance"]) == Decimal(
+        "1236.36"
+    )
+    assert brokerage.status_code == 422
+    assert projection.status_code == 200, projection.text
+    expected_growth = Decimal("1236.36") * ((Decimal("1.01") ** 12) - 1)
+    projected_cash = Decimal(projection.json()["accounts"][0]["projected_cash_value"])
+    assert abs(projected_cash - (Decimal("1236.36") + expected_growth)) < Decimal("0.02")
+    assert cleared.status_code == 200
+    assert cleared.json()["annual_interest_rate"] is None
+    assert Decimal(stopped.json()["accounts"][0]["subaccounts"][0]["cash_balance"]) == Decimal(
+        "1236.36"
+    )
+
+
+def test_discounted_share_purchase_plan_taxes_receipt_and_profit_separately(
+    monkeypatch, tmp_path
+) -> None:
+    import app.services as services
+
+    class FakeTwelveDataClient:
+        def __init__(self, api_key: str, timeout_seconds: float = 10) -> None:
+            assert api_key == "test-provider-key"
+
+        async def quote(
+            self, symbol: str, mic_code: str | None = None, exchange: str | None = None
+        ) -> MarketQuote:
+            return MarketQuote(
+                symbol="MSFT",
+                name="Microsoft Corporation",
+                price=Decimal("400"),
+                currency=Currency.USD,
+                observed_at=datetime(2026, 10, 11, 12, tzinfo=UTC),
+                is_market_open=True,
+                mic_code="XNAS",
+                exchange="NASDAQ",
+            )
+
+        async def exchange_rate(self, pair: str) -> ExchangeRateQuote:
+            raise AssertionError(f"Unexpected FX lookup: {pair}")
+
+    monkeypatch.setattr(
+        services, "get_settings", lambda: Settings(twelve_data_api_key="test-provider-key")
+    )
+    monkeypatch.setattr(services, "TwelveDataClient", FakeTwelveDataClient)
+    with create_test_client(tmp_path) as client:
+        client.put(
+            "/api/profile",
+            json={"display_name": "Test user", "base_currency": "EUR", "usd_per_eur": "1.25"},
+        )
+        wallet_account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Salary bank",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "10000",
+            },
+        ).json()
+        share_account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Employer shares",
+                "provider_code": "MANUAL",
+                "account_type": "EMPLOYER_PLAN",
+                "currency": "USD",
+            },
+        ).json()
+        base_payload = {
+            "symbol": "MSFT",
+            "mic_code": "XNAS",
+            "exchange": "NASDAQ",
+            "account_id": share_account["id"],
+            "subaccount_id": wallet_account["subaccounts"][0]["id"],
+            "shares": "10",
+            "discount_rate": "0.15",
+            "receipt_tax_rate": "0.45",
+            "sale_profit_tax_rate": "0.10",
+        }
+        future = client.post(
+            "/api/stock-purchase-plans",
+            json={
+                **base_payload,
+                "name": "Next ESPP",
+                "purchase_date": (date.today() + timedelta(days=30)).isoformat(),
+            },
+        )
+        due = client.post(
+            "/api/stock-purchase-plans",
+            json={
+                **base_payload,
+                "name": "Last ESPP",
+                "purchase_date": (date.today() - timedelta(days=1)).isoformat(),
+                "reference_price": "400",
+            },
+        )
+        dashboard = client.get("/api/dashboard")
+        removed = client.delete(f"/api/stock-purchase-plans/{future.json()['id']}")
+        after_delete = client.get("/api/dashboard")
+
+    assert future.status_code == 201, future.text
+    assert due.status_code == 201, due.text
+    data = dashboard.json()
+    plans = {plan["name"]: plan for plan in data["purchase_plans"]}
+    assert plans["Next ESPP"]["status"] == "scheduled"
+    assert plans["Last ESPP"]["status"] == "executed"
+    assert Decimal(plans["Last ESPP"]["purchase_price"]) == Decimal("340")
+    assert Decimal(plans["Last ESPP"]["receipt_tax"]) == Decimal("216.00")
+    assert Decimal(plans["Last ESPP"]["net_benefit"]) == Decimal("264.00")
+    holding = data["holdings"][0]
+    assert Decimal(holding["quantity"]) == 10
+    assert Decimal(holding["average_cost"]) == 400
+    assert Decimal(holding["estimated_tax_rate"]) == Decimal("0.10")
+    salary_wallet = next(
+        account for account in data["accounts"] if account["display_name"] == "Salary bank"
+    )
+    assert Decimal(salary_wallet["subaccounts"][0]["cash_balance"]) == Decimal("7064.00")
+    assert Decimal(data["totals"]["net_worth"]) == Decimal("10264.00")
+    assert removed.status_code == 204
+    assert [plan["name"] for plan in after_delete.json()["purchase_plans"]] == ["Last ESPP"]

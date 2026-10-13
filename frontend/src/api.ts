@@ -30,6 +30,8 @@ import type {
   MarketRefreshResult,
   MarketSymbol,
   PortfolioProjection,
+  StockPurchasePlanPayload,
+  SubaccountInterestPayload,
   UserProfile,
   VestingGrantPayload,
 } from "./types";
@@ -169,12 +171,36 @@ export const api = {
 
   createAccountSubaccount: (
     accountId: string,
-    payload: { currency: Currency; opening_balance: string },
+    payload: {
+      currency: Currency;
+      opening_balance: string;
+      annual_interest_rate?: string;
+      interest_start_date?: string;
+    },
   ) =>
     request<AccountSubaccount>(`/accounts/${encodeURIComponent(accountId)}/subaccounts`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  updateSubaccountInterest: (
+    accountId: string,
+    subaccountId: string,
+    payload: SubaccountInterestPayload,
+  ) =>
+    request<AccountSubaccount>(
+      `/accounts/${encodeURIComponent(accountId)}/subaccounts/${encodeURIComponent(subaccountId)}/interest`,
+      { method: "PUT", body: JSON.stringify(payload) },
+    ),
+
+  createStockPurchasePlan: (payload: StockPurchasePlanPayload) =>
+    request<{ id: string }>("/stock-purchase-plans", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteStockPurchasePlan: (planId: string) =>
+    request<void>(`/stock-purchase-plans/${encodeURIComponent(planId)}`, { method: "DELETE" }),
 
   deleteAccount: (accountId: string) =>
     request<void>(`/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" }),

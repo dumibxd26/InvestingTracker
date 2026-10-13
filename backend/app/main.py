@@ -48,6 +48,8 @@ from app.schemas import (
     RecommendationRequest,
     RecommendationResponse,
     RegisterRequest,
+    StockPurchasePlanCreate,
+    SubaccountInterestUpdate,
     UserProfileResponse,
     VestingGrantCreate,
 )
@@ -61,11 +63,13 @@ from app.services import (
     create_fixed_deposit,
     create_goal,
     create_holding,
+    create_purchase_plan,
     create_vesting_grant,
     dashboard,
     delete_account,
     delete_fixed_deposit,
     delete_holding,
+    delete_purchase_plan,
     delete_vesting_grant,
     get_policy_response,
     get_profile,
@@ -88,6 +92,7 @@ from app.services import (
     update_holding,
     update_policy,
     update_profile,
+    update_subaccount_interest,
 )
 
 settings = get_settings()
@@ -252,6 +257,21 @@ def create_app(
     ) -> AccountSubaccountSummary:
         return create_account_subaccount(session, current_user.id, account_id, payload)
 
+    @app.put(
+        "/api/accounts/{account_id}/subaccounts/{subaccount_id}/interest",
+        response_model=AccountSubaccountSummary,
+    )
+    def put_subaccount_interest(
+        account_id: UUID,
+        subaccount_id: UUID,
+        payload: SubaccountInterestUpdate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> AccountSubaccountSummary:
+        return update_subaccount_interest(
+            session, current_user.id, account_id, subaccount_id, payload
+        )
+
     @app.delete("/api/accounts/{account_id}", status_code=204)
     def remove_account(
         account_id: UUID,
@@ -321,6 +341,24 @@ def create_app(
     ) -> dict[str, UUID]:
         grant_id = await create_vesting_grant(session, current_user.id, payload)
         return {"id": grant_id}
+
+    @app.post("/api/stock-purchase-plans", status_code=201)
+    async def post_stock_purchase_plan(
+        payload: StockPurchasePlanCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict[str, UUID]:
+        plan_id = await create_purchase_plan(session, current_user.id, payload)
+        return {"id": plan_id}
+
+    @app.delete("/api/stock-purchase-plans/{plan_id}", status_code=204)
+    def remove_stock_purchase_plan(
+        plan_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        delete_purchase_plan(session, current_user.id, plan_id)
+        return None
 
     @app.delete("/api/vesting-grants/{grant_id}", status_code=204)
     def remove_vesting_grant(

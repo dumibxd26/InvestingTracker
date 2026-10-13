@@ -2,9 +2,11 @@ import { useState } from "react";
 import {
   ArrowUpRight,
   Building2,
+  CircleDollarSign,
   Clock3,
   Info,
   Pencil,
+  Percent,
   Plus,
   Landmark,
   RefreshCw,
@@ -16,7 +18,9 @@ import { AddDepositDialog } from "./AddDepositDialog";
 import { AddHoldingDialog } from "./AddHoldingDialog";
 import { AddSubaccountDialog } from "./AddSubaccountDialog";
 import { EditHoldingDialog } from "./EditHoldingDialog";
+import { ExtraCashDialog } from "./ExtraCashDialog";
 import { InitialPortfolioDialog } from "./InitialPortfolioDialog";
+import { SavingsInterestDialog } from "./SavingsInterestDialog";
 import { amount, assetLabel, dateLabel, number } from "../format";
 import type { AccountSummary, Currency, Dashboard, HoldingSummary } from "../types";
 
@@ -61,6 +65,8 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [initialSetupOpen, setInitialSetupOpen] = useState(false);
   const [addingSubaccountFor, setAddingSubaccountFor] = useState<AccountSummary | null>(null);
   const [addingDepositFor, setAddingDepositFor] = useState<AccountSummary | null>(null);
+  const [addingFundsFor, setAddingFundsFor] = useState<AccountSummary | null>(null);
+  const [editingInterestFor, setEditingInterestFor] = useState<AccountSummary | null>(null);
   const [deletingDepositId, setDeletingDepositId] = useState<string | null>(null);
   const [editingHolding, setEditingHolding] = useState<HoldingSummary | null>(null);
   const [mutatingHoldingId, setMutatingHoldingId] = useState<string | null>(null);
@@ -281,6 +287,9 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                     <strong key={subaccount.id}>
                       {subaccount.currency} {amount(subaccount.cash_balance, subaccount.currency, 2)}
                       {subaccount.is_primary ? " · primary" : ""}
+                      {subaccount.annual_interest_rate
+                        ? ` · ${(Number(subaccount.annual_interest_rate) * 100).toFixed(2)}%/yr monthly`
+                        : ""}
                     </strong>
                   ))}
                   {data.deposits.filter((deposit) => deposit.account_id === account.id).map((deposit) => (
@@ -302,15 +311,39 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                   <small>{account.subaccounts.length} currency wallet(s) · {account.position_count} positions</small>
                 </span>
                 <span className="account-card-actions">
+                  {account.account_type !== "EMPLOYER_PLAN" && (
+                    <button
+                      className="button button-quiet button-small"
+                      type="button"
+                      onClick={() => setAddingFundsFor(account)}
+                      disabled={account.is_sample || account.subaccounts.length === 0}
+                      title="Record a bonus, refund, or other money received into this account"
+                    >
+                      <CircleDollarSign size={13} /> Add funds
+                    </button>
+                  )}
+                  {account.account_type !== "EMPLOYER_PLAN" && (
+                    <button
+                      className="button button-quiet button-small"
+                      type="button"
+                      onClick={() => setEditingInterestFor(account)}
+                      disabled={account.is_sample || account.subaccounts.length === 0}
+                      title="Set a yearly interest rate credited monthly"
+                    >
+                      <Percent size={13} /> Interest
+                    </button>
+                  )}
                   <button
-                    className="icon-button small"
+                    className="button button-quiet button-small"
                     type="button"
                     aria-label={`Add a currency sub-account to ${account.display_name}`}
-                    title="Add currency sub-account"
+                    title={account.subaccounts.length >= 3
+                      ? "This account already has EUR, USD, and RON wallets"
+                      : "Add a EUR, USD, or RON wallet to this account"}
                     onClick={() => setAddingSubaccountFor(account)}
-                    disabled={account.is_sample}
+                    disabled={account.is_sample || account.subaccounts.length >= 3}
                   >
-                    <Plus size={14} />
+                    <Plus size={13} /> Currency
                   </button>
                   {(account.account_type === "BANK" || account.account_type === "SAVINGS") && (
                     <button
@@ -544,6 +577,22 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
           account={addingSubaccountFor}
           onClose={() => setAddingSubaccountFor(null)}
           onCreated={onSaved}
+        />
+      )}
+      {addingFundsFor && (
+        <ExtraCashDialog
+          accounts={data.accounts}
+          baseCurrency={data.base_currency}
+          initialAccountId={addingFundsFor.id}
+          onClose={() => setAddingFundsFor(null)}
+          onSaved={onSaved}
+        />
+      )}
+      {editingInterestFor && (
+        <SavingsInterestDialog
+          account={editingInterestFor}
+          onClose={() => setEditingInterestFor(null)}
+          onSaved={onSaved}
         />
       )}
       {holdingDialogOpen && (

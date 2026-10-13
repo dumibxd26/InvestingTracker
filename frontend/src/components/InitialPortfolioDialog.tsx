@@ -83,7 +83,7 @@ function createAccount(currency: Currency): AccountDraft {
 
 function createHolding(accounts: AccountDraft[]): HoldingDraft {
   const firstBroker = accounts.findIndex(
-    (account) => account.type === "BROKERAGE" || account.type === "EMPLOYER_PLAN",
+    (account) => account.type !== "SAVINGS",
   );
   return {
     id: crypto.randomUUID(),
@@ -177,9 +177,9 @@ export function InitialPortfolioDialog({
       const account = accounts[holding.accountIndex];
       if (
         !account ||
-        (account.type !== "BROKERAGE" && account.type !== "EMPLOYER_PLAN")
+        account.type === "SAVINGS"
       ) {
-        setError("Every stock or ETF must be assigned to a brokerage or employer-plan account.");
+        setError("Every stock or ETF must be assigned to a brokerage, bank, or employer-plan account.");
         return;
       }
     }
@@ -221,9 +221,7 @@ export function InitialPortfolioDialog({
 
   const stockAccounts = accounts
     .map((account, index) => ({ account, index }))
-    .filter(
-      ({ account }) => account.type === "BROKERAGE" || account.type === "EMPLOYER_PLAN",
-    );
+    .filter(({ account }) => account.type !== "SAVINGS");
 
   return (
     <div
@@ -509,9 +507,7 @@ function InitialHoldingRow({
   const [searchError, setSearchError] = useState("");
   const availableAccounts = accounts
     .map((account, index) => ({ account, index }))
-    .filter(
-      ({ account }) => account.type === "BROKERAGE" || account.type === "EMPLOYER_PLAN",
-    );
+    .filter(({ account }) => account.type !== "SAVINGS");
   const normalizedAverageCost =
     holding.instrument && holding.averageCost && holding.averageCostCurrency
       ? convertAmount(

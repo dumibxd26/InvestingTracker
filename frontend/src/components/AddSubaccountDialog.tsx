@@ -23,6 +23,7 @@ export function AddSubaccountDialog({
   const [currency, setCurrency] = useState<Currency | "">("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const supportsInterest = account.account_type !== "EMPLOYER_PLAN";
   const availableCurrencies = (["EUR", "USD", "RON"] as Currency[]).filter(
     (candidate) => !account.subaccounts.some((subaccount) => subaccount.currency === candidate),
   );
@@ -36,10 +37,17 @@ export function AddSubaccountDialog({
     setSaving(true);
     setError("");
     const form = new FormData(event.currentTarget);
+    const interestPercent = supportsInterest ? String(form.get("interestPercent") ?? "").trim() : "";
     try {
       await api.createAccountSubaccount(account.id, {
         currency,
         opening_balance: String(form.get("openingBalance") || "0"),
+        ...(interestPercent
+          ? {
+              annual_interest_rate: String(Number(interestPercent) / 100),
+              interest_start_date: String(form.get("interestStart") || ""),
+            }
+          : {}),
       });
       await onCreated();
       onClose();
@@ -108,6 +116,21 @@ export function AddSubaccountDialog({
                   required
                 />
               </label>
+            )}
+            {supportsInterest && (
+              <div className="grant-tax-fields">
+                <div className="eyebrow">Monthly interest · optional</div>
+                <div className="form-row">
+                  <label className="form-field">
+                    <span>Annual interest rate (%)</span>
+                    <input name="interestPercent" type="number" min="0" max="100" step="0.01" placeholder="e.g. 3.5" />
+                  </label>
+                  <label className="form-field">
+                    <span>Interest counts from</span>
+                    <input name="interestStart" type="date" defaultValue={new Date().toLocaleDateString("sv-SE")} />
+                  </label>
+                </div>
+              </div>
             )}
             <div className="account-storage-note">
               <WalletCards size={15} />

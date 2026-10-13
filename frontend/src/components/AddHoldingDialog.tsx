@@ -28,7 +28,7 @@ export function AddHoldingDialog({
   onCreated,
 }: AddHoldingDialogProps) {
   const eligibleAccounts = accounts.filter(
-    (account) => account.account_type === "BROKERAGE" || account.account_type === "EMPLOYER_PLAN",
+    (account) => account.account_type !== "SAVINGS" && !account.is_sample,
   );
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<MarketSymbol[]>([]);
