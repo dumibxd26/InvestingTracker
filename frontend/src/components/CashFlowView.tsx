@@ -138,7 +138,7 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
             })}
             {data.cash_flows.length === 0 && <p className="quiet-copy empty-cashflows">No upcoming or recorded cash flows yet.</p>}
           </div>
-          <div className="table-note"><Info size={15} /> Forecasts never enter available cash. Automatic salary/bonus entries update only Northstar's tracked balance—not your bank—and are posted once when the app refreshes on or after the scheduled date.</div>
+          <div className="table-note"><Info size={15} /> Forecasts never enter available cash. Automatic salary/bonus entries update only InvestingTracker's tracked balance—not your bank—and are posted once when the app refreshes on or after the scheduled date.</div>
         </section>
         <aside className="cashflow-aside">
           <section className="panel next-income-card">
@@ -164,7 +164,7 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
               <div className="deposit-interest">Accrued interest <strong>{amount(deposit.accrued_interest, deposit.currency, 2)}</strong></div>
             </section>
           ))}
-          <div className="privacy-note"><Info size={15} /><span>Northstar does not connect to payroll or your bank. Automatic credits are tracker-only estimates; stop or adjust them if your actual pay differs.</span></div>
+          <div className="privacy-note"><Info size={15} /><span>InvestingTracker does not connect to payroll or your bank. Automatic credits are tracker-only estimates; stop or adjust them if your actual pay differs.</span></div>
         </aside>
       </div>
       <section className="panel schedule-panel">

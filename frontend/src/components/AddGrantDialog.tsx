@@ -136,7 +136,7 @@ export function AddGrantDialog({
           <button className="icon-button" type="button" aria-label="Close" onClick={onClose}><X size={19} /></button>
         </div>
         <p className="modal-intro">
-          Unvested awards stay separate from owned shares and cash. Northstar values future RSU tranches using the latest cached quote; options use intrinsic value only.
+          Unvested awards stay separate from owned shares and cash. InvestingTracker values future RSU tranches using the latest cached quote; options use intrinsic value only.
         </p>
         {!marketDataConfigured ? (
           <div className="inline-error" role="status">

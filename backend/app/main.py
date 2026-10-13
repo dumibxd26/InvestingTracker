@@ -158,7 +158,7 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "northstar-api"}
+        return {"status": "ok", "service": "investingtracker-api"}
 
     @app.post("/api/auth/register", response_model=AuthResponse, status_code=201)
     def post_register(

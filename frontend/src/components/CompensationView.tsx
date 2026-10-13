@@ -72,7 +72,7 @@ export function CompensationView({
   }
 
   async function deleteGrant(grant: Vesting) {
-    if (!window.confirm(`Remove the ${grant.symbol} ${grant.grant_type.toUpperCase()} grant and its vesting schedule from Northstar? This does not change your employer plan or brokerage account.`)) {
+    if (!window.confirm(`Remove the ${grant.symbol} ${grant.grant_type.toUpperCase()} grant and its vesting schedule from InvestingTracker? This does not change your employer plan or brokerage account.`)) {
       return;
     }
     setDeletingId(grant.id);

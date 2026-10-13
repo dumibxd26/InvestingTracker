@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    app_name: str = "Northstar Wealth"
+    app_name: str = "InvestingTracker"
     database_url: str = "postgresql+psycopg://localhost/wealth_tracker"
     cors_origins: str = "http://localhost:5173"
     ai_model: str = ""

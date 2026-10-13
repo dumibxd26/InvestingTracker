@@ -44,12 +44,12 @@ interface SidebarProps {
 export function Sidebar({ activeView, onNavigate, profile, onLogout }: SidebarProps) {
   return (
     <aside className="sidebar">
-      <a className="brand" href="#" aria-label="Northstar home" onClick={(event) => {
+      <a className="brand" href="#" aria-label="InvestingTracker home" onClick={(event) => {
         event.preventDefault();
         onNavigate("overview");
       }}>
         <span className="brand-mark"><span /></span>
-        <span className="brand-name">northstar</span>
+        <span className="brand-name">InvestingTracker</span>
       </a>
 
       <div className="sidebar-label">Workspace</div>

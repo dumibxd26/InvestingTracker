@@ -72,7 +72,7 @@ function hasCurrencyPath(
 
 function initialDarkMode(): boolean {
   if (typeof window === "undefined") return false;
-  const preference = window.localStorage.getItem("northstar-theme");
+  const preference = window.localStorage.getItem("investingtracker-theme");
   if (preference === "dark") return true;
   if (preference === "light") return false;
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -119,7 +119,7 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = darkMode ? "dark" : "light";
-    window.localStorage.setItem("northstar-theme", darkMode ? "dark" : "light");
+    window.localStorage.setItem("investingtracker-theme", darkMode ? "dark" : "light");
   }, [darkMode]);
 
   useEffect(() => {
@@ -130,8 +130,8 @@ export default function App() {
       setError("Your sign-in session expired. Sign in again to continue.");
       setActiveView("overview");
     }
-    window.addEventListener("northstar-auth-expired", handleExpiredSession);
-    return () => window.removeEventListener("northstar-auth-expired", handleExpiredSession);
+    window.addEventListener("investingtracker-auth-expired", handleExpiredSession);
+    return () => window.removeEventListener("investingtracker-auth-expired", handleExpiredSession);
   }, []);
 
   const reload = useCallback(async (signal?: AbortSignal) => {
@@ -171,7 +171,7 @@ export default function App() {
   }, [profile, reload]);
 
   useEffect(() => {
-    document.title = `${pageTitles[activeView]} — Northstar`;
+    document.title = `${pageTitles[activeView]} — InvestingTracker`;
   }, [activeView]);
 
   function handleAuthenticated(response: AuthResponse) {
@@ -363,7 +363,7 @@ export default function App() {
             </div>
           ) : null}
           <footer className="page-footer">
-            <span>Northstar Wealth · private personal workspace</span>
+            <span>InvestingTracker · private personal workspace</span>
             <span>No automatic trades · you control your records</span>
           </footer>
         </div>

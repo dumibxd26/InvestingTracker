@@ -31,7 +31,7 @@ from app.models import (
 
 @contextmanager
 def create_test_client(tmp_path, authenticated: bool = True) -> Iterator[TestClient]:
-    test_engine = make_engine(f"sqlite:///{tmp_path / 'northstar-test.db'}")
+    test_engine = make_engine(f"sqlite:///{tmp_path / 'investingtracker-test.db'}")
     Base.metadata.create_all(bind=test_engine)
     factory = sessionmaker(bind=test_engine, autoflush=False, expire_on_commit=False)
     app = create_app(factory)
@@ -42,7 +42,7 @@ def create_test_client(tmp_path, authenticated: bool = True) -> Iterator[TestCli
                 "/api/auth/register",
                 json={
                     "username": f"test_{uuid4().hex[:12]}",
-                    "password": "test-passphrase-for-northstar",
+                    "password": "test-passphrase-for-investingtracker",
                     "display_name": "Test user",
                     "base_currency": "EUR",
                 },
@@ -2463,7 +2463,7 @@ def test_cash_transfers_reject_other_users_wallets_and_employer_plans(tmp_path) 
                 "idempotency_key": str(uuid4()),
                 "source_subaccount_id": mine["subaccounts"][0]["id"],
                 "destination_subaccount_id": other["subaccounts"][0]["id"],
-                "transfer_date": date.today().isoformat(),
+                "transfer_date": datetime.now(UTC).date().isoformat(),
                 "source_amount": "10",
             },
         )
@@ -2474,7 +2474,7 @@ def test_cash_transfers_reject_other_users_wallets_and_employer_plans(tmp_path) 
                 "idempotency_key": str(uuid4()),
                 "source_subaccount_id": mine["subaccounts"][0]["id"],
                 "destination_subaccount_id": employer["subaccounts"][0]["id"],
-                "transfer_date": date.today().isoformat(),
+                "transfer_date": datetime.now(UTC).date().isoformat(),
                 "source_amount": "10",
             },
         )

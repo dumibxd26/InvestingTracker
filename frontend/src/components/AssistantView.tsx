@@ -63,7 +63,7 @@ export function AssistantView({ data, currency }: { data: Dashboard; currency: C
         <section className="panel chat-panel">
           <div className="chat-heading">
             <span className="assistant-avatar"><Bot size={20} /></span>
-            <div><strong>Northstar assistant</strong><small>Answers use the current app snapshot.</small></div>
+            <div><strong>InvestingTracker assistant</strong><small>Answers use the current app snapshot.</small></div>
             <span className="chat-readonly">READ ONLY</span>
           </div>
           <div className="chat-messages" ref={listRef} aria-live="polite">
@@ -83,7 +83,7 @@ export function AssistantView({ data, currency }: { data: Dashboard; currency: C
               <div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}>
                 <span className="message-avatar">{message.role === "assistant" ? <Bot size={15} /> : <UserRound size={15} />}</span>
                 <div className="message-content">
-                  <span className="message-author">{message.role === "assistant" ? "Northstar" : "You"}</span>
+                  <span className="message-author">{message.role === "assistant" ? "InvestingTracker" : "You"}</span>
                   <p>{message.content}</p>
                 </div>
               </div>
@@ -91,7 +91,7 @@ export function AssistantView({ data, currency }: { data: Dashboard; currency: C
             {waiting && (
               <div className="chat-message assistant">
                 <span className="message-avatar"><Bot size={15} /></span>
-                <div className="message-content"><span className="message-author">Northstar</span><p className="typing-indicator"><i /><i /><i /></p></div>
+                <div className="message-content"><span className="message-author">InvestingTracker</span><p className="typing-indicator"><i /><i /><i /></p></div>
               </div>
             )}
           </div>

@@ -96,7 +96,7 @@ export function CashFlowDialog({ accounts, currency, onClose, onCreated }: CashF
         </div>
         <p className="modal-intro">
           {shouldAutoPost
-            ? "On or after each scheduled date, Northstar adds the amount to your selected wallet once the app next refreshes. This is bookkeeping only—not a bank transfer."
+            ? "On or after each scheduled date, InvestingTracker adds the amount to your selected wallet once the app next refreshes. This is bookkeeping only—not a bank transfer."
             : "A forecast helps plan ahead. It does not change account balances or count as available cash."}
         </p>
         <form className="goal-form" onSubmit={handleSubmit}>

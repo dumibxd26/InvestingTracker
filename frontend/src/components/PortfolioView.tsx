@@ -142,7 +142,7 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
       .join(", ");
     if (
       !window.confirm(
-        `Remove "${account.display_name}" (${account.account_type}) and its currency balances (${balances}) from Northstar?\n\nAny stocks/ETFs and fixed deposits attached to it will also be removed from this tracker. Active automatic salary/bonus schedules for this account will stop. Cash-flow history will be kept but detached from this account. This does not change your actual bank or broker account.`,
+        `Remove "${account.display_name}" (${account.account_type}) and its currency balances (${balances}) from InvestingTracker?\n\nAny stocks/ETFs and fixed deposits attached to it will also be removed from this tracker. Active automatic salary/bonus schedules for this account will stop. Cash-flow history will be kept but detached from this account. This does not change your actual bank or broker account.`,
       )
     ) {
       return;
@@ -387,7 +387,7 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                     title={
                       account.is_sample
                         ? "Legacy sample accounts cannot be deleted"
-                        : "Remove this account from Northstar"
+                        : "Remove this account from InvestingTracker"
                     }
                     onClick={() => void deleteAccount(account)}
                     disabled={account.is_sample || mutatingAccountId === account.id}

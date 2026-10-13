@@ -1,4 +1,4 @@
-"""Create missing Northstar tables without modifying existing records.
+"""Create missing InvestingTracker tables without modifying existing records.
 
 Revision ID: 20261010_01
 Revises:

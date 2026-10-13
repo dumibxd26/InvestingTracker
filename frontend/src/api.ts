@@ -43,7 +43,7 @@ import type {
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api";
-const AUTH_STORAGE_KEY = "northstar-access-token";
+const AUTH_STORAGE_KEY = "investingtracker-access-token";
 let accessToken =
   typeof window === "undefined" ? null : window.sessionStorage.getItem(AUTH_STORAGE_KEY);
 
@@ -111,7 +111,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       path !== "/auth/register"
     ) {
       setAccessToken(null);
-      window.dispatchEvent(new Event("northstar-auth-expired"));
+      window.dispatchEvent(new Event("investingtracker-auth-expired"));
     }
     throw new ApiError(message, response.status);
   }

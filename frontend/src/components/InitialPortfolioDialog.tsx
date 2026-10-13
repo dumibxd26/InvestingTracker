@@ -253,7 +253,7 @@ export function InitialPortfolioDialog({
         </div>
         <p className="modal-intro">
           Add your banks and brokers, enter opening balances for each currency, then list the
-          positions you already own. This records your current portfolio in Northstar; it does not
+          positions you already own. This records your current portfolio in InvestingTracker; it does not
           connect to institutions or submit trades.
         </p>
         <form className="initial-portfolio-form" onSubmit={submit}>

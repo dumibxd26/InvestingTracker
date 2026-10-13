@@ -59,9 +59,9 @@ export function AuthView({
   return (
     <main className="auth-page">
       <section className="auth-brand-panel">
-        <a className="brand auth-brand" href="#" aria-label="Northstar home">
+        <a className="brand auth-brand" href="#" aria-label="InvestingTracker home">
           <span className="brand-mark"><span /></span>
-          <span className="brand-name">northstar</span>
+          <span className="brand-name">InvestingTracker</span>
         </a>
         <div className="auth-brand-content">
           <span className="auth-glow-icon"><Sparkles size={20} /></span>
@@ -174,7 +174,7 @@ export function AuthView({
           </form>
 
           <div className="auth-mode-switch">
-            {mode === "register" ? "Already have an account?" : "New to Northstar?"}
+            {mode === "register" ? "Already have an account?" : "New to InvestingTracker?"}
             <button
               type="button"
               onClick={() => {
