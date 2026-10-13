@@ -659,6 +659,44 @@ class StockPurchasePlan(Base):
     )
 
 
+class StockSale(Base):
+    __tablename__ = "stock_sales"
+    __table_args__ = (
+        UniqueConstraint("user_id", "client_request_id", name="uq_stock_sales_request"),
+        Index("ix_stock_sales_user_date", "user_id", "sell_date"),
+        CheckConstraint("quantity > 0", name="ck_stock_sales_quantity_positive"),
+        CheckConstraint("sell_price > 0", name="ck_stock_sales_price_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    client_request_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
+    )
+    credited_subaccount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("account_subaccounts.id", ondelete="CASCADE"), nullable=False
+    )
+    instrument_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("instruments.id"), nullable=False)
+    holding_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("holdings.id", ondelete="SET NULL")
+    )
+    quantity: Mapped[Decimal] = mapped_column(Numeric(24, 10), nullable=False)
+    sell_price: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False)
+    currency: Mapped[Currency] = mapped_column(
+        SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
+    )
+    proceeds: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    cost_basis: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    sell_date: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 class ValuationSnapshot(Base):
     __tablename__ = "valuation_snapshots"
     __table_args__ = (Index("ix_valuation_snapshot_user_time", "user_id", "observed_at"),)

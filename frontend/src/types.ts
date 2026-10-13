@@ -188,6 +188,26 @@ export interface HoldingUpdatePayload {
   long_term_holding_period_days?: number;
 }
 
+export interface StockSalePayload {
+  idempotency_key: string;
+  sell_date: string;
+  sell_price: string;
+  quantity?: string;
+}
+
+export interface StockSaleRecord {
+  id: string;
+  symbol: string;
+  currency: Currency;
+  quantity: string;
+  sell_price: string;
+  proceeds: string;
+  cost_basis: string;
+  realized_pnl: string;
+  sell_date: string;
+  credited_subaccount_id: string;
+}
+
 export interface HoldingCreated {
   symbol: string;
   account_name: string;

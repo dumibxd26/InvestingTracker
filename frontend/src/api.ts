@@ -32,6 +32,8 @@ import type {
   PortfolioProjection,
   StockPurchasePlanPayload,
   SubaccountInterestPayload,
+  StockSalePayload,
+  StockSaleRecord,
   UserProfile,
   VestingGrantPayload,
 } from "./types";
@@ -227,6 +229,12 @@ export const api = {
 
   deleteHolding: (holdingId: string) =>
     request<void>(`/holdings/${encodeURIComponent(holdingId)}`, { method: "DELETE" }),
+
+  sellHolding: (holdingId: string, payload: StockSalePayload) =>
+    request<StockSaleRecord>(`/holdings/${encodeURIComponent(holdingId)}/sell`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 
   refreshMarketData: () =>
     request<MarketRefreshResult>("/market/refresh", { method: "POST" }),

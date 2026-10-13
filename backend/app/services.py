@@ -58,6 +58,7 @@ from app.models import (
     Recommendation,
     RiskLevel,
     StockPurchasePlan,
+    StockSale,
     TrancheStatus,
     User,
     ValuationSnapshot,
@@ -110,6 +111,8 @@ from app.schemas import (
     RegisterRequest,
     StockPurchasePlanCreate,
     StockPurchasePlanSummary,
+    StockSaleCreate,
+    StockSaleResponse,
     SubaccountInterestUpdate,
     UserProfileResponse,
     VestingGrantCreate,
@@ -1015,6 +1018,141 @@ def delete_holding(session: Session, user_id: uuid.UUID, holding_id: uuid.UUID) 
         funding_subaccount.cash_balance += holding.funding_cost
     session.delete(holding)
     session.commit()
+
+
+def _stock_sale_response(sale: StockSale, symbol: str) -> StockSaleResponse:
+    return StockSaleResponse(
+        id=sale.id,
+        symbol=symbol,
+        currency=sale.currency,
+        quantity=sale.quantity,
+        sell_price=sale.sell_price,
+        proceeds=sale.proceeds,
+        cost_basis=sale.cost_basis,
+        realized_pnl=sale.realized_pnl,
+        sell_date=sale.sell_date,
+        credited_subaccount_id=sale.credited_subaccount_id,
+    )
+
+
+def sell_holding(
+    session: Session, user_id: uuid.UUID, holding_id: uuid.UUID, payload: StockSaleCreate
+) -> StockSaleResponse:
+    user = _get_user(session, user_id)
+    existing = session.scalar(
+        select(StockSale).where(
+            StockSale.user_id == user.id,
+            StockSale.client_request_id == payload.idempotency_key,
+        )
+    )
+    if existing is not None:
+        if (
+            existing.sell_date != payload.sell_date
+            or existing.sell_price != payload.sell_price
+            or (payload.quantity is not None and existing.quantity != payload.quantity)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This sale idempotency key was already used for different data",
+            )
+        instrument = session.get(Instrument, existing.instrument_id)
+        return _stock_sale_response(existing, instrument.symbol if instrument else "")
+
+    holding = session.scalar(
+        select(Holding)
+        .where(Holding.id == holding_id, Holding.user_id == user.id)
+        .with_for_update()
+    )
+    if holding is None:
+        raise HTTPException(status_code=404, detail="Holding was not found")
+    account = session.get(BrokerAccount, holding.account_id)
+    if account is None:
+        raise HTTPException(status_code=409, detail="The holding's account is unavailable")
+    if account.account_type == AccountType.EMPLOYER_PLAN:
+        raise HTTPException(
+            status_code=422,
+            detail="Employer-plan holdings cannot be sold; their proceeds have no cash account",
+        )
+    instrument = session.get(Instrument, holding.instrument_id)
+    if instrument is None:
+        raise HTTPException(status_code=409, detail="The position's instrument is unavailable")
+
+    today = datetime.now(UTC).date()
+    if payload.sell_date > today:
+        raise HTTPException(status_code=422, detail="Sell date cannot be in the future")
+    if payload.sell_date < holding.purchase_date:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Sell date cannot be before the purchase date "
+                f"({holding.purchase_date.isoformat()})"
+            ),
+        )
+    quantity = payload.quantity if payload.quantity is not None else holding.quantity
+    if quantity > holding.quantity:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Only {holding.quantity:f} units are held; cannot sell {quantity:f}",
+        )
+    is_full_sale = quantity == holding.quantity
+
+    wallet = session.scalar(
+        select(AccountSubaccount)
+        .where(
+            AccountSubaccount.account_id == account.id,
+            AccountSubaccount.currency == instrument.currency,
+        )
+        .with_for_update()
+    )
+    if wallet is None:
+        wallet = AccountSubaccount(
+            account_id=account.id,
+            currency=instrument.currency,
+            cash_balance=ZERO,
+            is_primary=False,
+        )
+        session.add(wallet)
+        session.flush()
+
+    proceeds = round_money(quantity * payload.sell_price)
+    cost_basis = round_money(quantity * holding.average_cost)
+    sale = StockSale(
+        user_id=user.id,
+        client_request_id=payload.idempotency_key,
+        account_id=account.id,
+        credited_subaccount_id=wallet.id,
+        instrument_id=instrument.id,
+        holding_id=holding.id,
+        quantity=quantity,
+        sell_price=payload.sell_price,
+        currency=instrument.currency,
+        proceeds=proceeds,
+        cost_basis=cost_basis,
+        realized_pnl=proceeds - cost_basis,
+        sell_date=payload.sell_date,
+    )
+    session.add(sale)
+    session.flush()
+
+    wallet.cash_balance += proceeds
+    if is_full_sale:
+        session.delete(holding)
+    else:
+        remaining_quantity = holding.quantity - quantity
+        holding.funding_cost = round_money(
+            holding.funding_cost * remaining_quantity / holding.quantity
+        )
+        holding.quantity = remaining_quantity
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This sale was already recorded; refresh the portfolio.",
+        ) from error
+    session.refresh(sale)
+    return _stock_sale_response(sale, instrument.symbol)
 
 
 def _save_market_fx_quote(session: Session, quote: ExchangeRateQuote) -> None:

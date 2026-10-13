@@ -49,6 +49,8 @@ from app.schemas import (
     RecommendationResponse,
     RegisterRequest,
     StockPurchasePlanCreate,
+    StockSaleCreate,
+    StockSaleResponse,
     SubaccountInterestUpdate,
     UserProfileResponse,
     VestingGrantCreate,
@@ -87,6 +89,7 @@ from app.services import (
     refresh_market_data,
     register_user,
     search_market_symbols,
+    sell_holding,
     update_fixed_shares,
     update_goal,
     update_holding,
@@ -332,6 +335,15 @@ def create_app(
     ) -> None:
         delete_holding(session, current_user.id, holding_id)
         return None
+
+    @app.post("/api/holdings/{holding_id}/sell", response_model=StockSaleResponse, status_code=201)
+    def post_holding_sale(
+        holding_id: UUID,
+        payload: StockSaleCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> StockSaleResponse:
+        return sell_holding(session, current_user.id, holding_id, payload)
 
     @app.post("/api/vesting-grants", status_code=201)
     async def post_vesting_grant(

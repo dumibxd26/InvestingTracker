@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   ArrowUpRight,
+  Banknote,
   Building2,
   CircleDollarSign,
   Clock3,
@@ -21,6 +22,7 @@ import { EditHoldingDialog } from "./EditHoldingDialog";
 import { ExtraCashDialog } from "./ExtraCashDialog";
 import { InitialPortfolioDialog } from "./InitialPortfolioDialog";
 import { SavingsInterestDialog } from "./SavingsInterestDialog";
+import { SellHoldingDialog } from "./SellHoldingDialog";
 import { amount, assetLabel, dateLabel, number } from "../format";
 import type { AccountSummary, Currency, Dashboard, HoldingSummary } from "../types";
 
@@ -69,6 +71,7 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [editingInterestFor, setEditingInterestFor] = useState<AccountSummary | null>(null);
   const [deletingDepositId, setDeletingDepositId] = useState<string | null>(null);
   const [editingHolding, setEditingHolding] = useState<HoldingSummary | null>(null);
+  const [sellingHolding, setSellingHolding] = useState<HoldingSummary | null>(null);
   const [mutatingHoldingId, setMutatingHoldingId] = useState<string | null>(null);
   const [mutatingAccountId, setMutatingAccountId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -505,6 +508,19 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                     >
                       <Pencil size={14} />
                     </button>
+                    {data.accounts.find((account) => account.id === holding.account_id)?.account_type !==
+                      "EMPLOYER_PLAN" && (
+                      <button
+                        className="icon-button small"
+                        type="button"
+                        aria-label={`Sell ${holding.symbol} position`}
+                        title="Record a sale"
+                        onClick={() => setSellingHolding(holding)}
+                        disabled={mutatingHoldingId === holding.id}
+                      >
+                        <Banknote size={14} />
+                      </button>
+                    )}
                     <button
                       className="icon-button small holding-delete-button"
                       type="button"
@@ -610,6 +626,18 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
           holding={editingHolding}
           onClose={() => setEditingHolding(null)}
           onSaved={onSaved}
+        />
+      )}
+      {sellingHolding && (
+        <SellHoldingDialog
+          holding={sellingHolding}
+          onClose={() => setSellingHolding(null)}
+          onSaved={async () => {
+            await onSaved();
+            setHoldingMessage(
+              `${sellingHolding.symbol} sale recorded; proceeds credited to the ${sellingHolding.price_currency} wallet in ${sellingHolding.account_name}.`,
+            );
+          }}
         />
       )}
     </div>

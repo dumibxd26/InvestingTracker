@@ -2147,3 +2147,141 @@ def test_discounted_share_purchase_plan_taxes_receipt_and_profit_separately(
     assert Decimal(data["totals"]["net_worth"]) == Decimal("10264.00")
     assert removed.status_code == 204
     assert [plan["name"] for plan in after_delete.json()["purchase_plans"]] == ["Last ESPP"]
+
+
+class _StockSaleFakeTwelveDataClient:
+    def __init__(self, api_key: str, timeout_seconds: float = 10) -> None:
+        pass
+
+    async def quote(
+        self, symbol: str, mic_code: str | None = None, exchange: str | None = None
+    ) -> MarketQuote:
+        return MarketQuote(
+            symbol="MSFT",
+            name="Microsoft Corporation",
+            price=Decimal("420"),
+            currency=Currency.USD,
+            observed_at=datetime(2026, 10, 11, 12, tzinfo=UTC),
+            is_market_open=True,
+            mic_code="XNAS",
+            exchange="NASDAQ",
+        )
+
+    async def exchange_rate(self, pair: str) -> ExchangeRateQuote:
+        raise AssertionError(f"Unexpected FX lookup: {pair}")
+
+
+def test_selling_a_holding_credits_proceeds_to_the_broker_currency_wallet(
+    monkeypatch, tmp_path
+) -> None:
+    import app.services as services
+
+    monkeypatch.setattr(
+        services, "get_settings", lambda: Settings(twelve_data_api_key="test-provider-key")
+    )
+    monkeypatch.setattr(services, "TwelveDataClient", _StockSaleFakeTwelveDataClient)
+    today = datetime.now(UTC).date()
+    with create_test_client(tmp_path) as client:
+        client.put(
+            "/api/profile",
+            json={"display_name": "Test user", "base_currency": "EUR", "usd_per_eur": "1.25"},
+        )
+        broker = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "IBKR",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "10000",
+            },
+        ).json()
+        bought = client.post(
+            "/api/holdings",
+            json={
+                "account_id": broker["id"],
+                "subaccount_id": broker["subaccounts"][0]["id"],
+                "symbol": "MSFT",
+                "mic_code": "XNAS",
+                "exchange": "NASDAQ",
+                "instrument_type": "STOCK",
+                "quantity": "10",
+                "average_cost": "400",
+                "average_cost_currency": "USD",
+                "purchase_date": (today - timedelta(days=60)).isoformat(),
+            },
+        )
+        assert bought.status_code == 201, bought.text
+        holding_id = next(
+            holding["id"]
+            for holding in client.get("/api/dashboard").json()["holdings"]
+            if holding["symbol"] == "MSFT"
+        )
+        sale_path = f"/api/holdings/{holding_id}/sell"
+        partial_key = str(uuid4())
+        partial = {
+            "idempotency_key": partial_key,
+            "sell_date": today.isoformat(),
+            "sell_price": "420",
+            "quantity": "4",
+        }
+        sold = client.post(sale_path, json=partial)
+        replay = client.post(sale_path, json=partial)
+        mismatch = client.post(sale_path, json={**partial, "sell_price": "430"})
+        too_many = client.post(
+            sale_path,
+            json={"idempotency_key": str(uuid4()), "sell_date": today.isoformat(),
+                  "sell_price": "420", "quantity": "7"},
+        )
+        future = client.post(
+            sale_path,
+            json={"idempotency_key": str(uuid4()),
+                  "sell_date": (today + timedelta(days=1)).isoformat(), "sell_price": "420"},
+        )
+        too_early = client.post(
+            sale_path,
+            json={"idempotency_key": str(uuid4()),
+                  "sell_date": (today - timedelta(days=90)).isoformat(), "sell_price": "420"},
+        )
+        after_partial = client.get("/api/dashboard").json()
+        closing = client.post(
+            sale_path,
+            json={"idempotency_key": str(uuid4()), "sell_date": today.isoformat(),
+                  "sell_price": "425"},
+        )
+        after_close = client.get("/api/dashboard").json()
+
+    assert sold.status_code == 201, sold.text
+    assert Decimal(sold.json()["proceeds"]) == Decimal("1680")
+    assert Decimal(sold.json()["cost_basis"]) == Decimal("1600")
+    assert Decimal(sold.json()["realized_pnl"]) == Decimal("80")
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["id"] == sold.json()["id"]
+    assert mismatch.status_code == 409
+    assert too_many.status_code == 422
+    assert future.status_code == 422
+    assert too_early.status_code == 422
+
+    def usd_wallet_cash(dashboard_data: dict) -> Decimal:
+        broker_view = next(
+            account
+            for account in dashboard_data["accounts"]
+            if account["display_name"] == "IBKR"
+        )
+        wallet = next(
+            subaccount
+            for subaccount in broker_view["subaccounts"]
+            if subaccount["currency"] == "USD"
+        )
+        return Decimal(wallet["cash_balance"])
+
+    partial_holding = next(
+        holding for holding in after_partial["holdings"] if holding["symbol"] == "MSFT"
+    )
+    assert Decimal(partial_holding["quantity"]) == Decimal("6")
+    assert usd_wallet_cash(after_partial) == Decimal("1680")
+    assert closing.status_code == 201, closing.text
+    assert Decimal(closing.json()["quantity"]) == Decimal("6")
+    assert Decimal(closing.json()["realized_pnl"]) == Decimal("150")
+    assert all(holding["symbol"] != "MSFT" for holding in after_close["holdings"])
+    assert usd_wallet_cash(after_close) == Decimal("4230")

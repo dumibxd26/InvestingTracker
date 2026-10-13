@@ -823,6 +823,26 @@ class VestingGrantCreate(BaseModel):
         return self
 
 
+class StockSaleCreate(BaseModel):
+    idempotency_key: UUID
+    sell_date: date
+    sell_price: Decimal = Field(gt=0, le=Decimal("100000000"))
+    quantity: Decimal | None = Field(default=None, gt=0, le=Decimal("1000000000"))
+
+
+class StockSaleResponse(BaseModel):
+    id: UUID
+    symbol: str
+    currency: Currency
+    quantity: Decimal
+    sell_price: Decimal
+    proceeds: Decimal
+    cost_basis: Decimal
+    realized_pnl: Decimal
+    sell_date: date
+    credited_subaccount_id: UUID
+
+
 class StockPurchasePlanCreate(BaseModel):
     name: str | None = Field(default=None, max_length=80)
     symbol: str = Field(min_length=1, max_length=24)
