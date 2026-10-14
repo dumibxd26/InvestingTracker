@@ -188,7 +188,11 @@ export function Overview({
       )}
 
       <InvestmentHeatmap holdings={data.holdings} currency={currency} />
-      <PortfolioProjectionPanel currency={currency} />
+      <PortfolioProjectionPanel
+        currency={currency}
+        accounts={data.accounts}
+        holdings={data.holdings}
+      />
 
       <div className="dashboard-grid dashboard-grid-top">
         <PortfolioChart

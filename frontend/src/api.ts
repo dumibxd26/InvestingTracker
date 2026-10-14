@@ -18,6 +18,7 @@ import type {
   Dashboard,
   FundingRule,
   GoalCreatePayload,
+  GoalInsights,
   GoalRecord,
   GoalUpdatePayload,
   FixedDepositCreatePayload,
@@ -30,6 +31,8 @@ import type {
   MarketRefreshResult,
   MarketSymbol,
   PortfolioProjection,
+  PortfolioProjectionScenario,
+  PortfolioProjectionScenarioPayload,
   StockPurchasePlanPayload,
   SubaccountInterestPayload,
   StockSalePayload,
@@ -163,6 +166,16 @@ export const api = {
       { signal },
     ),
 
+  portfolioProjectionScenario: (
+    payload: PortfolioProjectionScenarioPayload,
+    signal?: AbortSignal,
+  ) =>
+    request<PortfolioProjectionScenario>("/projections/portfolio/scenario", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal,
+    }),
+
   createAccount: (payload: AccountCreatePayload) =>
     request<AccountSummary>("/accounts", { method: "POST", body: JSON.stringify(payload) }),
 
@@ -259,6 +272,9 @@ export const api = {
     request<GoalRecord>("/goals", { method: "POST", body: JSON.stringify(payload) }),
 
   listGoals: () => request<GoalRecord[]>("/goals"),
+
+  goalInsights: (goalId: string) =>
+    request<GoalInsights>(`/goals/${encodeURIComponent(goalId)}/insights`),
 
   updateGoal: (goalId: string, payload: GoalUpdatePayload) =>
     request<GoalRecord>(`/goals/${encodeURIComponent(goalId)}`, {

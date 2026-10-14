@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 from app.database import SessionFactory, get_session
+from app.gbi.schemas import GoalInsightsResponse
 from app.models import Currency, User
 from app.schemas import (
     AccountCreate,
@@ -46,6 +47,8 @@ from app.schemas import (
     PolicyResponse,
     PolicyUpdate,
     PortfolioProjectionResponse,
+    PortfolioProjectionScenarioRequest,
+    PortfolioProjectionScenarioResponse,
     ProfileUpdate,
     RecommendationRequest,
     RecommendationResponse,
@@ -79,6 +82,7 @@ from app.services import (
     delete_vesting_grant,
     get_policy_response,
     get_profile,
+    goal_insights,
     initialize_portfolio,
     list_accounts,
     list_cash_flow_schedules,
@@ -88,6 +92,7 @@ from app.services import (
     logout_user,
     market_data_status,
     portfolio_projection,
+    portfolio_projection_scenario,
     preview_recommendation,
     record_extra_cash,
     refresh_market_data,
@@ -225,6 +230,17 @@ def create_app(
         currency: Currency | None = None,
     ) -> PortfolioProjectionResponse:
         return portfolio_projection(session, current_user.id, target_date, currency)
+
+    @app.post(
+        "/api/projections/portfolio/scenario",
+        response_model=PortfolioProjectionScenarioResponse,
+    )
+    def post_portfolio_projection_scenario(
+        payload: PortfolioProjectionScenarioRequest,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> PortfolioProjectionScenarioResponse:
+        return portfolio_projection_scenario(session, current_user.id, payload)
 
     @app.get("/api/accounts", response_model=list[AccountSummary])
     def get_accounts(
@@ -449,6 +465,14 @@ def create_app(
     ) -> None:
         archive_goal(session, current_user.id, goal_id)
         return None
+
+    @app.get("/api/goals/{goal_id}/insights", response_model=GoalInsightsResponse)
+    def get_goal_insights(
+        goal_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> GoalInsightsResponse:
+        return goal_insights(session, current_user.id, goal_id)
 
     @app.post("/api/deposits", response_model=FixedDepositCreateResponse, status_code=201)
     def post_deposit(

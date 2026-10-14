@@ -1813,8 +1813,10 @@ def test_goal_links_account_selected_assets_and_visualization_only_budget(tmp_pa
             "visualization_budget_period": "yearly",
             "flexibility": "flexible",
             "linked_account_ids": [brokerage.json()["id"], bank.json()["id"]],
-            "holding_ids": [holding_id],
-            "fixed_deposit_ids": [created_deposit.json()["id"]],
+            "holding_allocations": [{"id": holding_id, "allocated_percentage": "100"}],
+            "fixed_deposit_allocations": [
+                {"id": created_deposit.json()["id"], "allocated_percentage": "100"}
+            ],
         }
         created_goal = client.post("/api/goals", json=payload)
         dashboard = client.get("/api/dashboard").json()
@@ -1824,7 +1826,7 @@ def test_goal_links_account_selected_assets_and_visualization_only_budget(tmp_pa
                 **payload,
                 "name": "Second goal",
                 "linked_account_ids": [brokerage.json()["id"]],
-                "fixed_deposit_ids": [],
+                "fixed_deposit_allocations": [],
             },
         )
         duplicate_deposit_assignment = client.post(
@@ -1833,7 +1835,7 @@ def test_goal_links_account_selected_assets_and_visualization_only_budget(tmp_pa
                 **payload,
                 "name": "Second deposit goal",
                 "linked_account_ids": [bank.json()["id"]],
-                "holding_ids": [],
+                "holding_allocations": [],
             },
         )
         invalid_account_link = client.post(
@@ -1842,8 +1844,8 @@ def test_goal_links_account_selected_assets_and_visualization_only_budget(tmp_pa
                 **payload,
                 "name": "Unlinked source",
                 "linked_account_ids": [],
-                "holding_ids": [holding_id],
-                "fixed_deposit_ids": [],
+                "holding_allocations": [{"id": holding_id, "allocated_percentage": "100"}],
+                "fixed_deposit_allocations": [],
             },
         )
         updated_goal = client.put(
@@ -1853,8 +1855,8 @@ def test_goal_links_account_selected_assets_and_visualization_only_budget(tmp_pa
                 "visualization_budget_amount": "700",
                 "visualization_budget_period": "yearly",
                 "linked_account_ids": [brokerage.json()["id"]],
-                "holding_ids": [],
-                "fixed_deposit_ids": [],
+                "holding_allocations": [],
+                "fixed_deposit_allocations": [],
             },
         )
         dashboard_after_update = client.get("/api/dashboard").json()
@@ -2784,3 +2786,302 @@ def test_stock_transfer_moves_position_between_accounts_with_optional_fee(
     assert closing.json()["fee_side"] == "SOURCE"
     assert after_close == (None, Decimal("10"))
     assert broker_eur_before_close - broker_eur_after_close == Decimal("2")
+
+def _seed_priced_holding(
+    client,
+    account_id: str,
+    symbol: str,
+    quantity: str,
+    average_cost: str,
+    price: str,
+) -> str:
+    user_id = UUID(client.get("/api/auth/me").json()["id"])
+    with client.app.state.session_factory() as session:
+        instrument = Instrument(
+            symbol=symbol,
+            name=f"{symbol} Fund",
+            asset_class=AssetClass.EQUITIES,
+            currency=Currency.EUR,
+            mic="XNAS",
+            exchange="NASDAQ",
+            instrument_type="ETF",
+            is_demo=False,
+        )
+        session.add(instrument)
+        session.flush()
+        holding = Holding(
+            user_id=user_id,
+            account_id=UUID(account_id),
+            funding_subaccount_id=None,
+            instrument_id=instrument.id,
+            quantity=Decimal(quantity),
+            average_cost=Decimal(average_cost),
+            purchase_date=date(2025, 1, 1),
+            funding_cost=Decimal("0"),
+        )
+        session.add(holding)
+        session.flush()
+        session.add(
+            MarketPriceCache(
+                instrument_id=instrument.id,
+                price=Decimal(price),
+                currency=Currency.EUR,
+                source="TEST",
+                feed_type="QUOTE",
+                observed_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
+        return str(holding.id)
+
+
+def test_goal_allocations_split_one_holding_across_goals_within_full_allocation(tmp_path) -> None:
+    with create_test_client(tmp_path) as client:
+        brokerage = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Split brokerage",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "0",
+            },
+        )
+        holding_id = _seed_priced_holding(
+            client, brokerage.json()["id"], "SPLIT", "10", "50", "100"
+        )
+        base = {
+            "goal_type": "wealth",
+            "target_amount": "5000",
+            "target_currency": "EUR",
+            "priority": 2,
+            "risk_level": "moderate",
+            "monthly_contribution": "0",
+            "flexibility": "flexible",
+            "linked_account_ids": [brokerage.json()["id"]],
+            "fixed_deposit_allocations": [],
+        }
+        house = client.post(
+            "/api/goals",
+            json={
+                **base,
+                "name": "House",
+                "holding_allocations": [{"id": holding_id, "allocated_percentage": "60"}],
+            },
+        )
+        car = client.post(
+            "/api/goals",
+            json={
+                **base,
+                "name": "Car",
+                "holding_allocations": [{"id": holding_id, "allocated_percentage": "40"}],
+            },
+        )
+        overflow = client.post(
+            "/api/goals",
+            json={
+                **base,
+                "name": "Overflow",
+                "holding_allocations": [{"id": holding_id, "allocated_percentage": "1"}],
+            },
+        )
+        zero_share = client.post(
+            "/api/goals",
+            json={
+                **base,
+                "name": "Zero",
+                "holding_allocations": [{"id": holding_id, "allocated_percentage": "0"}],
+            },
+        )
+        dashboard = client.get("/api/dashboard").json()
+
+    assert house.status_code == 201, house.text
+    assert car.status_code == 201, car.text
+    assert house.json()["holding_allocations"] == [
+        {"id": holding_id, "allocated_percentage": "60.0000"}
+    ]
+    assert overflow.status_code == 409
+    assert zero_share.status_code == 422
+    values = {goal["name"]: Decimal(goal["linked_asset_value"]) for goal in dashboard["goals"]}
+    market_value = Decimal(dashboard["holdings"][0]["market_value"])
+    assert Decimal(dashboard["holdings"][0]["allocated_percentage"]) == Decimal("100")
+    assert abs(values["House"] + values["Car"] - market_value) < Decimal("0.02")
+    assert abs(values["House"] / values["Car"] - Decimal("1.5")) < Decimal("0.001")
+
+
+def test_goal_insights_endpoint_reports_allocation_risk_and_simulation(tmp_path) -> None:
+    target_date = (date.today() + timedelta(days=365 * 8)).isoformat()
+    with create_test_client(tmp_path) as client:
+        brokerage = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Insight brokerage",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "0",
+            },
+        )
+        holding_id = _seed_priced_holding(
+            client, brokerage.json()["id"], "IDX", "100", "80", "120"
+        )
+        goal_payload = {
+            "name": "Retirement",
+            "goal_type": "retirement",
+            "target_amount": "150000",
+            "target_currency": "EUR",
+            "target_date": target_date,
+            "priority": 1,
+            "risk_level": "moderate",
+            "monthly_contribution": "800",
+            "flexibility": "flexible",
+            "linked_account_ids": [brokerage.json()["id"]],
+            "holding_allocations": [{"id": holding_id, "allocated_percentage": "100"}],
+            "fixed_deposit_allocations": [],
+        }
+        goal = client.post("/api/goals", json=goal_payload)
+        goal_id = goal.json()["id"]
+        first = client.get(f"/api/goals/{goal_id}/insights")
+        second = client.get(f"/api/goals/{goal_id}/insights")
+        unknown = client.get("/api/goals/00000000-0000-0000-0000-000000000000/insights")
+        open_goal = client.post(
+            "/api/goals",
+            json={
+                **goal_payload,
+                "name": "Open ended",
+                "target_date": None,
+                "holding_allocations": [],
+            },
+        )
+        open_insights = client.get(f"/api/goals/{open_goal.json()['id']}/insights")
+
+    assert goal.status_code == 201, goal.text
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["available"] is True
+    assert abs(body["evaluation"]["total_current_value"] - 12000.0) < 0.01
+    assert abs(body["evaluation"]["after_tax_value"] - 11880.0) < 0.01
+    weights = sum(item["current_weight"] for item in body["evaluation"]["bucket_drifts"].values())
+    assert abs(weights - 1.0) < 1e-6
+    routing = body["rebalance_plan"]["monthly_contribution_routing"]
+    assert abs(sum(item["allocated_contribution"] for item in routing) - 800.0) < 0.05
+    simulation = body["simulation"]
+    assert 0.0 <= simulation["success_probability"] <= 1.0
+    assert len(simulation["yearly_schedule"]) >= 8
+    assert body["recovery"]["is_goal_on_track"] in (True, False)
+    assert body["assumptions"]
+    assert second.json()["simulation"]["success_probability"] == simulation["success_probability"]
+    assert unknown.status_code == 404
+    assert open_insights.status_code == 200
+    assert open_insights.json()["available"] is False
+    assert open_insights.json()["unavailable_reason"]
+
+
+def test_portfolio_projection_scenario_compounds_contributions_and_reports_risk_mix(
+    tmp_path,
+) -> None:
+    target_date = add_months(date.today(), 12)
+    with create_test_client(tmp_path) as client:
+        brokerage = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Scenario brokerage",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "0",
+            },
+        )
+        lower_risk_id = _seed_priced_holding(
+            client, brokerage.json()["id"], "SCENX", "1", "100", "100"
+        )
+        higher_risk_id = _seed_priced_holding(
+            client, brokerage.json()["id"], "SCENZ", "3", "100", "100"
+        )
+        with client.app.state.session_factory() as session:
+            lower_risk = session.get(Holding, UUID(lower_risk_id))
+            higher_risk = session.get(Holding, UUID(higher_risk_id))
+            assert lower_risk is not None and higher_risk is not None
+            lower_risk.risk_tier = "X"
+            lower_risk.expected_annual_return = Decimal("0.06")
+            higher_risk.risk_tier = "Z"
+            higher_risk.expected_annual_return = Decimal("0.10")
+            session.commit()
+
+        request = {
+            "target_date": target_date.isoformat(),
+            "currency": "EUR",
+            "monthly_contribution": "1000",
+            "scope_account_id": brokerage.json()["id"],
+            "investments": [
+                {
+                    "holding_id": lower_risk_id,
+                    "contribution_percentage": "60",
+                    "assumed_annual_return": "0.06",
+                },
+                {
+                    "holding_id": higher_risk_id,
+                    "contribution_percentage": "40",
+                    "assumed_annual_return": "0.10",
+                },
+            ],
+        }
+        scenario = client.post("/api/projections/portfolio/scenario", json=request)
+        baseline = client.get(
+            "/api/projections/portfolio",
+            params={"target_date": target_date.isoformat(), "currency": "EUR"},
+        )
+        invalid_weights = client.post(
+            "/api/projections/portfolio/scenario",
+            json={
+                **request,
+                "investments": [
+                    {
+                        "holding_id": lower_risk_id,
+                        "contribution_percentage": "60",
+                        "assumed_annual_return": "0.06",
+                    },
+                    {
+                        "holding_id": higher_risk_id,
+                        "contribution_percentage": "30",
+                        "assumed_annual_return": "0.10",
+                    },
+                ],
+            },
+        )
+
+    assert scenario.status_code == 200, scenario.text
+    assert baseline.status_code == 200, baseline.text
+    result = scenario.json()
+    assert result["risk_summary"]["risk_mix"]["X"] == "0.2500"
+    assert result["risk_summary"]["risk_mix"]["Y"] == "0.0000"
+    assert result["risk_summary"]["risk_mix"]["Z"] == "0.7500"
+    assert Decimal(result["risk_summary"]["weighted_risk_score"]) == Decimal("2.50")
+    assert Decimal(result["risk_summary"]["contribution_weighted_risk_score"]) == Decimal(
+        "1.80"
+    )
+    assert Decimal(result["baseline"]["projected_net_worth"]) == Decimal(
+        baseline.json()["projected_net_worth"]
+    )
+    assert Decimal(result["with_contributions"]["projected_net_worth"]) > Decimal(
+        result["baseline"]["projected_net_worth"]
+    )
+    investments = {item["symbol"]: item for item in result["investments"]}
+    assert Decimal(investments["SCENX"]["monthly_contribution"]) == Decimal("600.00")
+    assert Decimal(investments["SCENZ"]["monthly_contribution"]) == Decimal("400.00")
+    assert Decimal(investments["SCENX"]["contribution_principal"]) == Decimal("7200.00")
+    assert Decimal(investments["SCENZ"]["contribution_principal"]) == Decimal("4800.00")
+    assert Decimal(investments["SCENX"]["projected_after_tax_value"]) <= Decimal(
+        investments["SCENX"]["projected_gross_value"]
+    )
+    contribution_value = sum(
+        (Decimal(item["projected_after_tax_value"]) for item in result["investments"]),
+        Decimal("0"),
+    )
+    projection_delta = (
+        Decimal(result["with_contributions"]["projected_net_worth"])
+        - Decimal(result["baseline"]["projected_net_worth"])
+    )
+    assert abs(contribution_value - projection_delta) <= Decimal("0.02")
+    assert any("monthly period" in assumption for assumption in result["assumptions"])
+    assert invalid_weights.status_code == 422

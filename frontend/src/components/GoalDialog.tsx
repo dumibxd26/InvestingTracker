@@ -8,13 +8,47 @@ import type {
   Deposit,
   GoalCreatePayload,
   GoalRecord,
+  GoalSourceAllocation,
   GoalType,
   GoalUpdatePayload,
   HoldingSummary,
 } from "../types";
 
+type ShareMap = Record<string, string>;
+
 function accountName(accounts: AccountSummary[], accountId: string): string {
   return accounts.find((account) => account.id === accountId)?.display_name ?? "Account";
+}
+
+function sharesFromAllocations(allocations: GoalSourceAllocation[] = []): ShareMap {
+  return Object.fromEntries(
+    allocations.map((allocation) => [allocation.id, String(Number(allocation.allocated_percentage))]),
+  );
+}
+
+function allocationsFromShares(shares: ShareMap): GoalSourceAllocation[] {
+  return Object.entries(shares).map(([id, percentage]) => ({ id, allocated_percentage: percentage }));
+}
+
+function withoutIds(shares: ShareMap, ids: Set<string>): ShareMap {
+  return Object.fromEntries(Object.entries(shares).filter(([id]) => !ids.has(id)));
+}
+
+function toggledShare(shares: ShareMap, id: string, checked: boolean, available: number): ShareMap {
+  if (!checked) return withoutIds(shares, new Set([id]));
+  return { ...shares, [id]: String(Math.round(Math.min(100, available) * 100) / 100) };
+}
+
+// Percent already taken by other active goals, excluding this goal's own saved share.
+function shareUsedByOtherGoals(
+  allocatedTotal: string,
+  id: string,
+  ownAllocations: GoalSourceAllocation[] = [],
+): number {
+  const ownShare = Number(
+    ownAllocations.find((allocation) => allocation.id === id)?.allocated_percentage ?? 0,
+  );
+  return Math.max(0, Number(allocatedTotal) - ownShare);
 }
 
 interface GoalDialogProps {
@@ -52,9 +86,11 @@ export function GoalDialog({
   const [linkedAccountIds, setLinkedAccountIds] = useState<string[]>(
     goal?.linked_account_ids ?? [],
   );
-  const [holdingIds, setHoldingIds] = useState<string[]>(goal?.holding_ids ?? []);
-  const [fixedDepositIds, setFixedDepositIds] = useState<string[]>(
-    goal?.fixed_deposit_ids ?? [],
+  const [holdingShares, setHoldingShares] = useState<ShareMap>(() =>
+    sharesFromAllocations(goal?.holding_allocations),
+  );
+  const [depositShares, setDepositShares] = useState<ShareMap>(() =>
+    sharesFromAllocations(goal?.fixed_deposit_allocations),
   );
   const [visualizationBudgetAmount, setVisualizationBudgetAmount] = useState(
     goal?.visualization_budget_amount ?? "",
@@ -91,8 +127,8 @@ export function GoalDialog({
       const accountDepositIds = new Set(
         deposits.filter((deposit) => deposit.account_id === accountId).map((deposit) => deposit.id),
       );
-      setHoldingIds((current) => current.filter((id) => !accountHoldingIds.has(id)));
-      setFixedDepositIds((current) => current.filter((id) => !accountDepositIds.has(id)));
+      setHoldingShares((current) => withoutIds(current, accountHoldingIds));
+      setDepositShares((current) => withoutIds(current, accountDepositIds));
     }
   }
 
@@ -117,6 +153,16 @@ export function GoalDialog({
       return;
     }
 
+    const sharedAssets = [
+      ...allocationsFromShares(holdingShares),
+      ...allocationsFromShares(depositShares),
+    ];
+    if (sharedAssets.some((item) => !(Number(item.allocated_percentage) > 0 && Number(item.allocated_percentage) <= 100))) {
+      setError("Each linked stock or deposit needs a share above 0% and at most 100%.");
+      setSaving(false);
+      return;
+    }
+
     const payload: GoalCreatePayload = {
       name,
       goal_type: goalType,
@@ -133,8 +179,8 @@ export function GoalDialog({
           ? visualizationBudgetPeriod
           : null,
       linked_account_ids: linkedAccountIds,
-      holding_ids: holdingIds,
-      fixed_deposit_ids: fixedDepositIds,
+      holding_allocations: allocationsFromShares(holdingShares),
+      fixed_deposit_allocations: allocationsFromShares(depositShares),
     };
     const fixedPercent = String(form.get("fixedPercent") ?? "").trim();
     if (fixedPercent) payload.fixed_percent = String(Number(fixedPercent) / 100);
@@ -253,22 +299,26 @@ export function GoalDialog({
                 {holdings
                   .filter((holding) => linkedAccountIds.includes(holding.account_id))
                   .map((holding) => {
-                    const assignedElsewhere =
-                      holding.assigned_goal_id !== null && holding.assigned_goal_id !== goal?.id;
+                    const usedElsewhere = shareUsedByOtherGoals(
+                      holding.allocated_percentage,
+                      holding.id,
+                      goal?.holding_allocations,
+                    );
+                    const available = Math.max(0, 100 - usedElsewhere);
+                    const selected = holding.id in holdingShares;
+                    const blocked = !selected && available <= 0;
                     return (
                       <label
-                        className={`goal-source-asset ${assignedElsewhere ? "is-disabled" : ""}`}
+                        className={`goal-source-asset ${blocked ? "is-disabled" : ""}`}
                         key={holding.id}
                       >
                         <input
                           type="checkbox"
-                          checked={holdingIds.includes(holding.id)}
-                          disabled={assignedElsewhere}
+                          checked={selected}
+                          disabled={blocked}
                           onChange={(event) =>
-                            setHoldingIds((current) =>
-                              event.target.checked
-                                ? [...current, holding.id]
-                                : current.filter((id) => id !== holding.id),
+                            setHoldingShares((current) =>
+                              toggledShare(current, holding.id, event.target.checked, available),
                             )
                           }
                         />
@@ -276,31 +326,54 @@ export function GoalDialog({
                           <strong>{holding.symbol} · {holding.account_name}</strong>
                           <small>
                             {number(holding.quantity)} shares · {amount(holding.market_value, currency)}
-                            {assignedElsewhere ? ` · assigned to ${holding.assigned_goal_name}` : ""}
+                            {usedElsewhere > 0 ? ` · ${number(usedElsewhere, 2)}% used by other goals` : ""}
                           </small>
                         </span>
+                        {selected && (
+                          <span className="goal-share-field">
+                            <input
+                              type="number"
+                              min="0.01"
+                              max={available}
+                              step="0.01"
+                              aria-label={`Share of ${holding.symbol} for this goal`}
+                              value={holdingShares[holding.id]}
+                              onChange={(event) =>
+                                setHoldingShares((current) => ({
+                                  ...current,
+                                  [holding.id]: event.target.value,
+                                }))
+                              }
+                            />
+                            <small>%</small>
+                          </span>
+                        )}
                       </label>
                     );
                   })}
                 {deposits
                   .filter((deposit) => linkedAccountIds.includes(deposit.account_id))
                   .map((deposit) => {
-                    const assignedElsewhere =
-                      deposit.assigned_goal_id !== null && deposit.assigned_goal_id !== goal?.id;
+                    const usedElsewhere = shareUsedByOtherGoals(
+                      deposit.allocated_percentage,
+                      deposit.id,
+                      goal?.fixed_deposit_allocations,
+                    );
+                    const available = Math.max(0, 100 - usedElsewhere);
+                    const selected = deposit.id in depositShares;
+                    const blocked = !selected && available <= 0;
                     return (
                       <label
-                        className={`goal-source-asset ${assignedElsewhere ? "is-disabled" : ""}`}
+                        className={`goal-source-asset ${blocked ? "is-disabled" : ""}`}
                         key={deposit.id}
                       >
                         <input
                           type="checkbox"
-                          checked={fixedDepositIds.includes(deposit.id)}
-                          disabled={assignedElsewhere}
+                          checked={selected}
+                          disabled={blocked}
                           onChange={(event) =>
-                            setFixedDepositIds((current) =>
-                              event.target.checked
-                                ? [...current, deposit.id]
-                                : current.filter((id) => id !== deposit.id),
+                            setDepositShares((current) =>
+                              toggledShare(current, deposit.id, event.target.checked, available),
                             )
                           }
                         />
@@ -308,9 +381,28 @@ export function GoalDialog({
                           <strong>{deposit.name} · {accountName(accounts, deposit.account_id)}</strong>
                           <small>
                             {amount(deposit.current_value, deposit.currency)} · matures {dateLabel(deposit.maturity_date)}
-                            {assignedElsewhere ? ` · assigned to ${deposit.assigned_goal_name}` : ""}
+                            {usedElsewhere > 0 ? ` · ${number(usedElsewhere, 2)}% used by other goals` : ""}
                           </small>
                         </span>
+                        {selected && (
+                          <span className="goal-share-field">
+                            <input
+                              type="number"
+                              min="0.01"
+                              max={available}
+                              step="0.01"
+                              aria-label={`Share of ${deposit.name} for this goal`}
+                              value={depositShares[deposit.id]}
+                              onChange={(event) =>
+                                setDepositShares((current) => ({
+                                  ...current,
+                                  [deposit.id]: event.target.value,
+                                }))
+                              }
+                            />
+                            <small>%</small>
+                          </span>
+                        )}
                       </label>
                     );
                   })}

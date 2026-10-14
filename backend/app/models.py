@@ -537,7 +537,13 @@ class GoalAccountLink(Base):
 
 class GoalHoldingAllocation(Base):
     __tablename__ = "goal_holding_allocations"
-    __table_args__ = (UniqueConstraint("holding_id"),)
+    __table_args__ = (
+        UniqueConstraint("goal_id", "holding_id", name="uq_goal_holding_allocations_goal_holding"),
+        CheckConstraint(
+            "allocated_percentage > 0 AND allocated_percentage <= 100",
+            name="ck_goal_holding_allocations_percentage",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -549,11 +555,22 @@ class GoalHoldingAllocation(Base):
     holding_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("holdings.id", ondelete="CASCADE"), nullable=False
     )
+    allocated_percentage: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), default=Decimal("100"), server_default="100", nullable=False
+    )
 
 
 class GoalDepositAllocation(Base):
     __tablename__ = "goal_deposit_allocations"
-    __table_args__ = (UniqueConstraint("fixed_deposit_id"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "goal_id", "fixed_deposit_id", name="uq_goal_deposit_allocations_goal_deposit"
+        ),
+        CheckConstraint(
+            "allocated_percentage > 0 AND allocated_percentage <= 100",
+            name="ck_goal_deposit_allocations_percentage",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -564,6 +581,9 @@ class GoalDepositAllocation(Base):
     )
     fixed_deposit_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("fixed_deposits.id", ondelete="CASCADE"), nullable=False
+    )
+    allocated_percentage: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), default=Decimal("100"), server_default="100", nullable=False
     )
 
 

@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
-import { X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { Maximize2, Minimize2, X } from "lucide-react";
+import { createPortal } from "react-dom";
 import { amount, number } from "../format";
 import type { Currency, HoldingSummary } from "../types";
 
@@ -119,6 +120,146 @@ function gainColor(gainPercent: number, maxMagnitude: number): string {
   return `rgb(${channel(0)} ${channel(1)} ${channel(2)})`;
 }
 
+interface TooltipPosition {
+  symbol: string;
+  left: number;
+  top: number;
+}
+
+function HeatmapCanvas({
+  groups,
+  currency,
+  maxGainMagnitude,
+  large = false,
+  onSelect,
+}: {
+  groups: TickerGroup[];
+  currency: Currency;
+  maxGainMagnitude: number;
+  large?: boolean;
+  onSelect: (symbol: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [tooltip, setTooltip] = useState<TooltipPosition | null>(null);
+  const rectangles = treemap(groups, 0, 0, 1000, 560);
+  const groupsBySymbol = new Map(groups.map((group) => [group.symbol, group]));
+
+  function showTooltip(event: ReactPointerEvent<SVGGElement>, symbol: string) {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const tooltipWidth = large ? 280 : 255;
+    const tooltipHeight = large ? 155 : 145;
+    setTooltip({
+      symbol,
+      left: Math.max(8, Math.min(event.clientX - rect.left + 14, rect.width - tooltipWidth - 8)),
+      top: Math.max(8, Math.min(event.clientY - rect.top + 14, rect.height - tooltipHeight - 8)),
+    });
+  }
+
+  const hoveredGroup = tooltip ? groupsBySymbol.get(tooltip.symbol) : undefined;
+  const hoveredReturn = hoveredGroup && hoveredGroup.marketValue > 0
+    ? hoveredGroup.holdings.reduce(
+      (sum, holding) => sum + Number(holding.market_value) * Number(holding.expected_annual_return),
+      0,
+    ) / hoveredGroup.marketValue
+    : 0;
+  const hoveredTiers = hoveredGroup
+    ? [...new Set(hoveredGroup.holdings.map((holding) => holding.risk_tier))].sort().join(", ")
+    : "";
+  const hoveredListings = hoveredGroup
+    ? [...new Set(hoveredGroup.holdings.map(
+      (holding) => `${holding.account_name} · ${listingVenue(holding)}`,
+    ))]
+    : [];
+
+  return (
+    <div
+      className={`investment-treemap${large ? " investment-treemap-large" : ""}`}
+      ref={containerRef}
+      onPointerLeave={() => setTooltip(null)}
+    >
+      <svg
+        viewBox="0 0 1000 560"
+        preserveAspectRatio={large ? "xMidYMid meet" : "none"}
+        role="group"
+        aria-label="Investment heatmap grouped by ticker"
+      >
+        {rectangles.map(({ symbol, x, y, width, height }) => {
+          const group = groupsBySymbol.get(symbol);
+          if (!group) return null;
+          const color = gainColor(group.estimatedGainPercent, maxGainMagnitude);
+          const showSymbol = width > 50 && height > 33;
+          const showValue = width > 105 && height > 57;
+          return (
+            <g
+              key={symbol}
+              className="treemap-clickable"
+              role="button"
+              tabIndex={0}
+              aria-label={`${symbol}: ${amount(group.marketValue, currency)}, estimated gain ${amount(group.estimatedGain, currency)} (${group.estimatedGainPercent.toFixed(1)}%). Open listings and accounts.`}
+              onPointerEnter={(event) => showTooltip(event, symbol)}
+              onPointerMove={(event) => showTooltip(event, symbol)}
+              onFocus={() => setTooltip({ symbol, left: 12, top: 12 })}
+              onBlur={() => setTooltip(null)}
+              onClick={() => onSelect(symbol)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelect(symbol);
+                }
+              }}
+            >
+              <rect
+                x={x + 2}
+                y={y + 2}
+                width={Math.max(0, width - 4)}
+                height={Math.max(0, height - 4)}
+                rx="8"
+                fill={color}
+                className="treemap-tile"
+              />
+              {showSymbol && (
+                <>
+                  <text x={x + 12} y={y + 20} className="treemap-symbol">
+                    {symbol}
+                  </text>
+                  {showValue && (
+                    <>
+                      <text x={x + 12} y={y + 39} className="treemap-value">
+                        {amount(group.marketValue, currency)}
+                      </text>
+                      <text x={x + 12} y={y + 55} className="treemap-gain">
+                        {group.estimatedGain >= 0 ? "+" : ""}
+                        {group.estimatedGainPercent.toFixed(1)}%
+                      </text>
+                    </>
+                  )}
+                </>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+      {hoveredGroup && tooltip && (
+        <div
+          className="heatmap-stock-tooltip"
+          role="tooltip"
+          style={{ left: tooltip.left, top: tooltip.top }}
+        >
+          <strong>{hoveredGroup.symbol} · {hoveredGroup.name}</strong>
+          <span>After-tax value: {amount(hoveredGroup.marketValue, currency)}</span>
+          <span className={hoveredGroup.estimatedGain >= 0 ? "positive-text" : "negative-text"}>
+            Estimated gain/loss: {hoveredGroup.estimatedGain >= 0 ? "+" : ""}
+            {amount(hoveredGroup.estimatedGain, currency)} ({hoveredGroup.estimatedGainPercent.toFixed(1)}%)
+          </span>
+          <span>Risk tier(s): {hoveredTiers || "not assigned"} · assumed return: {(hoveredReturn * 100).toFixed(1)}%/yr</span>
+          <small>{hoveredListings.join("; ")}</small>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function InvestmentHeatmap({
   holdings,
   currency,
@@ -127,6 +268,20 @@ export function InvestmentHeatmap({
   currency: Currency;
 }) {
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [fullScreen, setFullScreen] = useState(false);
+  useEffect(() => {
+    if (!fullScreen) return;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFullScreen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [fullScreen]);
   const groups = useMemo(
     () => groupByTicker(holdings)
       .filter((group) => group.marketValue > 0)
@@ -138,7 +293,6 @@ export function InvestmentHeatmap({
     1,
     ...groups.map((group) => Math.abs(group.estimatedGainPercent)),
   );
-  const rectangles = treemap(groups, 0, 0, 1000, 560);
   const riskTotals = {
     X: holdings.filter((holding) => holding.risk_tier === "X")
       .reduce((sum, holding) => sum + Number(holding.market_value), 0),
@@ -157,70 +311,28 @@ export function InvestmentHeatmap({
             <div className="eyebrow">Where invested value sits</div>
             <h2>Investment heatmap</h2>
           </div>
-          <span className="panel-kicker">Area = combined after-tax holding value</span>
+          <div className="heatmap-heading-actions">
+            <span className="panel-kicker">Area = combined after-tax holding value</span>
+            {groups.length > 0 && (
+              <button
+                className="text-button heatmap-expand-button"
+                type="button"
+                onClick={() => setFullScreen(true)}
+                aria-label="Expand investment heatmap to full screen"
+              >
+                <Maximize2 size={14} /> Full screen
+              </button>
+            )}
+          </div>
         </div>
         {groups.length > 0 ? (
           <>
-            <div className="investment-treemap">
-              <svg viewBox="0 0 1000 560" preserveAspectRatio="none" role="group" aria-label="Investment heatmap grouped by ticker">
-                {rectangles.map(({ symbol, x, y, width, height }) => {
-                  const group = groups.find((item) => item.symbol === symbol);
-                  if (!group) return null;
-                  const color = gainColor(group.estimatedGainPercent, maxGainMagnitude);
-                  const showSymbol = width > 50 && height > 33;
-                  const showValue = width > 105 && height > 57;
-                  return (
-                    <g
-                      key={symbol}
-                      className="treemap-clickable"
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`${symbol}: ${amount(group.marketValue, currency)}, estimated gain ${amount(group.estimatedGain, currency)} (${group.estimatedGainPercent.toFixed(1)}%). Open listings and accounts.`}
-                      onClick={() => setSelectedTicker(symbol)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          setSelectedTicker(symbol);
-                        }
-                      }}
-                    >
-                      <title>
-                        {symbol} · {amount(group.marketValue, currency)} after-tax estimate ·
-                        {" "}{amount(group.estimatedGain, currency)} estimated gain/loss
-                        {" "}({group.estimatedGainPercent.toFixed(1)}%). Click for accounts and exchanges.
-                      </title>
-                      <rect
-                        x={x + 2}
-                        y={y + 2}
-                        width={Math.max(0, width - 4)}
-                        height={Math.max(0, height - 4)}
-                        rx="8"
-                        fill={color}
-                        className="treemap-tile"
-                      />
-                      {showSymbol && (
-                        <>
-                          <text x={x + 12} y={y + 20} className="treemap-symbol">
-                            {symbol}
-                          </text>
-                          {showValue && (
-                            <>
-                              <text x={x + 12} y={y + 39} className="treemap-value">
-                                {amount(group.marketValue, currency)}
-                              </text>
-                              <text x={x + 12} y={y + 55} className="treemap-gain">
-                                {group.estimatedGain >= 0 ? "+" : ""}
-                                {group.estimatedGainPercent.toFixed(1)}%
-                              </text>
-                            </>
-                          )}
-                        </>
-                      )}
-                    </g>
-                  );
-                })}
-              </svg>
-            </div>
+            <HeatmapCanvas
+              groups={groups}
+              currency={currency}
+              maxGainMagnitude={maxGainMagnitude}
+              onSelect={setSelectedTicker}
+            />
             <div className="heatmap-legend" aria-label="Gain and loss color legend">
               <span>Estimated loss</span>
               <span className="heatmap-legend-scale" />
@@ -247,8 +359,55 @@ export function InvestmentHeatmap({
           <div className="empty-state"><strong>No quoted holdings to display</strong><span>Add holdings and refresh their quotes to populate the heatmap.</span></div>
         )}
       </section>
-      {selected && (
-        <div className="modal-backdrop" onMouseDown={(event) => {
+      {fullScreen && createPortal(
+        <div
+          className="heatmap-fullscreen-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setFullScreen(false);
+          }}
+        >
+          <section
+            className="heatmap-fullscreen-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="heatmap-fullscreen-title"
+          >
+            <header className="heatmap-fullscreen-heading">
+              <div>
+                <div className="eyebrow">Area = combined after-tax holding value</div>
+                <h2 id="heatmap-fullscreen-title">Investment heatmap</h2>
+                <p>Hover over a tile for position details. Select a tile to see each account and listing.</p>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="Exit full-screen heatmap"
+                onClick={() => setFullScreen(false)}
+              >
+                <Minimize2 size={18} />
+              </button>
+            </header>
+            <HeatmapCanvas
+              groups={groups}
+              currency={currency}
+              maxGainMagnitude={maxGainMagnitude}
+              large
+              onSelect={setSelectedTicker}
+            />
+            <div className="heatmap-legend" aria-label="Gain and loss color legend">
+              <span>Estimated loss</span>
+              <span className="heatmap-legend-scale" />
+              <span>Break-even</span>
+              <span className="heatmap-legend-scale heatmap-legend-scale-positive" />
+              <span>Estimated profit</span>
+              <small>Color strength is scaled to the largest absolute percentage change in this portfolio.</small>
+            </div>
+          </section>
+        </div>,
+        document.body,
+      )}
+      {selected && createPortal(
+        <div className={`modal-backdrop${fullScreen ? " heatmap-detail-backdrop-on-top" : ""}`} onMouseDown={(event) => {
           if (event.target === event.currentTarget) setSelectedTicker(null);
         }}>
           <section className="modal-card ticker-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="ticker-detail-title">
@@ -308,7 +467,8 @@ export function InvestmentHeatmap({
               Listings with the same normalized ticker are combined here. Each exchange/account position remains separately shown above.
             </p>
           </section>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

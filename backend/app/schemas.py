@@ -247,6 +247,11 @@ class InitialPortfolioRequest(BaseModel):
         return self
 
 
+class GoalSourceAllocation(BaseModel):
+    id: UUID
+    allocated_percentage: Decimal = Field(default=Decimal("100"), gt=0, le=100)
+
+
 class GoalCreate(BaseModel):
     name: str = Field(min_length=2, max_length=80)
     goal_type: GoalType
@@ -264,8 +269,10 @@ class GoalCreate(BaseModel):
     fixed_percent: Decimal | None = Field(default=None, ge=0, le=1)
     flexibility: str = Field(pattern="^(essential|flexible)$")
     linked_account_ids: list[UUID] = Field(default_factory=list, max_length=20)
-    holding_ids: list[UUID] = Field(default_factory=list, max_length=100)
-    fixed_deposit_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    holding_allocations: list[GoalSourceAllocation] = Field(default_factory=list, max_length=100)
+    fixed_deposit_allocations: list[GoalSourceAllocation] = Field(
+        default_factory=list, max_length=100
+    )
 
     @model_validator(mode="after")
     def validate_target(self) -> "GoalCreate":
@@ -281,8 +288,8 @@ class GoalCreate(BaseModel):
             )
         for values, label in (
             (self.linked_account_ids, "linked account"),
-            (self.holding_ids, "stock or ETF"),
-            (self.fixed_deposit_ids, "deposit"),
+            ([item.id for item in self.holding_allocations], "stock or ETF"),
+            ([item.id for item in self.fixed_deposit_allocations], "deposit"),
         ):
             if len(values) != len(set(values)):
                 raise ValueError(f"A {label} can only be selected once")
@@ -316,6 +323,8 @@ class GoalResponse(BaseModel):
     linked_account_ids: list[UUID]
     holding_ids: list[UUID]
     fixed_deposit_ids: list[UUID]
+    holding_allocations: list[GoalSourceAllocation]
+    fixed_deposit_allocations: list[GoalSourceAllocation]
 
 
 class FixedShare(BaseModel):
@@ -510,6 +519,7 @@ class HoldingSummary(BaseModel):
     account_id: UUID
     assigned_goal_id: UUID | None = None
     assigned_goal_name: str | None = None
+    allocated_percentage: Decimal = Decimal("0")
     symbol: str
     name: str
     account_name: str
@@ -642,6 +652,71 @@ class PortfolioProjectionResponse(BaseModel):
     warnings: list[str]
 
 
+class ProjectionScenarioInvestmentInput(BaseModel):
+    holding_id: UUID
+    contribution_percentage: Decimal = Field(gt=0, le=100)
+    assumed_annual_return: Decimal | None = Field(default=None, gt=-1, le=1)
+
+
+class PortfolioProjectionScenarioRequest(BaseModel):
+    target_date: date
+    currency: Currency
+    monthly_contribution: Decimal = Field(gt=0, le=Decimal("100000000"))
+    scope_account_id: UUID | None = None
+    investments: list[ProjectionScenarioInvestmentInput] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_investments(self) -> "PortfolioProjectionScenarioRequest":
+        holding_ids = [investment.holding_id for investment in self.investments]
+        if len(holding_ids) != len(set(holding_ids)):
+            raise ValueError("A holding can only be selected once")
+        if sum(
+            (investment.contribution_percentage for investment in self.investments), Decimal("0")
+        ) != Decimal("100"):
+            raise ValueError("Investment contribution percentages must sum to 100")
+        return self
+
+
+class ProjectionScenarioInvestment(BaseModel):
+    holding_id: UUID
+    symbol: str
+    name: str
+    account_id: UUID
+    account_name: str
+    exchange: str
+    risk_tier: Literal["X", "Y", "Z"]
+    current_value: Decimal
+    current_weight: Decimal
+    contribution_percentage: Decimal
+    monthly_contribution: Decimal
+    assumed_annual_return: Decimal
+    contribution_principal: Decimal
+    projected_gross_value: Decimal
+    estimated_tax: Decimal
+    projected_after_tax_value: Decimal
+
+
+class ProjectionScenarioRiskSummary(BaseModel):
+    scope_account_id: UUID | None
+    scope_account_name: str
+    current_invested_value: Decimal
+    risk_mix: dict[Literal["X", "Y", "Z"], Decimal]
+    weighted_risk_score: Decimal | None
+    contribution_weighted_risk_score: Decimal
+    methodology: str
+
+
+class PortfolioProjectionScenarioResponse(BaseModel):
+    baseline: PortfolioProjectionResponse
+    with_contributions: PortfolioProjectionResponse
+    monthly_contribution: Decimal
+    monthly_contribution_currency: Currency
+    weighted_annual_return_assumption: Decimal
+    risk_summary: ProjectionScenarioRiskSummary
+    investments: list[ProjectionScenarioInvestment]
+    assumptions: list[str]
+
+
 class MarketRefreshResponse(BaseModel):
     updated_symbols: list[str]
     updated_fx_pairs: list[str]
@@ -667,6 +742,7 @@ class DepositSummary(BaseModel):
     source_subaccount_id: UUID | None
     assigned_goal_id: UUID | None
     assigned_goal_name: str | None
+    allocated_percentage: Decimal = Decimal("0")
     name: str
     principal: Decimal
     accrued_interest: Decimal

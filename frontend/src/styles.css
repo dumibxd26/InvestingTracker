@@ -1555,7 +1555,23 @@ a:focus-visible {
   padding: 18px 19px 0;
 }
 
+.heatmap-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.heatmap-expand-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
 .investment-treemap {
+  position: relative;
   margin: 14px 19px 12px;
   overflow: hidden;
   border-radius: 12px;
@@ -1587,6 +1603,92 @@ a:focus-visible {
 .treemap-clickable:focus .treemap-tile {
   stroke: #17231b;
   stroke-width: 7px;
+}
+
+.heatmap-stock-tooltip {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  width: min(270px, calc(100% - 16px));
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.heatmap-stock-tooltip strong {
+  font-size: 10px;
+}
+
+.heatmap-stock-tooltip small {
+  color: var(--ink-muted);
+  line-height: 1.45;
+}
+
+.heatmap-fullscreen-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  padding: 18px;
+  background: rgb(12 21 16 / 88%);
+  backdrop-filter: blur(5px);
+}
+
+.modal-backdrop.heatmap-detail-backdrop-on-top {
+  z-index: 80;
+}
+
+.heatmap-fullscreen-dialog {
+  display: grid;
+  width: min(100%, 1800px);
+  height: min(100%, 1200px);
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  justify-self: center;
+  align-self: center;
+  overflow: hidden;
+  padding: clamp(14px, 2vw, 28px);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+}
+
+.heatmap-fullscreen-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.heatmap-fullscreen-heading h2 {
+  margin: 3px 0 0;
+  color: var(--ink);
+  font-size: clamp(18px, 2vw, 24px);
+}
+
+.heatmap-fullscreen-heading p {
+  margin: 5px 0;
+  color: var(--ink-muted);
+  font-size: 10px;
+}
+
+.investment-treemap-large {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 10px 0;
+  background: var(--canvas);
+}
+
+.investment-treemap-large svg {
+  height: 100%;
+  aspect-ratio: auto;
 }
 
 .treemap-symbol {
@@ -1771,6 +1873,144 @@ a:focus-visible {
   min-height: 38px;
 }
 
+.projection-scenario-controls,
+.projection-scenario-results {
+  display: grid;
+  gap: 10px;
+  margin: 0 19px 14px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--canvas);
+}
+
+.projection-scenario-heading h3,
+.projection-scenario-results-heading h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.projection-scenario-heading p {
+  margin: 4px 0 0;
+  color: var(--ink-muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.projection-scenario-inputs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.projection-scenario-inputs .form-field {
+  margin: 0;
+}
+
+.projection-investment-list {
+  display: grid;
+  gap: 6px;
+}
+
+.projection-investment-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 9px;
+}
+
+.projection-allocation-valid {
+  color: var(--green-dark);
+}
+
+.projection-allocation-invalid {
+  color: #b4532a;
+}
+
+.projection-investment-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(250px, 1.2fr);
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+}
+
+.projection-investment-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.projection-investment-choice input {
+  flex: 0 0 auto;
+  accent-color: var(--green);
+}
+
+.projection-investment-choice span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.projection-investment-choice strong {
+  overflow: hidden;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projection-investment-choice small,
+.projection-investment-assumptions > label > span:first-child {
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.projection-investment-assumptions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.projection-investment-assumptions > label {
+  display: grid;
+  gap: 3px;
+}
+
+.projection-number-with-unit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
+.projection-number-with-unit input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--panel);
+  font-size: 10px;
+}
+
+.projection-scenario-note {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 8px;
+  line-height: 1.5;
+}
+
 .projection-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(160px, 0.8fr);
@@ -1826,10 +2066,25 @@ a:focus-visible {
   stroke-linejoin: round;
 }
 
+.projection-scenario-line {
+  fill: none;
+  stroke: #cc7a32;
+  stroke-width: 3;
+  stroke-dasharray: 8 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .projection-point {
   fill: #fff;
   stroke: #588268;
   stroke-width: 3;
+}
+
+.projection-scenario-point {
+  fill: #fff;
+  stroke: #cc7a32;
+  stroke-width: 2.5;
 }
 
 .projection-chart-labels {
@@ -1838,6 +2093,143 @@ a:focus-visible {
   padding: 0 7px 4px;
   color: #92a096;
   font-size: 8px;
+}
+
+.projection-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 2px 7px 5px;
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.projection-chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.projection-legend-baseline,
+.projection-legend-scenario {
+  width: 17px;
+  height: 3px;
+  border-radius: 3px;
+  background: #588268;
+}
+
+.projection-legend-scenario {
+  background: #cc7a32;
+}
+
+.projection-baseline-caption {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-muted);
+  font-size: 8px;
+  font-weight: 400;
+}
+
+.projection-scenario-results-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.projection-risk-score {
+  display: grid;
+  gap: 3px;
+  text-align: right;
+}
+
+.projection-risk-score span,
+.projection-risk-score small {
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.projection-risk-score strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.projection-risk-mix {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.projection-risk-tier {
+  display: grid;
+  gap: 3px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--panel);
+}
+
+.projection-risk-tier strong,
+.projection-risk-tier span {
+  font-size: 10px;
+}
+
+.projection-risk-tier small {
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.projection-risk-x { border-left: 3px solid #5c9a73; }
+.projection-risk-y { border-left: 3px solid #c49a49; }
+.projection-risk-z { border-left: 3px solid #c66b61; }
+
+.projection-investment-results {
+  display: grid;
+  gap: 6px;
+}
+
+.projection-investment-result {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 9px;
+}
+
+.projection-investment-result > span,
+.projection-investment-result > small {
+  color: var(--ink-muted);
+}
+
+.projection-methodology {
+  margin: 0 19px 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink-muted);
+  background: var(--panel);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.projection-methodology summary {
+  color: var(--ink);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.projection-methodology ul {
+  display: grid;
+  gap: 5px;
+  margin: 8px 0;
+  padding-left: 17px;
+}
+
+.projection-methodology p {
+  margin: 6px 0 0;
 }
 
 .projection-account-list {
@@ -2418,6 +2810,228 @@ a:focus-visible {
 
 .goal-source-asset.is-disabled {
   opacity: 0.55;
+}
+
+.goal-share-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  color: #627268;
+  font-size: 9px;
+}
+
+.goal-share-field input {
+  width: 4.5rem;
+  padding: 3px 5px;
+  border: 1px solid #d5ddd6;
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+  font-size: 9px;
+}
+
+.goal-insights-wrap {
+  padding: 2px 0 18px;
+}
+
+.goal-insights {
+  display: grid;
+  gap: 16px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--canvas);
+}
+
+.goal-insight-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.goal-insight-stat {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--green-soft);
+}
+
+.goal-insight-stat span,
+.goal-insight-stat small {
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
+.goal-insight-stat strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.goal-insight-block {
+  display: grid;
+  gap: 8px;
+}
+
+.goal-insight-block h4 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.goal-insight-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.goal-insight-table th,
+.goal-insight-table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+
+.goal-insight-table .is-breached td {
+  color: #b4532a;
+}
+
+.goal-insight-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.goal-insight-tickers {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 10px;
+}
+
+.goal-insight-ok {
+  margin: 0;
+  color: var(--green-dark);
+  font-size: 11px;
+}
+
+.goal-recovery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.goal-recovery-card {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 10px;
+}
+
+.goal-recovery-card strong {
+  font-size: 11px;
+}
+
+.goal-recovery-card small {
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
+.goal-fan-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.goal-insights-toggle {
+  display: inline-flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.goal-insights-toggle button {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.goal-insights-toggle button[aria-pressed="true"] {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green-dark);
+}
+
+.fan-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.fan-axis {
+  fill: var(--ink-muted);
+  font-size: 9px;
+}
+
+.fan-band {
+  fill: var(--green);
+  fill-opacity: 0.16;
+}
+
+.fan-median {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 2;
+}
+
+.fan-target {
+  fill: none;
+  stroke: #c46a2b;
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
+.fan-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
+.fan-legend .swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 4px;
+  border-radius: 3px;
+  vertical-align: -1px;
+}
+
+.fan-legend .swatch.band {
+  background: rgb(57 125 104 / 25%);
+}
+
+.fan-legend .swatch.median {
+  background: var(--green);
+}
+
+.fan-legend .swatch.target {
+  background: #c46a2b;
 }
 
 .goal-visual-budget-note {
@@ -6236,5 +6850,36 @@ html[data-theme="dark"] .purchase-plan-values small {
   .account-card-actions {
     grid-column: 1 / -1;
     justify-content: flex-start;
+  }
+}
+
+@media (max-width: 650px) {
+  .projection-scenario-controls,
+  .projection-scenario-results,
+  .projection-methodology {
+    margin-right: 12px;
+    margin-left: 12px;
+  }
+
+  .projection-scenario-inputs,
+  .projection-investment-row {
+    grid-template-columns: 1fr;
+  }
+
+  .projection-investment-assumptions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .heatmap-fullscreen-backdrop {
+    padding: 6px;
+  }
+
+  .heatmap-fullscreen-dialog {
+    border-radius: 10px;
+    padding: 10px;
+  }
+
+  .heatmap-fullscreen-heading p {
+    font-size: 8px;
   }
 }

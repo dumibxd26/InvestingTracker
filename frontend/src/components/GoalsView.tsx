@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, ArrowRight, Check, Pencil, Plus, Save, SlidersHorizontal, Target, Trash2 } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { AlertCircle, ArrowRight, Check, Pencil, Plus, Save, SlidersHorizontal, Target, Trash2, TrendingUp } from "lucide-react";
 import { api, ApiError } from "../api";
 import { amount, dateLabel, goalLabel } from "../format";
-import type { AssetClass, Currency, Dashboard, FundingRule, GoalRecord } from "../types";
+import type { AssetClass, Currency, Dashboard, FundingRule, GoalInsights, GoalRecord } from "../types";
 import { GoalDialog } from "./GoalDialog";
+import { GoalInsightsPanel } from "./GoalInsightsPanel";
 
 interface GoalsViewProps {
   data: Dashboard;
@@ -47,6 +48,9 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
   const [editingGoal, setEditingGoal] = useState<GoalRecord | null>(null);
   const [loadingGoalId, setLoadingGoalId] = useState<string | null>(null);
   const [deletingGoalId, setDeletingGoalId] = useState<string | null>(null);
+  const [insightsGoalId, setInsightsGoalId] = useState<string | null>(null);
+  const [insights, setInsights] = useState<{ goalId: string; data: GoalInsights } | null>(null);
+  const [insightsError, setInsightsError] = useState("");
 
   useEffect(() => {
     setFundingRule(data.policy.funding_rule ?? "");
@@ -134,6 +138,21 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
     }
   }
 
+  async function toggleInsights(goalId: string) {
+    if (insightsGoalId === goalId) {
+      setInsightsGoalId(null);
+      return;
+    }
+    setInsightsGoalId(goalId);
+    setInsightsError("");
+    try {
+      const data = await api.goalInsights(goalId);
+      setInsights({ goalId, data });
+    } catch (cause) {
+      setInsightsError(cause instanceof ApiError ? cause.message : "Goal insights could not be loaded.");
+    }
+  }
+
   async function deleteGoal(goal: Pick<GoalRecord, "id" | "name">) {
     const fixedRuleNote = data.policy.funding_rule === "fixed_percentages"
       ? "\n\nThe remaining fixed funding shares will be renormalized; if none remain to redistribute, the fixed-percentage rule will be cleared."
@@ -184,7 +203,8 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
             const label = goal.goal_type === "passive_income" ? "estimated annual income" : "earmarked amount";
             const progress = Math.min(Number(goal.progress_percent), 100);
             return (
-              <article className="full-goal-row" key={goal.id}>
+              <Fragment key={goal.id}>
+              <article className="full-goal-row">
                 <div className="full-goal-main">
                   <span className="goal-icon goal-wealth"><Target size={17} /></span>
                   <div className="full-goal-copy">
@@ -222,6 +242,16 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
                     <button
                       className="icon-button small"
                       type="button"
+                      aria-label={`Show insights for goal ${goal.name}`}
+                      aria-expanded={insightsGoalId === goal.id}
+                      title="Goal insights"
+                      onClick={() => void toggleInsights(goal.id)}
+                    >
+                      <TrendingUp size={14} />
+                    </button>
+                    <button
+                      className="icon-button small"
+                      type="button"
                       aria-label={`Edit goal ${goal.name}`}
                       title="Edit goal"
                       onClick={() => void editGoal(goal.id)}
@@ -242,6 +272,18 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
                   </span>
                 </div>
               </article>
+              {insightsGoalId === goal.id && (
+                <div className="goal-insights-wrap">
+                  {insights?.goalId === goal.id ? (
+                    <GoalInsightsPanel insights={insights.data} />
+                  ) : insightsError ? (
+                    <div className="inline-error" role="alert">{insightsError}</div>
+                  ) : (
+                    <p className="quiet-copy">Loading goal insights…</p>
+                  )}
+                </div>
+              )}
+              </Fragment>
             );
           })}
           {data.goals.length === 0 && <div className="empty-state"><Target size={22} /><strong>No goals yet</strong><span>Add one to start shaping your plan.</span></div>}

@@ -21,6 +21,10 @@ from app.calculations import (
 )
 from app.cash_flow_logic import add_months, occurrence_dates
 from app.config import get_settings
+from app.gbi.adapter import build_goal_spec, load_allocated_holdings
+from app.gbi.controller import build_goal_insights
+from app.gbi.domain import to_plain
+from app.gbi.schemas import GoalInsightsResponse
 from app.market_data import (
     PROVIDER_NAME,
     ExchangeRateQuote,
@@ -107,9 +111,13 @@ from app.schemas import (
     PolicyResponse,
     PolicyUpdate,
     PortfolioProjectionResponse,
+    PortfolioProjectionScenarioRequest,
+    PortfolioProjectionScenarioResponse,
     ProfileUpdate,
     ProjectionAccountValue,
     ProjectionPoint,
+    ProjectionScenarioInvestment,
+    ProjectionScenarioRiskSummary,
     RecommendationRequest,
     RecommendationResponse,
     RegisterRequest,
@@ -2842,30 +2850,50 @@ def list_goals(session: Session, user_id: uuid.UUID) -> list[GoalResponse]:
     return [_goal_response(session, goal) for goal in goals]
 
 
+def _allocation_pairs(items: list[Any]) -> list[tuple[uuid.UUID, Decimal]]:
+    return [(item.id, item.allocated_percentage) for item in items]
+
+
 def _goal_response(session: Session, goal: Goal) -> GoalResponse:
     values = {column.key: getattr(goal, column.key) for column in Goal.__table__.columns}
+    holding_allocations = session.execute(
+        select(GoalHoldingAllocation.holding_id, GoalHoldingAllocation.allocated_percentage)
+        .where(GoalHoldingAllocation.goal_id == goal.id)
+        .order_by(GoalHoldingAllocation.holding_id)
+    ).all()
+    deposit_allocations = session.execute(
+        select(GoalDepositAllocation.fixed_deposit_id, GoalDepositAllocation.allocated_percentage)
+        .where(GoalDepositAllocation.goal_id == goal.id)
+        .order_by(GoalDepositAllocation.fixed_deposit_id)
+    ).all()
     values.update(
         linked_account_ids=list(
             session.scalars(
                 select(GoalAccountLink.account_id).where(GoalAccountLink.goal_id == goal.id)
             )
         ),
-        holding_ids=list(
-            session.scalars(
-                select(GoalHoldingAllocation.holding_id).where(
-                    GoalHoldingAllocation.goal_id == goal.id
-                )
-            )
-        ),
-        fixed_deposit_ids=list(
-            session.scalars(
-                select(GoalDepositAllocation.fixed_deposit_id).where(
-                    GoalDepositAllocation.goal_id == goal.id
-                )
-            )
-        ),
+        holding_ids=[row.holding_id for row in holding_allocations],
+        fixed_deposit_ids=[row.fixed_deposit_id for row in deposit_allocations],
+        holding_allocations=[
+            {"id": row.holding_id, "allocated_percentage": row.allocated_percentage}
+            for row in holding_allocations
+        ],
+        fixed_deposit_allocations=[
+            {"id": row.fixed_deposit_id, "allocated_percentage": row.allocated_percentage}
+            for row in deposit_allocations
+        ],
     )
     return GoalResponse.model_validate(values)
+
+
+def _ensure_within_full_allocation(
+    existing_totals: list[tuple[uuid.UUID, Decimal]],
+    requested: dict[uuid.UUID, Decimal],
+    message: str,
+) -> None:
+    for source_id, already_allocated in existing_totals:
+        if already_allocated + requested.get(source_id, ZERO) > Decimal("100"):
+            raise HTTPException(status_code=409, detail=message)
 
 
 def _replace_goal_sources(
@@ -2873,9 +2901,11 @@ def _replace_goal_sources(
     user_id: uuid.UUID,
     goal_id: uuid.UUID,
     linked_account_ids: list[uuid.UUID],
-    holding_ids: list[uuid.UUID],
-    fixed_deposit_ids: list[uuid.UUID],
+    holding_allocations: list[tuple[uuid.UUID, Decimal]],
+    deposit_allocations: list[tuple[uuid.UUID, Decimal]],
 ) -> None:
+    holding_ids = [holding_id for holding_id, _ in holding_allocations]
+    fixed_deposit_ids = [deposit_id for deposit_id, _ in deposit_allocations]
     account_ids = set(linked_account_ids)
     accounts = list(
         session.scalars(
@@ -2906,19 +2936,25 @@ def _replace_goal_sources(
                 status_code=422,
                 detail="Link each holding's account to this goal before selecting the holding.",
             )
-        conflicting_holding = session.scalar(
-            select(GoalHoldingAllocation)
-            .where(
-                GoalHoldingAllocation.holding_id.in_(holding_ids),
-                GoalHoldingAllocation.goal_id != goal_id,
-            )
-            .limit(1)
+        existing_holding_totals = [
+            (holding_id, Decimal(total))
+            for holding_id, total in session.execute(
+                select(
+                    GoalHoldingAllocation.holding_id,
+                    func.sum(GoalHoldingAllocation.allocated_percentage),
+                )
+                .where(
+                    GoalHoldingAllocation.holding_id.in_(holding_ids),
+                    GoalHoldingAllocation.goal_id != goal_id,
+                )
+                .group_by(GoalHoldingAllocation.holding_id)
+            ).all()
+        ]
+        _ensure_within_full_allocation(
+            existing_holding_totals,
+            dict(holding_allocations),
+            "A stock or ETF's allocations across goals cannot exceed 100%.",
         )
-        if conflicting_holding is not None:
-            raise HTTPException(
-                status_code=409,
-                detail="A stock or ETF can only be assigned to one goal at a time.",
-            )
 
     deposits_by_id: dict[uuid.UUID, FixedDeposit] = {}
     if fixed_deposit_ids:
@@ -2938,19 +2974,25 @@ def _replace_goal_sources(
                 status_code=422,
                 detail="Link each deposit's account to this goal before selecting the deposit.",
             )
-        conflicting_deposit = session.scalar(
-            select(GoalDepositAllocation)
-            .where(
-                GoalDepositAllocation.fixed_deposit_id.in_(fixed_deposit_ids),
-                GoalDepositAllocation.goal_id != goal_id,
-            )
-            .limit(1)
+        existing_deposit_totals = [
+            (deposit_id, Decimal(total))
+            for deposit_id, total in session.execute(
+                select(
+                    GoalDepositAllocation.fixed_deposit_id,
+                    func.sum(GoalDepositAllocation.allocated_percentage),
+                )
+                .where(
+                    GoalDepositAllocation.fixed_deposit_id.in_(fixed_deposit_ids),
+                    GoalDepositAllocation.goal_id != goal_id,
+                )
+                .group_by(GoalDepositAllocation.fixed_deposit_id)
+            ).all()
+        ]
+        _ensure_within_full_allocation(
+            existing_deposit_totals,
+            dict(deposit_allocations),
+            "A fixed deposit's allocations across goals cannot exceed 100%.",
         )
-        if conflicting_deposit is not None:
-            raise HTTPException(
-                status_code=409,
-                detail="A fixed deposit can only be assigned to one goal at a time.",
-            )
 
     session.execute(delete(GoalAccountLink).where(GoalAccountLink.goal_id == goal_id))
     session.execute(
@@ -2967,8 +3009,13 @@ def _replace_goal_sources(
     )
     session.add_all(
         [
-            GoalHoldingAllocation(user_id=user_id, goal_id=goal_id, holding_id=holding_id)
-            for holding_id in holding_ids
+            GoalHoldingAllocation(
+                user_id=user_id,
+                goal_id=goal_id,
+                holding_id=holding_id,
+                allocated_percentage=percentage,
+            )
+            for holding_id, percentage in holding_allocations
         ]
     )
     session.add_all(
@@ -2977,8 +3024,9 @@ def _replace_goal_sources(
                 user_id=user_id,
                 goal_id=goal_id,
                 fixed_deposit_id=deposit_id,
+                allocated_percentage=percentage,
             )
-            for deposit_id in fixed_deposit_ids
+            for deposit_id, percentage in deposit_allocations
         ]
     )
 
@@ -3013,7 +3061,7 @@ def create_goal(session: Session, user_id: uuid.UUID, payload: GoalCreate) -> Go
                 detail="New goal percentages must keep the active fixed allocation at 100%",
             )
     goal_values = payload.model_dump(
-        exclude={"linked_account_ids", "holding_ids", "fixed_deposit_ids"}
+        exclude={"linked_account_ids", "holding_allocations", "fixed_deposit_allocations"}
     )
     goal = Goal(user_id=user.id, **goal_values)
     session.add(goal)
@@ -3023,8 +3071,8 @@ def create_goal(session: Session, user_id: uuid.UUID, payload: GoalCreate) -> Go
         user.id,
         goal.id,
         payload.linked_account_ids,
-        payload.holding_ids,
-        payload.fixed_deposit_ids,
+        _allocation_pairs(payload.holding_allocations),
+        _allocation_pairs(payload.fixed_deposit_allocations),
     )
     try:
         session.commit()
@@ -3086,7 +3134,7 @@ def update_goal(
                 ),
             )
     goal_values = payload.model_dump(
-        exclude={"linked_account_ids", "holding_ids", "fixed_deposit_ids"}
+        exclude={"linked_account_ids", "holding_allocations", "fixed_deposit_allocations"}
     )
     for field, value in goal_values.items():
         setattr(goal, field, value)
@@ -3095,8 +3143,8 @@ def update_goal(
         user.id,
         goal.id,
         payload.linked_account_ids,
-        payload.holding_ids,
-        payload.fixed_deposit_ids,
+        _allocation_pairs(payload.holding_allocations),
+        _allocation_pairs(payload.fixed_deposit_allocations),
     )
     try:
         session.commit()
@@ -3185,6 +3233,52 @@ def update_fixed_shares(
         goal.fixed_percent = requested[goal.id]
     session.commit()
     return {str(goal_id): percentage for goal_id, percentage in requested.items()}
+
+
+def goal_insights(
+    session: Session, user_id: uuid.UUID, goal_id: uuid.UUID
+) -> GoalInsightsResponse:
+    user = _get_user(session, user_id)
+    goal = session.scalar(
+        select(Goal).where(
+            Goal.id == goal_id,
+            Goal.user_id == user.id,
+            Goal.is_active.is_(True),
+        )
+    )
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Active goal was not found")
+    if goal.target_amount is None or goal.target_date is None:
+        return GoalInsightsResponse(
+            available=False,
+            unavailable_reason="Set a target amount and a target date to see goal insights.",
+        )
+    today = date.today()
+    if goal.target_date <= today:
+        return GoalInsightsResponse(
+            available=False,
+            unavailable_reason="The target date has passed. Move it forward to see projections.",
+        )
+
+    fx_rates = _fx_matrix(session, user)
+
+    def spot_rate(from_code: str, to_code: str) -> float:
+        return float(
+            _to_base(
+                Decimal(1),
+                Currency(from_code),
+                Currency(to_code),
+                user.usd_per_eur,
+                fx_rates,
+            )
+        )
+
+    default_rate = float(DEFAULT_SALE_TAX_RATE)
+    allocations, notes = load_allocated_holdings(session, goal, spot_rate, today, default_rate)
+    spec = build_goal_spec(goal, allocations, spot_rate, default_rate)
+    now = datetime(today.year, today.month, today.day, tzinfo=UTC)
+    insights = build_goal_insights(spec, allocations, spot_rate, now, notes=notes)
+    return GoalInsightsResponse.model_validate({"available": True, **to_plain(insights)})
 
 
 def _latest_instrument_quote(
@@ -3565,6 +3659,21 @@ def dashboard(
             )
         ).all()
     }
+    allocated_holding_percentages: dict[uuid.UUID, Decimal] = {
+        holding_id: Decimal(total)
+        for holding_id, total in session.execute(
+            select(
+                GoalHoldingAllocation.holding_id,
+                func.sum(GoalHoldingAllocation.allocated_percentage),
+            )
+            .join(Goal, Goal.id == GoalHoldingAllocation.goal_id)
+            .where(
+                GoalHoldingAllocation.user_id == user.id,
+                Goal.is_active.is_(True),
+            )
+            .group_by(GoalHoldingAllocation.holding_id)
+        ).all()
+    }
     holdings: list[HoldingSummary] = []
     holding_values_by_id: dict[uuid.UUID, Decimal] = {}
     values_by_class = {asset_class.value: ZERO for asset_class in AssetClass}
@@ -3660,6 +3769,7 @@ def dashboard(
                 assigned_goal_name=(
                     assigned_holding_goals.get(holding.id, (None, None))[1]
                 ),
+                allocated_percentage=allocated_holding_percentages.get(holding.id, ZERO),
                 symbol=instrument.symbol,
                 name=instrument.name,
                 account_name=account.display_name,
@@ -3760,6 +3870,21 @@ def dashboard(
             )
         ).all()
     }
+    allocated_deposit_percentages: dict[uuid.UUID, Decimal] = {
+        deposit_id: Decimal(total)
+        for deposit_id, total in session.execute(
+            select(
+                GoalDepositAllocation.fixed_deposit_id,
+                func.sum(GoalDepositAllocation.allocated_percentage),
+            )
+            .join(Goal, Goal.id == GoalDepositAllocation.goal_id)
+            .where(
+                GoalDepositAllocation.user_id == user.id,
+                Goal.is_active.is_(True),
+            )
+            .group_by(GoalDepositAllocation.fixed_deposit_id)
+        ).all()
+    }
     fixed_deposits = session.scalars(select(FixedDeposit).where(FixedDeposit.user_id == user.id))
     for deposit in fixed_deposits:
         valuation_date = min(today, deposit.maturity_date)
@@ -3794,6 +3919,7 @@ def dashboard(
                 source_subaccount_id=deposit.source_subaccount_id,
                 assigned_goal_id=assigned_deposit_goals.get(deposit.id, (None, None))[0],
                 assigned_goal_name=assigned_deposit_goals.get(deposit.id, (None, None))[1],
+                allocated_percentage=allocated_deposit_percentages.get(deposit.id, ZERO),
                 name=deposit.name,
                 principal=deposit.principal,
                 accrued_interest=accrued_interest,
@@ -3962,33 +4088,49 @@ def dashboard(
         .order_by(GoalAccountLink.account_id)
     ):
         linked_accounts_by_goal.setdefault(goal_id, []).append(account_id)
-    linked_holdings_by_goal: dict[uuid.UUID, list[uuid.UUID]] = {}
-    for goal_id, holding_id in session.execute(
-        select(GoalHoldingAllocation.goal_id, GoalHoldingAllocation.holding_id)
+    linked_holdings_by_goal: dict[uuid.UUID, list[tuple[uuid.UUID, Decimal]]] = {}
+    for goal_id, holding_id, percentage in session.execute(
+        select(
+            GoalHoldingAllocation.goal_id,
+            GoalHoldingAllocation.holding_id,
+            GoalHoldingAllocation.allocated_percentage,
+        )
         .join(Goal, Goal.id == GoalHoldingAllocation.goal_id)
         .where(GoalHoldingAllocation.user_id == user.id, Goal.is_active.is_(True))
         .order_by(GoalHoldingAllocation.holding_id)
     ):
-        linked_holdings_by_goal.setdefault(goal_id, []).append(holding_id)
-    linked_deposits_by_goal: dict[uuid.UUID, list[uuid.UUID]] = {}
-    for goal_id, deposit_id in session.execute(
-        select(GoalDepositAllocation.goal_id, GoalDepositAllocation.fixed_deposit_id)
+        linked_holdings_by_goal.setdefault(goal_id, []).append((holding_id, percentage))
+    linked_deposits_by_goal: dict[uuid.UUID, list[tuple[uuid.UUID, Decimal]]] = {}
+    for goal_id, deposit_id, percentage in session.execute(
+        select(
+            GoalDepositAllocation.goal_id,
+            GoalDepositAllocation.fixed_deposit_id,
+            GoalDepositAllocation.allocated_percentage,
+        )
         .join(Goal, Goal.id == GoalDepositAllocation.goal_id)
         .where(GoalDepositAllocation.user_id == user.id, Goal.is_active.is_(True))
         .order_by(GoalDepositAllocation.fixed_deposit_id)
     ):
-        linked_deposits_by_goal.setdefault(goal_id, []).append(deposit_id)
+        linked_deposits_by_goal.setdefault(goal_id, []).append((deposit_id, percentage))
     for goal in goal_rows:
         manual_current_amount = _to_base(
             goal.current_amount, goal.target_currency, base_currency, usd_per_eur, fx_rates
         )
-        goal_holding_ids = linked_holdings_by_goal.get(goal.id, [])
-        goal_deposit_ids = linked_deposits_by_goal.get(goal.id, [])
+        goal_holding_pairs = linked_holdings_by_goal.get(goal.id, [])
+        goal_deposit_pairs = linked_deposits_by_goal.get(goal.id, [])
+        goal_holding_ids = [holding_id for holding_id, _ in goal_holding_pairs]
+        goal_deposit_ids = [deposit_id for deposit_id, _ in goal_deposit_pairs]
         linked_asset_value = sum(
-            (holding_values_by_id.get(holding_id, ZERO) for holding_id in goal_holding_ids),
+            (
+                holding_values_by_id.get(holding_id, ZERO) * percentage / Decimal(100)
+                for holding_id, percentage in goal_holding_pairs
+            ),
             ZERO,
         ) + sum(
-            (deposit_values_by_id.get(deposit_id, ZERO) for deposit_id in goal_deposit_ids),
+            (
+                deposit_values_by_id.get(deposit_id, ZERO) * percentage / Decimal(100)
+                for deposit_id, percentage in goal_deposit_pairs
+            ),
             ZERO,
         )
         current_amount = manual_current_amount + linked_asset_value
@@ -4168,6 +4310,8 @@ def portfolio_projection(
     user_id: uuid.UUID,
     target_date: date,
     requested_currency: Currency | None = None,
+    *,
+    snapshot: dict[str, Any] | None = None,
 ) -> PortfolioProjectionResponse:
     user = _get_user(session, user_id)
     today = date.today()
@@ -4180,7 +4324,7 @@ def portfolio_projection(
             detail="Projection dates can be at most 40 years in the future.",
         )
 
-    snapshot = dashboard(session, user.id, requested_currency)
+    snapshot = snapshot if snapshot is not None else dashboard(session, user.id, requested_currency)
     base_currency = snapshot["base_currency"]
     usd_per_eur = user.usd_per_eur
     fx_rates = _fx_matrix(session, user)
@@ -4353,6 +4497,307 @@ def portfolio_projection(
                 "Risk tiers are qualitative placeholders: ETFs default to X and individual "
                 "stocks to Y. No return distribution, volatility, or probability of loss is "
                 "calculated."
+            ),
+        ],
+    )
+
+
+def portfolio_projection_scenario(
+    session: Session,
+    user_id: uuid.UUID,
+    payload: PortfolioProjectionScenarioRequest,
+) -> PortfolioProjectionScenarioResponse:
+    user = _get_user(session, user_id)
+    snapshot = dashboard(session, user.id, payload.currency)
+    baseline = portfolio_projection(
+        session,
+        user.id,
+        payload.target_date,
+        payload.currency,
+        snapshot=snapshot,
+    )
+    fx_rates = _fx_matrix(session, user)
+    today = date.today()
+
+    accounts_by_id = {account.id: account for account in snapshot["accounts"]}
+    scope_account = (
+        accounts_by_id.get(payload.scope_account_id)
+        if payload.scope_account_id is not None
+        else None
+    )
+    if payload.scope_account_id is not None and scope_account is None:
+        raise HTTPException(status_code=404, detail="Projection account was not found")
+
+    all_holdings = {holding.id: holding for holding in snapshot["holdings"]}
+    scoped_holdings = [
+        holding
+        for holding in snapshot["holdings"]
+        if payload.scope_account_id is None or holding.account_id == payload.scope_account_id
+    ]
+    for allocation in payload.investments:
+        holding = all_holdings.get(allocation.holding_id)
+        if holding is None:
+            raise HTTPException(
+                status_code=404,
+                detail="A selected investment was not found or has no current quote.",
+            )
+        if payload.scope_account_id is not None and holding.account_id != payload.scope_account_id:
+            raise HTTPException(
+                status_code=422,
+                detail="Selected investments must belong to the selected projection account.",
+            )
+        account = accounts_by_id.get(holding.account_id)
+        if account is None or account.account_type == AccountType.EMPLOYER_PLAN:
+            raise HTTPException(
+                status_code=422,
+                detail="Monthly contributions cannot be projected into employer-plan holdings.",
+            )
+
+    invested_value_by_tier = {tier: ZERO for tier in ("X", "Y", "Z")}
+    for holding in scoped_holdings:
+        invested_value_by_tier[holding.risk_tier] += holding.market_value
+    current_invested_value = sum(invested_value_by_tier.values(), ZERO)
+    risk_mix = {
+        tier: (
+            (invested_value_by_tier[tier] / current_invested_value).quantize(
+                Decimal("0.0001")
+            )
+            if current_invested_value > ZERO
+            else ZERO
+        )
+        for tier in ("X", "Y", "Z")
+    }
+    risk_scores = {"X": Decimal("1"), "Y": Decimal("2"), "Z": Decimal("3")}
+    weighted_risk_score = (
+        sum(
+            (
+                invested_value_by_tier[tier] * risk_scores[tier]
+                for tier in ("X", "Y", "Z")
+            ),
+            ZERO,
+        )
+        / current_invested_value
+        if current_invested_value > ZERO
+        else None
+    )
+
+    monthly_contribution = _to_base(
+        payload.monthly_contribution,
+        payload.currency,
+        baseline.base_currency,
+        user.usd_per_eur,
+        fx_rates,
+    )
+    holding_contributions: dict[uuid.UUID, Decimal] = {}
+    holding_rates: dict[uuid.UUID, Decimal] = {}
+    holding_percentages: dict[uuid.UUID, Decimal] = {}
+    contribution_weighted_risk_score = ZERO
+    weighted_return = ZERO
+    for allocation in payload.investments:
+        holding = all_holdings[allocation.holding_id]
+        assumed_return = (
+            allocation.assumed_annual_return
+            if allocation.assumed_annual_return is not None
+            else holding.expected_annual_return
+        )
+        percentage = allocation.contribution_percentage / Decimal("100")
+        holding_contributions[holding.id] = monthly_contribution * percentage
+        holding_rates[holding.id] = assumed_return
+        holding_percentages[holding.id] = allocation.contribution_percentage
+        contribution_weighted_risk_score += percentage * risk_scores[holding.risk_tier]
+        weighted_return += percentage * assumed_return
+
+    def contribution_values_at(
+        projection_date: date,
+    ) -> tuple[dict[uuid.UUID, Decimal], dict[uuid.UUID, tuple[Decimal, Decimal, Decimal]]]:
+        payment_count = len(_monthly_payment_dates(today, projection_date))
+        monthly_growth_by_holding: dict[uuid.UUID, Decimal] = {}
+        account_values: dict[uuid.UUID, Decimal] = {}
+        investment_values: dict[uuid.UUID, tuple[Decimal, Decimal, Decimal]] = {}
+
+        for holding_id, monthly_amount in holding_contributions.items():
+            holding = all_holdings[holding_id]
+            monthly_growth = monthly_growth_by_holding.get(holding_id)
+            if monthly_growth is None:
+                monthly_growth = compound_growth_factor(
+                    holding_rates[holding_id], Decimal("1") / Decimal("12")
+                )
+                monthly_growth_by_holding[holding_id] = monthly_growth
+
+            if payment_count == 0:
+                gross_value = ZERO
+            elif abs(monthly_growth - ONE) < Decimal("1e-24"):
+                gross_value = monthly_amount * payment_count
+            else:
+                gross_value = (
+                    monthly_amount
+                    * (monthly_growth**payment_count - ONE)
+                    / (monthly_growth - ONE)
+                )
+            contribution_principal = monthly_amount * payment_count
+            estimated_tax = max(ZERO, gross_value - contribution_principal) * (
+                holding.estimated_tax_rate
+            )
+            after_tax_value = gross_value - estimated_tax
+            account_values[holding.account_id] = (
+                account_values.get(holding.account_id, ZERO) + after_tax_value
+            )
+            investment_values[holding_id] = (
+                contribution_principal,
+                gross_value,
+                estimated_tax,
+            )
+        return account_values, investment_values
+
+    scenario_timeline: list[ProjectionPoint] = []
+    for point in baseline.timeline:
+        contribution_by_account, _ = contribution_values_at(point.date)
+        scenario_accounts = [
+            account.model_copy(
+                update={
+                    "projected_holdings_value": round_money(
+                        account.projected_holdings_value
+                        + contribution_by_account.get(account.account_id, ZERO)
+                    ),
+                    "projected_total_value": round_money(
+                        account.projected_total_value
+                        + contribution_by_account.get(account.account_id, ZERO)
+                    ),
+                }
+            )
+            for account in point.accounts
+        ]
+        scenario_timeline.append(
+            ProjectionPoint(
+                date=point.date,
+                label=point.label,
+                total_value=round_money(
+                    sum(
+                        (account.projected_total_value for account in scenario_accounts),
+                        ZERO,
+                    )
+                ),
+                accounts=scenario_accounts,
+            )
+        )
+
+    scenario_accounts = scenario_timeline[-1].accounts
+    scenario_total = sum(
+        (account.projected_total_value for account in scenario_accounts),
+        ZERO,
+    )
+    scenario_warnings = [
+        (
+            warning.replace(
+                "Unvested awards, scheduled share purchases, future cash-flow forecasts, and "
+                "additional contributions are excluded.",
+                "Unvested awards, scheduled share purchases, and future cash-flow forecasts are "
+                "excluded; the requested monthly contributions are included.",
+            )
+        )
+        for warning in baseline.warnings
+    ]
+    with_contributions = PortfolioProjectionResponse(
+        base_currency=baseline.base_currency,
+        as_of=baseline.as_of,
+        target_date=baseline.target_date,
+        current_net_worth=baseline.current_net_worth,
+        projected_net_worth=round_money(scenario_total),
+        estimated_change=round_money(scenario_total - baseline.current_net_worth),
+        accounts=scenario_accounts,
+        timeline=scenario_timeline,
+        warnings=scenario_warnings,
+    )
+
+    _, investment_values = contribution_values_at(payload.target_date)
+    investment_results: list[ProjectionScenarioInvestment] = []
+    for allocation in payload.investments:
+        holding = all_holdings[allocation.holding_id]
+        principal, gross_value, estimated_tax = investment_values[holding.id]
+        investment_results.append(
+            ProjectionScenarioInvestment(
+                holding_id=holding.id,
+                symbol=holding.symbol,
+                name=holding.name,
+                account_id=holding.account_id,
+                account_name=holding.account_name,
+                exchange=holding.exchange,
+                risk_tier=holding.risk_tier,
+                current_value=holding.market_value,
+                current_weight=(
+                    (holding.market_value / current_invested_value).quantize(
+                        Decimal("0.0001")
+                    )
+                    if current_invested_value > ZERO
+                    else ZERO
+                ),
+                contribution_percentage=holding_percentages[holding.id],
+                monthly_contribution=round_money(holding_contributions[holding.id]),
+                assumed_annual_return=holding_rates[holding.id],
+                contribution_principal=round_money(principal),
+                projected_gross_value=round_money(gross_value),
+                estimated_tax=round_money(estimated_tax),
+                projected_after_tax_value=round_money(gross_value - estimated_tax),
+            )
+        )
+
+    scope_name = scope_account.display_name if scope_account is not None else "All tracked accounts"
+    return PortfolioProjectionScenarioResponse(
+        baseline=baseline,
+        with_contributions=with_contributions,
+        monthly_contribution=round_money(monthly_contribution),
+        monthly_contribution_currency=baseline.base_currency,
+        weighted_annual_return_assumption=weighted_return,
+        risk_summary=ProjectionScenarioRiskSummary(
+            scope_account_id=payload.scope_account_id,
+            scope_account_name=scope_name,
+            current_invested_value=round_money(current_invested_value),
+            risk_mix=risk_mix,
+            weighted_risk_score=(
+                weighted_risk_score.quantize(Decimal("0.01"))
+                if weighted_risk_score is not None
+                else None
+            ),
+            contribution_weighted_risk_score=contribution_weighted_risk_score.quantize(
+                Decimal("0.01")
+            ),
+            methodology=(
+                "Current risk is a market-value-weighted mean of the app's qualitative tiers "
+                "(X=1, Y=2, Z=3), across quoted stocks/ETFs in scope. It is not measured "
+                "volatility, a loss probability, or a safety rating."
+            ),
+        ),
+        investments=investment_results,
+        assumptions=[
+            (
+                "The baseline is the existing deterministic projection: current holdings use "
+                "their saved annual-return assumptions; current FX is held constant; cash, "
+                "savings interest, deposits, and estimated sale tax follow the baseline rules."
+            ),
+            (
+                "The extra monthly contribution is hypothetical, does not change tracked "
+                "balances, and is invested only in the selected quoted holdings at the "
+                "entered percentages."
+            ),
+            (
+                "Contribution weights must sum to 100%. Each selected investment compounds "
+                "monthly at its own assumed effective annual return. Contributions are "
+                "modelled at the end of each monthly period, with the first contribution one "
+                "month after today; only scheduled monthly dates on or before the target "
+                "are counted."
+            ),
+            (
+                "FX is held at today's rate. At the target date, estimated tax is applied to "
+                "positive gains on the hypothetical contributions using each holding's "
+                "current estimated sale-tax rate. Losses receive no tax credit."
+            ),
+            (
+                "The account risk score and X/Y/Z mix use qualitative holding tiers weighted "
+                "by current after-tax market value; the tiers are not measured volatility."
+            ),
+            (
+                "This is a deterministic what-if scenario, not a forecast, guarantee, or "
+                "investment recommendation. Return assumptions are user-editable inputs."
             ),
         ],
     )

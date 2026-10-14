@@ -44,6 +44,11 @@ export interface GoalSummary {
   fixed_deposit_ids: string[];
 }
 
+export interface GoalSourceAllocation {
+  id: string;
+  allocated_percentage: string;
+}
+
 export interface GoalRecord {
   id: string;
   name: string;
@@ -61,10 +66,11 @@ export interface GoalRecord {
   visualization_budget_period: "monthly" | "yearly" | null;
   fixed_percent: string | null;
   flexibility: "essential" | "flexible";
-  is_active: boolean;
   linked_account_ids: string[];
   holding_ids: string[];
   fixed_deposit_ids: string[];
+  holding_allocations: GoalSourceAllocation[];
+  fixed_deposit_allocations: GoalSourceAllocation[];
 }
 
 export interface UserProfile {
@@ -101,6 +107,7 @@ export interface HoldingSummary {
   account_id: string;
   assigned_goal_id: string | null;
   assigned_goal_name: string | null;
+  allocated_percentage: string;
   symbol: string;
   name: string;
   account_name: string;
@@ -437,6 +444,7 @@ export interface Deposit {
   source_subaccount_id: string | null;
   assigned_goal_id: string | null;
   assigned_goal_name: string | null;
+  allocated_percentage: string;
   name: string;
   principal: string;
   accrued_interest: string;
@@ -590,6 +598,60 @@ export interface PortfolioProjection {
   warnings: string[];
 }
 
+export interface ProjectionScenarioInvestmentInput {
+  holding_id: string;
+  contribution_percentage: string;
+  assumed_annual_return: string;
+}
+
+export interface PortfolioProjectionScenarioPayload {
+  target_date: string;
+  currency: Currency;
+  monthly_contribution: string;
+  scope_account_id: string | null;
+  investments: ProjectionScenarioInvestmentInput[];
+}
+
+export interface ProjectionScenarioInvestment {
+  holding_id: string;
+  symbol: string;
+  name: string;
+  account_id: string;
+  account_name: string;
+  exchange: string;
+  risk_tier: "X" | "Y" | "Z";
+  current_value: string;
+  current_weight: string;
+  contribution_percentage: string;
+  monthly_contribution: string;
+  assumed_annual_return: string;
+  contribution_principal: string;
+  projected_gross_value: string;
+  estimated_tax: string;
+  projected_after_tax_value: string;
+}
+
+export interface ProjectionScenarioRiskSummary {
+  scope_account_id: string | null;
+  scope_account_name: string;
+  current_invested_value: string;
+  risk_mix: Record<"X" | "Y" | "Z", string>;
+  weighted_risk_score: string | null;
+  contribution_weighted_risk_score: string;
+  methodology: string;
+}
+
+export interface PortfolioProjectionScenario {
+  baseline: PortfolioProjection;
+  with_contributions: PortfolioProjection;
+  monthly_contribution: string;
+  monthly_contribution_currency: Currency;
+  weighted_annual_return_assumption: string;
+  risk_summary: ProjectionScenarioRiskSummary;
+  investments: ProjectionScenarioInvestment[];
+  assumptions: string[];
+}
+
 export interface GoalCreatePayload {
   name: string;
   goal_type: GoalType;
@@ -607,13 +669,222 @@ export interface GoalCreatePayload {
   visualization_budget_amount?: string | null;
   visualization_budget_period?: "monthly" | "yearly" | null;
   linked_account_ids: string[];
-  holding_ids: string[];
-  fixed_deposit_ids: string[];
+  holding_allocations: GoalSourceAllocation[];
+  fixed_deposit_allocations: GoalSourceAllocation[];
 }
 
 export interface GoalUpdatePayload extends GoalCreatePayload {
   current_amount: string;
   current_annual_income: string;
+}
+
+export interface GoalInsightsTaxProfile {
+  annual_inflation_rate: number;
+  is_target_in_todays_dollars: boolean;
+  index_contributions_to_inflation: boolean;
+  short_term_cap_gains_rate: number;
+  long_term_cap_gains_rate: number;
+  dividend_and_interest_tax_rate: number;
+  annual_tax_free_allowance: number;
+}
+
+export interface GoalInsightsGoal {
+  goal_id: string;
+  name: string;
+  base_currency: Currency;
+  target_amount: number;
+  target_date: string;
+  monthly_contribution: number;
+  risk_profile: "CONSERVATIVE" | "MODERATE" | "AGGRESSIVE";
+  target_success_probability: number;
+  tax_profile: GoalInsightsTaxProfile;
+}
+
+export interface GoalInsightsBucketDrift {
+  bucket: "CASH" | "BONDS" | "EQUITIES";
+  current_value: number;
+  current_weight: number;
+  target_weight: number;
+  drift: number;
+  dollar_delta_to_target: number;
+  is_breached: boolean;
+}
+
+export interface GoalInsightsWarning {
+  holding_id: string;
+  ticker: string;
+  current_weight: number;
+  max_allowed_weight: number;
+  excess_dollar_amount: number;
+  reason: string;
+  message: string;
+  suggested_fix: string | null;
+}
+
+export interface GoalInsightsSlice {
+  holding_id: string;
+  ticker: string;
+  name: string;
+  asset_class: string;
+  macro_bucket: string;
+  allocated_percentage: number;
+  market_value_in_goal: number;
+  cost_basis_in_goal: number;
+  local_expected_return: number;
+  local_volatility: number;
+  effective_return_in_goal: number;
+  effective_volatility_in_goal: number;
+  effective_dividend_yield: number;
+  is_unhedged_foreign_exposure: boolean;
+  underlying_currency: string;
+  sector: string | null;
+  weight_in_goal: number;
+}
+
+export interface GoalInsightsEvaluation {
+  goal_id: string;
+  base_currency: Currency;
+  remaining_years: number;
+  total_current_value: number;
+  total_cost_basis: number;
+  after_tax_value: number;
+  expected_return_mu: number;
+  weighted_dividend_yield: number;
+  portfolio_volatility_sigma: number;
+  unhedged_foreign_weight: number;
+  median_compounding_rate: number;
+  sharpe_ratio: number;
+  max_single_stock_weight: number;
+  max_unhedged_fx_weight: number;
+  target_weights: Record<string, number>;
+  bucket_drifts: Record<string, GoalInsightsBucketDrift>;
+  requires_rebalancing: boolean;
+  warnings: GoalInsightsWarning[];
+  slices: GoalInsightsSlice[];
+}
+
+export interface GoalInsightsTickerProposal {
+  ticker: string;
+  name: string;
+  asset_class: string;
+  action: "BUY_WITH_CONTRIBUTION" | "REBALANCE_INTO";
+  recommended_amount: number;
+  score: number;
+  rationale: string;
+}
+
+export interface GoalInsightsRouteItem {
+  bucket: "CASH" | "BONDS" | "EQUITIES";
+  allocated_contribution: number;
+  share_of_contribution: number;
+  post_contribution_weight: number;
+  target_weight: number;
+  suggested_tickers: GoalInsightsTickerProposal[];
+}
+
+export interface GoalInsightsLotDisposal {
+  lot_id: string;
+  units_to_sell: number;
+  proceeds_in_goal_currency: number;
+  realized_gain_or_loss: number;
+  is_long_term: boolean;
+  applicable_tax_rate: number;
+  estimated_tax_due: number;
+}
+
+export interface GoalInsightsTrimProposal {
+  holding_id: string;
+  ticker: string;
+  gross_sell_amount: number;
+  total_realized_gain: number;
+  total_estimated_tax: number;
+  net_reinvestable_proceeds: number;
+  effective_tax_drag_pct: number;
+  recommendation_type: "EXECUTE_TAX_FREE_OR_TLH" | "EXECUTE_LOW_TAX_DRAG" | "DEFER_USE_INFLOWS_INSTEAD";
+  rationale: string;
+  lot_disposals: GoalInsightsLotDisposal[];
+}
+
+export interface GoalInsightsRebalance {
+  goal_id: string;
+  monthly_contribution_routing: GoalInsightsRouteItem[];
+  tax_aware_trim_proposals: GoalInsightsTrimProposal[];
+  rebalance_buy_proposals: GoalInsightsTickerProposal[];
+  projected_impact: {
+    previous_volatility: number;
+    new_volatility: number;
+    previous_median_return: number;
+    new_median_return: number;
+    summary_text: string;
+  };
+}
+
+export interface GoalInsightsYearPoint {
+  year: number;
+  nominal_after_tax: Record<"p10" | "p25" | "p50" | "p75" | "p90", number>;
+  real_todays_dollars: Record<"p10" | "p25" | "p50" | "p75" | "p90", number>;
+  inflated_target_at_year: number;
+}
+
+export interface GoalInsightsSimulation {
+  success_probability: number;
+  nominal_target_at_maturity: number;
+  real_target_in_todays_dollars: number;
+  terminal_real_todays_dollars_p10: number;
+  terminal_real_todays_dollars_p50: number;
+  terminal_real_todays_dollars_p90: number;
+  estimated_median_tax_paid_at_liquidation: number;
+  yearly_schedule: GoalInsightsYearPoint[];
+}
+
+export interface GoalInsightsRecovery {
+  is_goal_on_track: boolean;
+  current_success_probability: number;
+  target_success_probability: number;
+  plans: {
+    increase_contribution_plan: {
+      description: string;
+      resulting_success_probability: number;
+      required_monthly_contribution: number;
+      additional_monthly_needed: number;
+    } | null;
+    extend_timeline_plan: {
+      description: string;
+      resulting_success_probability: number;
+      additional_months_needed: number;
+      new_target_date: string;
+    } | null;
+    optimize_portfolio_plan: {
+      description: string;
+      resulting_success_probability: number;
+      optimal_expected_return: number;
+      optimal_volatility: number;
+    } | null;
+    unreachable_levers: string[];
+  };
+}
+
+export interface GoalInsightsBands {
+  expected_rate: number;
+  optimistic_rate: number;
+  conservative_rate: number;
+  projected_value_expected: number;
+  projected_value_optimistic: number;
+  projected_value_conservative: number;
+  months_remaining: number;
+}
+
+export interface GoalInsights {
+  available: boolean;
+  unavailable_reason: string | null;
+  goal: GoalInsightsGoal | null;
+  remaining_years: number | null;
+  evaluation: GoalInsightsEvaluation | null;
+  rebalance_plan: GoalInsightsRebalance | null;
+  simulation: GoalInsightsSimulation | null;
+  recovery: GoalInsightsRecovery | null;
+  analytical_bands: GoalInsightsBands | null;
+  assumptions: string[];
 }
 
 export interface FixedDepositCreatePayload {
