@@ -217,7 +217,7 @@ def test_romania_cass_uses_six_twelve_and_twenty_four_wage_bases(
     assert estimate.tax_amount == expected_tax
 
 
-def test_cass_refuses_to_calculate_without_required_inputs() -> None:
+def test_cass_uses_the_rule_pack_minimum_wage_without_a_manual_override() -> None:
     estimate = estimate_ro_cass(
         annual_qualifying_investment_income=Decimal("30000"),
         minimum_monthly_wage=None,
@@ -225,6 +225,7 @@ def test_cass_refuses_to_calculate_without_required_inputs() -> None:
         tax_year=2026,
     )
 
-    assert estimate.status == "incomplete"
-    assert estimate.tax_amount is None
-    assert any("minimum gross monthly wage" in warning for warning in estimate.warnings)
+    assert estimate.status == "country_rule_estimate"
+    assert estimate.taxable_amount == Decimal("24300")
+    assert estimate.tax_amount == Decimal("2430.00")
+    assert any("minimum wage applicable" in warning for warning in estimate.warnings)

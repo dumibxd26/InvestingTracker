@@ -17,7 +17,8 @@ class CountryTaxRulePack:
     local_long_term_days: int
     annual_self_assessment_gain_rate: Decimal
     cass_rate: Decimal
-    cass_threshold_wages: tuple[int, int, int]
+    cass_threshold_wages: tuple[int, ...]
+    minimum_monthly_wage_at_year_start: Decimal | None
     source_urls: tuple[str, ...]
     limitations: tuple[str, ...]
 
@@ -35,17 +36,23 @@ ROMANIA_2026 = CountryTaxRulePack(
     annual_self_assessment_gain_rate=Decimal("0.16"),
     cass_rate=Decimal("0.10"),
     cass_threshold_wages=(6, 12, 24),
+    minimum_monthly_wage_at_year_start=Decimal("4050"),
     source_urls=(
         "https://legislatie.just.ro/Public/DetaliiDocument/300022",
         "https://legislatie.just.ro/Public/DetaliiDocument/305208",
         "https://legislatie.just.ro/Public/DetaliiDocument/171282",
+        "https://mmuncii.gov.ro/salariul-de-baza-minim-brut-pe-tara-garantat-in-plata-se-majoreaza/",
     ),
     limitations=(
         "Foreign dividend withholding and treaty credits are not calculated.",
         "The annual self-assessment capital-gains estimate does not net transactions or losses "
         "across the tax year.",
-        "CASS requires annual realized-income aggregation and the official minimum wage for "
-        "the tax year; it is not included in per-holding estimates.",
+        "The CASS calculator uses the qualifying annual income total entered by the user; the app "
+        "does not fully aggregate every eligible source, exemption, or loss for Form 212.",
+        "The pack uses RON 4,050, the gross minimum wage on 1 January 2026; verify it against "
+        "the official source before filing.",
+        "CASS aggregation is available only for investment records imported or entered in this "
+        "tracker; other qualifying non-salary income and exemptions are not automatically known.",
         "RSU, stock-option, and ESPP taxation remains an explicit grant/plan assumption until "
         "the user's employment and plan facts are modelled.",
         "Unrealized holdings use the tracked average cost as one approximate tax lot.",

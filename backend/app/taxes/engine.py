@@ -235,7 +235,7 @@ def estimate_income_tax(
     )
 
 
-def estimate_ro_cass(
+def estimate_country_cass(
     *,
     annual_qualifying_investment_income: Decimal,
     minimum_monthly_wage: Decimal | None,
@@ -243,7 +243,7 @@ def estimate_ro_cass(
     tax_year: int | None,
 ) -> TaxEstimate:
     pack = get_country_tax_rules(country_code, tax_year)
-    if pack is None or country_code is None or country_code.strip().upper() != "RO":
+    if pack is None:
         return TaxEstimate(
             "cass",
             "unsupported",
@@ -257,7 +257,12 @@ def estimate_ro_cass(
             pack.source_urls if pack else (),
             ("No supported CASS rule pack is available for this country and tax year.",),
         )
-    if minimum_monthly_wage is None or minimum_monthly_wage <= ZERO:
+    applied_minimum_wage = (
+        minimum_monthly_wage
+        if minimum_monthly_wage is not None
+        else pack.minimum_monthly_wage_at_year_start
+    )
+    if applied_minimum_wage is None or applied_minimum_wage <= ZERO:
         return TaxEstimate(
             "cass",
             "incomplete",
@@ -275,17 +280,31 @@ def estimate_ro_cass(
             ),
         )
 
-    six_wages, twelve_wages, twenty_four_wages = (
-        minimum_monthly_wage * multiplier for multiplier in pack.cass_threshold_wages
+    threshold_bases = sorted(
+        {applied_minimum_wage * multiple for multiple in pack.cass_threshold_wages}
     )
-    if annual_qualifying_investment_income < six_wages:
-        taxable_base = ZERO
-    elif annual_qualifying_investment_income < twelve_wages:
-        taxable_base = six_wages
-    elif annual_qualifying_investment_income < twenty_four_wages:
-        taxable_base = twelve_wages
-    else:
-        taxable_base = twenty_four_wages
+    if not threshold_bases:
+        return TaxEstimate(
+            "cass",
+            "unsupported",
+            annual_qualifying_investment_income,
+            ZERO,
+            ZERO,
+            None,
+            None,
+            None,
+            pack.version,
+            pack.source_urls,
+            ("The country rule pack does not define CASS income thresholds.",),
+        )
+    taxable_base = max(
+        (
+            threshold
+            for threshold in threshold_bases
+            if annual_qualifying_investment_income >= threshold
+        ),
+        default=ZERO,
+    )
     tax = _rounded(taxable_base * pack.cass_rate)
     return TaxEstimate(
         "cass",
@@ -301,5 +320,13 @@ def estimate_ro_cass(
         (
             "CASS is only an estimate until all taxable income categories and exemptions for "
             "the tax year are included.",
+            (
+                "The country pack's minimum wage applicable on 1 January was used."
+                if minimum_monthly_wage is None
+                else "A user-entered minimum wage overrides the country pack value."
+            ),
         ),
     )
+
+
+estimate_ro_cass = estimate_country_cass

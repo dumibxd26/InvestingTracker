@@ -45,6 +45,8 @@ import type {
   CashTransferRecord,
   StockTransferPayload,
   StockTransferRecord,
+  TaxAnnualSummary,
+  TaxAnnualSummaryPayload,
   UserProfile,
   VestingGrantPayload,
 } from "./types";
@@ -234,6 +236,12 @@ export const api = {
       `/accounts/${encodeURIComponent(accountId)}/broker-imports/${encodeURIComponent(batchId)}`,
       { method: "DELETE" },
     ),
+
+  calculateAnnualTaxSummary: (payload: TaxAnnualSummaryPayload) =>
+    request<TaxAnnualSummary>("/taxes/annual-summary", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 
   initializePortfolio: (
     accounts: InitialPortfolioAccountPayload[],

@@ -1065,6 +1065,36 @@ class BrokerTransactionListResponse(BaseModel):
     transactions: list[BrokerTransactionSummary]
 
 
+class TaxAnnualSummaryRequest(BaseModel):
+    annual_qualifying_income_ron: Decimal = Field(
+        ge=0, le=Decimal("1000000000")
+    )
+
+
+class TaxCassThreshold(BaseModel):
+    wage_multiple: int
+    threshold_ron: Decimal
+    cass_at_threshold_ron: Decimal | None = None
+
+
+class TaxAnnualSummaryResponse(BaseModel):
+    country_code: str | None
+    tax_year: int | None
+    rule_status: str
+    rule_version: str | None = None
+    minimum_monthly_wage_ron: Decimal | None = None
+    cass_rate: Decimal | None = None
+    threshold_bands: list[TaxCassThreshold] = Field(default_factory=list)
+    qualifying_income_ron: Decimal | None = None
+    cass_taxable_base_ron: Decimal | None = None
+    estimated_cass_ron: Decimal | None = None
+    cass_status: str
+    complete_for_filing: bool = False
+    warnings: list[str] = Field(default_factory=list)
+    source_urls: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class TransferFeeInput(BaseModel):
     fee_amount: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000"))
     fee_currency: Currency | None = None

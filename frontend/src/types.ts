@@ -294,6 +294,34 @@ export interface BrokerTransactionList {
   transactions: BrokerTransactionRecord[];
 }
 
+export interface TaxAnnualSummaryPayload {
+  annual_qualifying_income_ron: string;
+}
+
+export interface TaxCassThreshold {
+  wage_multiple: number;
+  threshold_ron: string;
+  cass_at_threshold_ron: string | null;
+}
+
+export interface TaxAnnualSummary {
+  country_code: string | null;
+  tax_year: number | null;
+  rule_status: string;
+  rule_version: string | null;
+  minimum_monthly_wage_ron: string | null;
+  cass_rate: string | null;
+  threshold_bands: TaxCassThreshold[];
+  qualifying_income_ron: string | null;
+  cass_taxable_base_ron: string | null;
+  estimated_cass_ron: string | null;
+  cass_status: string;
+  complete_for_filing: boolean;
+  warnings: string[];
+  source_urls: string[];
+  limitations: string[];
+}
+
 export type TransferFeeSide = "SOURCE" | "DESTINATION";
 
 export interface TransferFeePayload {

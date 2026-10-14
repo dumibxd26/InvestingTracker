@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { ArrowRightLeft, CircleHelp, KeyRound, LogOut, Save, ShieldCheck } from "lucide-react";
 import { ApiError, api } from "../api";
+import { TaxAnnualCalculator } from "./TaxAnnualCalculator";
 import type {
   AccountSummary,
   AccountTaxProfileUpdatePayload,
@@ -194,11 +195,11 @@ export function SettingsView({ profile, accounts, onSaved, onLogout }: SettingsV
                   value={minimumWage}
                   onChange={(event) => setMinimumWage(event.target.value)}
                   disabled={!taxCountry}
-                  placeholder="Optional reference for future CASS estimates"
+                  placeholder="Optional override of supported rule-pack value"
                 />
                 <small>
-                  Saved as a reference only. CASS is not currently calculated because the app
-                  does not aggregate all qualifying realized income for a tax year.
+                  Used as a manual override for the annual CASS calculator. If left blank, a
+                  supported rule pack's statutory 1 January wage is used.
                 </small>
                 <small>Changing tax residence or year clears this value so it is not reused for a different jurisdiction or tax year.</small>
               </label>
@@ -224,6 +225,7 @@ export function SettingsView({ profile, accounts, onSaved, onLogout }: SettingsV
                   estimate, not a country-specific determination or tax filing advice.
                 </small>
               </div>
+              <TaxAnnualCalculator profile={profile} />
             </div>
             {error && <div className="inline-error" role="alert">{error}</div>}
             {message && <div className="settings-saved" role="status">{message}</div>}

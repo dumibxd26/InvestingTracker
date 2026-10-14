@@ -144,6 +144,9 @@ from app.schemas import (
     StockTransferCreate,
     StockTransferResponse,
     SubaccountInterestUpdate,
+    TaxAnnualSummaryRequest,
+    TaxAnnualSummaryResponse,
+    TaxCassThreshold,
     TransferFeeInput,
     UserProfileResponse,
     VestingGrantCreate,
@@ -151,7 +154,7 @@ from app.schemas import (
     VestingTrancheSummary,
 )
 from app.security import create_access_token, digest_access_token, hash_password, verify_password
-from app.taxes.engine import estimate_capital_gain_tax
+from app.taxes.engine import estimate_capital_gain_tax, estimate_country_cass
 from app.taxes.rules import country_rule_status, get_country_tax_rules
 
 ZERO = Decimal("0")
@@ -2421,6 +2424,82 @@ def delete_broker_import(
         raise HTTPException(status_code=404, detail="Broker import was not found")
     session.delete(batch)
     session.commit()
+
+
+def calculate_annual_tax_summary(
+    session: Session,
+    user_id: uuid.UUID,
+    payload: TaxAnnualSummaryRequest,
+) -> TaxAnnualSummaryResponse:
+    user = _get_user(session, user_id)
+    country_code = user.tax_residence_country_code
+    tax_year = user.tax_year
+    rule_status = country_rule_status(country_code, tax_year)
+    base_response = {
+        "country_code": country_code,
+        "tax_year": tax_year,
+        "rule_status": rule_status,
+        "qualifying_income_ron": payload.annual_qualifying_income_ron,
+        "complete_for_filing": False,
+    }
+    if country_code is None or tax_year is None:
+        return TaxAnnualSummaryResponse(
+            **base_response,
+            cass_status="not_configured",
+            warnings=["Configure tax residence and tax year before calculating CASS."],
+        )
+    rule_pack = get_country_tax_rules(country_code, tax_year)
+    if rule_pack is None:
+        return TaxAnnualSummaryResponse(
+            **base_response,
+            cass_status="unsupported",
+            warnings=[
+                f"No CASS calculator is available for {country_code}/{tax_year}.",
+                "No rate or threshold from another country is substituted.",
+            ],
+        )
+
+    minimum_monthly_wage = (
+        user.tax_minimum_monthly_wage or rule_pack.minimum_monthly_wage_at_year_start
+    )
+    thresholds: list[TaxCassThreshold] = []
+    if minimum_monthly_wage is not None and minimum_monthly_wage > ZERO:
+        thresholds = [
+            TaxCassThreshold(
+                wage_multiple=multiple,
+                threshold_ron=minimum_monthly_wage * multiple,
+                cass_at_threshold_ron=round_money(
+                    minimum_monthly_wage * multiple * rule_pack.cass_rate
+                ),
+            )
+            for multiple in rule_pack.cass_threshold_wages
+        ]
+    estimate = estimate_country_cass(
+        annual_qualifying_investment_income=payload.annual_qualifying_income_ron,
+        minimum_monthly_wage=minimum_monthly_wage,
+        country_code=country_code,
+        tax_year=tax_year,
+    )
+    return TaxAnnualSummaryResponse(
+        **base_response,
+        rule_version=rule_pack.version,
+        minimum_monthly_wage_ron=minimum_monthly_wage,
+        cass_rate=rule_pack.cass_rate,
+        threshold_bands=thresholds,
+        cass_taxable_base_ron=estimate.taxable_amount,
+        estimated_cass_ron=estimate.tax_amount,
+        cass_status=estimate.status,
+        warnings=[
+            *estimate.warnings,
+            "This calculator uses the annual qualifying income total you entered; it does not "
+            "collect or validate every income source for the tax year.",
+            "This is a CASS estimate only, not a calculation of dividend, interest, or "
+            "capital-gains income tax and not a completed Form 212.",
+            *rule_pack.limitations,
+        ],
+        source_urls=list(rule_pack.source_urls),
+        limitations=list(rule_pack.limitations),
+    )
 
 
 def create_account_subaccount(

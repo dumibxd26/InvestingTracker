@@ -92,6 +92,10 @@ def test_personal_financial_endpoints_require_a_valid_application_session(tmp_pa
             client.get("/api/dashboard"),
             client.get("/api/accounts"),
             client.get(f"/api/accounts/{uuid4()}/broker-transactions"),
+            client.post(
+                "/api/taxes/annual-summary",
+                json={"annual_qualifying_income_ron": "30000"},
+            ),
             client.get("/api/goals"),
             client.get("/api/policy"),
             client.get("/api/cash-flows"),
@@ -3415,3 +3419,96 @@ def test_xtb_history_import_previews_deduplicates_and_never_changes_balances(tmp
     )
     assert deleted.status_code == 204, deleted.text
     assert after_delete.json()["total"] == 0
+
+
+def test_annual_cass_calculator_uses_supported_rule_pack_and_fails_closed(
+    tmp_path,
+) -> None:
+    with create_test_client(tmp_path) as client:
+        configured = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "tax_residence_country_code": "RO",
+                "tax_year": 2026,
+            },
+        )
+        supported = client.post(
+            "/api/taxes/annual-summary",
+            json={"annual_qualifying_income_ron": "50000"},
+        )
+        unsupported_profile = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "tax_residence_country_code": "US",
+                "tax_year": 2026,
+            },
+        )
+        unsupported = client.post(
+            "/api/taxes/annual-summary",
+            json={"annual_qualifying_income_ron": "50000"},
+        )
+
+    assert configured.status_code == 200, configured.text
+    assert supported.status_code == 200, supported.text
+    supported_result = supported.json()
+    assert supported_result["rule_status"] == "partial"
+    assert supported_result["minimum_monthly_wage_ron"] == "4050"
+    assert Decimal(supported_result["cass_taxable_base_ron"]) == Decimal("48600")
+    assert Decimal(supported_result["estimated_cass_ron"]) == Decimal("4860")
+    assert supported_result["complete_for_filing"] is False
+    assert unsupported_profile.status_code == 200, unsupported_profile.text
+    assert unsupported.status_code == 200, unsupported.text
+    assert unsupported.json()["rule_status"] == "unsupported"
+    assert unsupported.json()["cass_status"] == "unsupported"
+    assert unsupported.json()["estimated_cass_ron"] is None
+
+
+def test_annual_cass_calculator_applies_ro_2026_threshold_basis_to_user_input(tmp_path) -> None:
+    with create_test_client(tmp_path) as client:
+        profile = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "tax_residence_country_code": "RO",
+                "tax_year": 2026,
+            },
+        )
+        calculation = client.post(
+            "/api/taxes/annual-summary",
+            json={"annual_qualifying_income_ron": "50000"},
+        )
+        below_threshold = client.post(
+            "/api/taxes/annual-summary",
+            json={"annual_qualifying_income_ron": "24299.99"},
+        )
+
+    assert profile.status_code == 200, profile.text
+    assert calculation.status_code == 200, calculation.text
+    result = calculation.json()
+    assert result["rule_status"] == "partial"
+    assert Decimal(result["minimum_monthly_wage_ron"]) == Decimal("4050")
+    assert [
+        (
+            band["wage_multiple"],
+            Decimal(band["threshold_ron"]),
+            Decimal(band["cass_at_threshold_ron"]),
+        )
+        for band in result["threshold_bands"]
+    ] == [
+        (6, Decimal("24300"), Decimal("2430")),
+        (12, Decimal("48600"), Decimal("4860")),
+        (24, Decimal("97200"), Decimal("9720")),
+    ]
+    assert result["cass_status"] == "country_rule_estimate"
+    assert Decimal(result["cass_taxable_base_ron"]) == Decimal("48600")
+    assert Decimal(result["estimated_cass_ron"]) == Decimal("4860")
+    assert result["complete_for_filing"] is False
+    assert any("total you entered" in warning for warning in result["warnings"])
+    assert below_threshold.status_code == 200, below_threshold.text
+    assert Decimal(below_threshold.json()["cass_taxable_base_ron"]) == Decimal("0")
+    assert Decimal(below_threshold.json()["estimated_cass_ron"]) == Decimal("0")

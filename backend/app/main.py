@@ -64,6 +64,8 @@ from app.schemas import (
     StockTransferCreate,
     StockTransferResponse,
     SubaccountInterestUpdate,
+    TaxAnnualSummaryRequest,
+    TaxAnnualSummaryResponse,
     UserProfileResponse,
     VestingGrantCreate,
 )
@@ -71,6 +73,7 @@ from app.services import (
     archive_cash_flow_schedule,
     archive_goal,
     authenticate_token,
+    calculate_annual_tax_summary,
     create_account,
     create_account_subaccount,
     create_cash_flow_schedule,
@@ -287,6 +290,14 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> AccountSummary:
         return update_account_tax_profile(session, current_user.id, account_id, payload)
+
+    @app.post("/api/taxes/annual-summary", response_model=TaxAnnualSummaryResponse)
+    def post_annual_tax_summary(
+        payload: TaxAnnualSummaryRequest,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> TaxAnnualSummaryResponse:
+        return calculate_annual_tax_summary(session, current_user.id, payload)
 
     @app.post(
         "/api/accounts/{account_id}/broker-imports/preview",
