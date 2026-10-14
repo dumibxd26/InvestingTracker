@@ -37,6 +37,8 @@ SpotRate = Callable[[str, str], float]
 def _sale_tax_rate(holding: Holding, goal: GoalSpec) -> float:
     if holding.capital_gains_rate is not None:
         return holding.capital_gains_rate
+    if holding.long_term_capital_gains_rate is not None:
+        return holding.long_term_capital_gains_rate
     return goal.tax_profile.long_term_cap_gains_rate
 
 

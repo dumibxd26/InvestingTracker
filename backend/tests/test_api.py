@@ -403,6 +403,7 @@ def test_search_and_add_holding_use_provider_results_and_quote_fx(monkeypatch, t
             "mic_code": "XNAS",
             "exchange": "NASDAQ",
             "instrument_type": "STOCK",
+            "tax_domicile_country_code": "US",
             "quantity": "2",
             "average_cost": "300",
         }
@@ -423,6 +424,7 @@ def test_search_and_add_holding_use_provider_results_and_quote_fx(monkeypatch, t
                 "quantity": "3",
                 "average_cost": "350",
                 "purchase_date": "2024-06-15",
+                "tax_domicile_country_code": None,
                 "risk_tier": "Z",
                 "expected_annual_return": "0.10",
             },
@@ -467,12 +469,14 @@ def test_search_and_add_holding_use_provider_results_and_quote_fx(monkeypatch, t
     assert Decimal(dashboard.json()["holdings"][0]["estimated_gain"]) == Decimal("155.20")
     assert dashboard.json()["holdings"][0]["exchange"] == "NASDAQ"
     assert dashboard.json()["holdings"][0]["mic_code"] == "XNAS"
+    assert dashboard.json()["holdings"][0]["tax_domicile_country_code"] == "US"
     assert dashboard.json()["holdings"][0]["quote_source"] == "TWELVE_DATA"
     assert Decimal(dashboard.json()["totals"]["available_cash"]) == Decimal("2120.00")
     assert update.status_code == 204, update.text
     assert Decimal(updated_dashboard.json()["holdings"][0]["quantity"]) == Decimal("3")
     assert Decimal(updated_dashboard.json()["holdings"][0]["average_cost"]) == Decimal("350")
     assert updated_dashboard.json()["holdings"][0]["purchase_date"] == "2024-06-15"
+    assert updated_dashboard.json()["holdings"][0]["tax_domicile_country_code"] is None
     assert updated_dashboard.json()["holdings"][0]["risk_tier"] == "Z"
     assert (
         Decimal(updated_dashboard.json()["holdings"][0]["expected_annual_return"])
@@ -960,6 +964,7 @@ def test_initial_portfolio_setup_creates_accounts_wallets_and_owned_stocks_atomi
                         "mic_code": "XNAS",
                         "exchange": "NASDAQ",
                         "instrument_type": "STOCK",
+                        "tax_domicile_country_code": "US",
                         "quantity": "2",
                         "average_cost": "300",
                         "average_cost_currency": "EUR",
@@ -987,6 +992,7 @@ def test_initial_portfolio_setup_creates_accounts_wallets_and_owned_stocks_atomi
     snapshot = dashboard.json()
     assert len(snapshot["accounts"]) == 2
     assert snapshot["holdings"][0]["symbol"] == "AAPL"
+    assert snapshot["holdings"][0]["tax_domicile_country_code"] == "US"
     assert Decimal(snapshot["holdings"][0]["average_cost"]) == Decimal("375.00")
     assert snapshot["holdings"][0]["purchase_date"] == "2025-01-01"
     assert Decimal(snapshot["totals"]["available_cash"]) == Decimal("3100.00")
@@ -3085,3 +3091,161 @@ def test_portfolio_projection_scenario_compounds_contributions_and_reports_risk_
     assert abs(contribution_value - projection_delta) <= Decimal("0.02")
     assert any("monthly period" in assumption for assumption in result["assumptions"])
     assert invalid_weights.status_code == 422
+
+
+def test_tax_profile_and_account_method_report_support_without_clearing_omitted_fields(
+    tmp_path,
+) -> None:
+    with create_test_client(tmp_path) as client:
+        supported_profile = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "tax_residence_country_code": "ro",
+                "tax_year": 2026,
+                "tax_minimum_monthly_wage": "4050",
+            },
+        )
+        account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Romanian broker",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "broker_country_code": "RO",
+                "tax_reporting_method": "withholding_agent",
+            },
+        )
+        account_update = client.put(
+            f"/api/accounts/{account.json()['id']}/tax-profile",
+            json={"tax_reporting_method": "annual_self_assessment"},
+        )
+        unsupported_profile = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "tax_residence_country_code": "US",
+                "tax_year": 2026,
+            },
+        )
+
+    assert supported_profile.status_code == 200, supported_profile.text
+    assert supported_profile.json()["tax_rules_status"] == "partial"
+    assert supported_profile.json()["tax_rule_version"] == "RO-2026.partial.1"
+    assert supported_profile.json()["tax_minimum_monthly_wage"] == "4050.0000"
+    assert account.status_code == 201, account.text
+    assert account_update.status_code == 200, account_update.text
+    assert account_update.json()["broker_country_code"] == "RO"
+    assert account_update.json()["tax_reporting_method"] == "annual_self_assessment"
+    assert unsupported_profile.status_code == 200, unsupported_profile.text
+    assert unsupported_profile.json()["tax_rules_status"] == "unsupported"
+    assert unsupported_profile.json()["tax_rule_version"] is None
+    assert unsupported_profile.json()["tax_minimum_monthly_wage"] is None
+
+
+def test_security_tax_domicile_is_scoped_to_each_users_holding(monkeypatch, tmp_path) -> None:
+    import app.services as services
+
+    class FakeTwelveDataClient:
+        def __init__(self, api_key: str, timeout_seconds: float = 10) -> None:
+            assert api_key == "test-provider-key"
+            assert timeout_seconds == 10
+
+        async def quote(
+            self, symbol: str, mic_code: str | None = None, exchange: str | None = None
+        ) -> MarketQuote:
+            return MarketQuote(
+                symbol=symbol,
+                name="Shared listing",
+                price=Decimal("200"),
+                currency=Currency.EUR,
+                observed_at=datetime(2026, 10, 14, 12, tzinfo=UTC),
+                is_market_open=True,
+                mic_code=mic_code or "XNAS",
+                exchange=exchange or "NASDAQ",
+            )
+
+    monkeypatch.setattr(
+        services, "get_settings", lambda: Settings(twelve_data_api_key="test-provider-key")
+    )
+    monkeypatch.setattr(services, "TwelveDataClient", FakeTwelveDataClient)
+
+    with create_test_client(tmp_path) as client:
+        first_authorization = client.headers["Authorization"]
+        first_account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "First brokerage",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "1000",
+            },
+        )
+        first_holding = client.post(
+            "/api/holdings",
+            json={
+                "account_id": first_account.json()["id"],
+                "subaccount_id": first_account.json()["subaccounts"][0]["id"],
+                "symbol": "SHARED",
+                "mic_code": "XNAS",
+                "exchange": "NASDAQ",
+                "instrument_type": "STOCK",
+                "tax_domicile_country_code": "US",
+                "quantity": "1",
+                "average_cost": "100",
+            },
+        )
+        second_user = client.post(
+            "/api/auth/register",
+            json={
+                "username": f"tax_owner_{uuid4().hex[:8]}",
+                "password": "another-long-test-passphrase",
+                "base_currency": "EUR",
+            },
+        )
+        client.headers.update(
+            {"Authorization": f"Bearer {second_user.json()['access_token']}"}
+        )
+        second_account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Second brokerage",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "1000",
+            },
+        )
+        second_holding = client.post(
+            "/api/holdings",
+            json={
+                "account_id": second_account.json()["id"],
+                "subaccount_id": second_account.json()["subaccounts"][0]["id"],
+                "symbol": "SHARED",
+                "mic_code": "XNAS",
+                "exchange": "NASDAQ",
+                "instrument_type": "STOCK",
+                "tax_domicile_country_code": "IE",
+                "quantity": "1",
+                "average_cost": "100",
+            },
+        )
+        second_domicile = client.get("/api/dashboard").json()["holdings"][0][
+            "tax_domicile_country_code"
+        ]
+        client.headers.update({"Authorization": first_authorization})
+        first_domicile = client.get("/api/dashboard").json()["holdings"][0][
+            "tax_domicile_country_code"
+        ]
+
+    assert first_account.status_code == 201, first_account.text
+    assert first_holding.status_code == 201, first_holding.text
+    assert second_user.status_code == 201, second_user.text
+    assert second_account.status_code == 201, second_account.text
+    assert second_holding.status_code == 201, second_holding.text
+    assert first_domicile == "US"
+    assert second_domicile == "IE"

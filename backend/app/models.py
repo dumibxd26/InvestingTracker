@@ -43,6 +43,13 @@ class AccountType(StrEnum):
     EMPLOYER_PLAN = "EMPLOYER_PLAN"
 
 
+class TaxReportingMethod(StrEnum):
+    LEGACY_MANUAL = "legacy_manual"
+    WITHHOLDING_AGENT = "withholding_agent"
+    ANNUAL_SELF_ASSESSMENT = "annual_self_assessment"
+    TAX_EXEMPT = "tax_exempt"
+
+
 class AssetClass(StrEnum):
     EQUITIES = "equities"
     FIXED_INCOME = "fixed_income"
@@ -127,6 +134,30 @@ class RateBasis(StrEnum):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint(
+            "tax_residence_country_code IS NULL OR "
+            "(length(tax_residence_country_code) = 2 AND "
+            "tax_residence_country_code = upper(tax_residence_country_code))",
+            name="ck_users_tax_residence_country_code",
+        ),
+        CheckConstraint(
+            "tax_year IS NULL OR tax_year BETWEEN 2000 AND 2100",
+            name="ck_users_tax_year",
+        ),
+        CheckConstraint(
+            "(tax_residence_country_code IS NULL) = (tax_year IS NULL)",
+            name="ck_users_tax_country_year_pair",
+        ),
+        CheckConstraint(
+            "tax_minimum_monthly_wage IS NULL OR tax_minimum_monthly_wage > 0",
+            name="ck_users_tax_minimum_wage_positive",
+        ),
+        CheckConstraint(
+            "tax_minimum_monthly_wage IS NULL OR tax_residence_country_code IS NOT NULL",
+            name="ck_users_tax_minimum_wage_requires_tax_profile",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     display_name: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -137,6 +168,9 @@ class User(Base):
         nullable=False,
     )
     usd_per_eur: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
+    tax_residence_country_code: Mapped[str | None] = mapped_column(String(2))
+    tax_year: Mapped[int | None] = mapped_column(Integer)
+    tax_minimum_monthly_wage: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
@@ -160,7 +194,20 @@ class LoginSession(Base):
 
 class BrokerAccount(Base):
     __tablename__ = "accounts_brokers"
-    __table_args__ = (UniqueConstraint("user_id", "display_name"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "display_name"),
+        CheckConstraint(
+            "tax_reporting_method IN "
+            "('legacy_manual', 'withholding_agent', 'annual_self_assessment', 'tax_exempt')",
+            name="ck_accounts_brokers_tax_reporting_method",
+        ),
+        CheckConstraint(
+            "broker_country_code IS NULL OR "
+            "(length(broker_country_code) = 2 AND "
+            "broker_country_code = upper(broker_country_code))",
+            name="ck_accounts_brokers_broker_country_code",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -170,6 +217,13 @@ class BrokerAccount(Base):
     display_name: Mapped[str] = mapped_column(String(80), nullable=False)
     account_type: Mapped[AccountType] = mapped_column(
         SqlEnum(AccountType, values_callable=enum_values, name="account_type"), nullable=False
+    )
+    broker_country_code: Mapped[str | None] = mapped_column(String(2))
+    tax_reporting_method: Mapped[TaxReportingMethod] = mapped_column(
+        String(32),
+        default=TaxReportingMethod.LEGACY_MANUAL,
+        server_default=TaxReportingMethod.LEGACY_MANUAL.value,
+        nullable=False,
     )
 
 
@@ -201,7 +255,15 @@ class AccountSubaccount(Base):
 
 class Instrument(Base):
     __tablename__ = "instruments"
-    __table_args__ = (UniqueConstraint("symbol", "mic", name="uq_instruments_symbol_mic"),)
+    __table_args__ = (
+        UniqueConstraint("symbol", "mic", name="uq_instruments_symbol_mic"),
+        CheckConstraint(
+            "tax_domicile_country_code IS NULL OR "
+            "(length(tax_domicile_country_code) = 2 AND "
+            "tax_domicile_country_code = upper(tax_domicile_country_code))",
+            name="ck_instruments_tax_domicile_country_code",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     symbol: Mapped[str] = mapped_column(String(24), nullable=False)
@@ -220,6 +282,7 @@ class Instrument(Base):
     estimated_annual_yield: Mapped[Decimal] = mapped_column(
         Numeric(12, 8), default=Decimal("0"), nullable=False
     )
+    tax_domicile_country_code: Mapped[str | None] = mapped_column(String(2))
     is_demo: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -232,6 +295,12 @@ class Holding(Base):
         CheckConstraint(
             "expected_annual_return > -1 AND expected_annual_return <= 1",
             name="ck_holdings_expected_return_range",
+        ),
+        CheckConstraint(
+            "tax_domicile_country_code IS NULL OR "
+            "(length(tax_domicile_country_code) = 2 AND "
+            "tax_domicile_country_code = upper(tax_domicile_country_code))",
+            name="ck_holdings_tax_domicile_country_code",
         ),
     )
 
@@ -260,6 +329,7 @@ class Holding(Base):
     expected_annual_return: Mapped[Decimal] = mapped_column(
         Numeric(8, 6), default=Decimal("0.05"), server_default="0.05", nullable=False
     )
+    tax_domicile_country_code: Mapped[str | None] = mapped_column(String(2))
     funding_cost: Mapped[Decimal] = mapped_column(
         Numeric(20, 4), default=Decimal("0"), nullable=False
     )

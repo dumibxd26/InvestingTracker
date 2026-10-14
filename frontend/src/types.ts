@@ -2,6 +2,11 @@ export type Currency = "EUR" | "USD" | "RON";
 export type AssetClass = "equities" | "fixed_income" | "satellite";
 export type FundingRule = "priority_first" | "proportional" | "fixed_percentages";
 export type AccountType = "BROKERAGE" | "BANK" | "SAVINGS" | "EMPLOYER_PLAN";
+export type TaxReportingMethod =
+  | "legacy_manual"
+  | "withholding_agent"
+  | "annual_self_assessment"
+  | "tax_exempt";
 export type Recurrence = "one_time" | "monthly" | "quarterly" | "annual";
 export type FlowKind =
   | "salary"
@@ -79,6 +84,13 @@ export interface UserProfile {
   display_name: string;
   base_currency: Currency;
   usd_per_eur: string | null;
+  tax_residence_country_code: string | null;
+  tax_year: number | null;
+  tax_minimum_monthly_wage: string | null;
+  tax_rules_status: string;
+  tax_rule_version: string | null;
+  tax_rule_sources: string[];
+  tax_rule_limitations: string[];
 }
 
 export interface AuthResponse {
@@ -100,6 +112,9 @@ export interface ProfileUpdatePayload {
   display_name: string;
   base_currency: Currency;
   usd_per_eur: string | null;
+  tax_residence_country_code: string | null;
+  tax_year: number | null;
+  tax_minimum_monthly_wage: string | null;
 }
 
 export interface HoldingSummary {
@@ -115,6 +130,7 @@ export interface HoldingSummary {
   mic_code: string;
   asset_class: AssetClass;
   instrument_type: "STOCK" | "ETF";
+  tax_domicile_country_code: string | null;
   quantity: string;
   average_cost: string;
   purchase_date: string;
@@ -135,6 +151,7 @@ export interface HoldingSummary {
   estimated_gain_percent: string;
   estimated_sale_tax: string;
   estimated_tax_rate: string;
+  estimated_tax_status: string;
   base_currency: Currency;
   is_demo: boolean;
 }
@@ -177,6 +194,7 @@ export interface HoldingCreatePayload {
   mic_code: string | null;
   exchange: string;
   instrument_type: "STOCK" | "ETF";
+  tax_domicile_country_code?: string | null;
   quantity: string;
   average_cost: string;
   average_cost_currency: Currency;
@@ -188,6 +206,7 @@ export interface HoldingUpdatePayload {
   average_cost: string;
   average_cost_currency: Currency;
   purchase_date?: string;
+  tax_domicile_country_code?: string | null;
   risk_tier?: "X" | "Y" | "Z";
   expected_annual_return?: string;
   short_term_sale_tax_rate?: string;
@@ -286,6 +305,8 @@ export interface AccountSummary {
   display_name: string;
   provider_code: string;
   account_type: AccountType;
+  broker_country_code: string | null;
+  tax_reporting_method: TaxReportingMethod;
   currency: Currency;
   cash_balance: string;
   position_count: number;
@@ -375,6 +396,7 @@ export interface InitialPortfolioHoldingPayload {
   mic_code: string | null;
   exchange: string;
   instrument_type: "STOCK" | "ETF";
+  tax_domicile_country_code?: string | null;
   quantity: string;
   average_cost: string;
   average_cost_currency: Currency;
@@ -914,10 +936,17 @@ export interface AccountCreatePayload {
   display_name: string;
   provider_code: string;
   account_type: AccountType;
+  broker_country_code?: string | null;
+  tax_reporting_method?: TaxReportingMethod;
   currency: Currency;
   opening_cash: string;
   annual_interest_rate?: string;
   interest_start_date?: string;
+}
+
+export interface AccountTaxProfileUpdatePayload {
+  broker_country_code: string | null;
+  tax_reporting_method: TaxReportingMethod;
 }
 
 export interface CashFlowSchedulePayload {

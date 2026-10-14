@@ -42,6 +42,7 @@ interface HoldingDraft {
   averageCost: string;
   averageCostCurrency: Currency | null;
   purchaseDate: string;
+  taxDomicileCountryCode: string;
 }
 
 const currencies: Currency[] = ["EUR", "USD", "RON"];
@@ -93,6 +94,7 @@ function createHolding(accounts: AccountDraft[]): HoldingDraft {
     averageCost: "",
     averageCostCurrency: null,
     purchaseDate: "2025-01-01",
+    taxDomicileCountryCode: "",
   };
 }
 
@@ -203,6 +205,8 @@ export function InitialPortfolioDialog({
       average_cost: holding.averageCost,
       average_cost_currency: holding.averageCostCurrency!,
       purchase_date: holding.purchaseDate,
+      tax_domicile_country_code:
+        holding.taxDomicileCountryCode.trim().toUpperCase() || null,
     }));
     try {
       await api.initializePortfolio(accountPayload, holdingPayload);
@@ -692,6 +696,26 @@ function InitialHoldingRow({
               required
               disabled={disabled}
             />
+          </label>
+          <label className="form-field">
+            <span>Security tax domicile · optional ISO country code</span>
+            <input
+              value={holding.taxDomicileCountryCode}
+              onChange={(event) =>
+                onChange({
+                  taxDomicileCountryCode: event.target.value.toUpperCase(),
+                })
+              }
+              minLength={2}
+              maxLength={2}
+              pattern="[A-Z]{2}"
+              placeholder="e.g. US or IE"
+              disabled={disabled}
+            />
+            <small>
+              Enter the issuer or fund domicile, not the exchange country. Leave blank if
+              unknown; cross-border tax estimates will use a clearly labeled fallback.
+            </small>
           </label>
         </>
       )}

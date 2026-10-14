@@ -19,6 +19,7 @@ from app.models import (
     RateBasis,
     Recurrence,
     RiskLevel,
+    TaxReportingMethod,
 )
 
 
@@ -59,6 +60,9 @@ class ProfileUpdate(BaseModel):
     display_name: str = Field(min_length=2, max_length=80)
     base_currency: Currency
     usd_per_eur: Decimal | None = Field(default=None, gt=0, le=100)
+    tax_residence_country_code: str | None = Field(default=None, min_length=2, max_length=2)
+    tax_year: int | None = Field(default=None, ge=2000, le=2100)
+    tax_minimum_monthly_wage: Decimal | None = Field(default=None, gt=0)
 
     @field_validator("display_name")
     @classmethod
@@ -68,6 +72,24 @@ class ProfileUpdate(BaseModel):
             raise ValueError("Display name must contain at least two non-whitespace characters")
         return normalized
 
+    @field_validator("tax_residence_country_code")
+    @classmethod
+    def normalize_tax_country_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if len(normalized) != 2 or not normalized.isalpha() or not normalized.isascii():
+            raise ValueError("Tax residence must be a two-letter ISO country code")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_tax_profile_period(self) -> "ProfileUpdate":
+        if (self.tax_residence_country_code is None) != (self.tax_year is None):
+            raise ValueError("Set both a tax residence country and the tax year, or clear both")
+        if self.tax_residence_country_code is None and self.tax_minimum_monthly_wage is not None:
+            raise ValueError("A tax-year minimum wage requires a configured tax residence")
+        return self
+
 
 class UserProfileResponse(BaseModel):
     id: UUID
@@ -75,6 +97,13 @@ class UserProfileResponse(BaseModel):
     display_name: str
     base_currency: Currency
     usd_per_eur: Decimal | None
+    tax_residence_country_code: str | None = None
+    tax_year: int | None = None
+    tax_minimum_monthly_wage: Decimal | None = None
+    tax_rules_status: str = "not_configured"
+    tax_rule_version: str | None = None
+    tax_rule_sources: list[str] = Field(default_factory=list)
+    tax_rule_limitations: list[str] = Field(default_factory=list)
 
 
 class AuthResponse(BaseModel):
@@ -89,6 +118,8 @@ class AccountCreate(BaseModel):
     provider_code: str = Field(default="MANUAL", min_length=2, max_length=40)
     account_type: AccountType
     currency: Currency
+    broker_country_code: str | None = Field(default=None, min_length=2, max_length=2)
+    tax_reporting_method: TaxReportingMethod = TaxReportingMethod.LEGACY_MANUAL
     opening_cash: Decimal = Field(default=Decimal("0"), ge=0, le=Decimal("100000000"))
     annual_interest_rate: Decimal | None = Field(default=None, ge=0, le=1)
     interest_start_date: date | None = None
@@ -107,6 +138,16 @@ class AccountCreate(BaseModel):
         normalized = value.strip().upper()
         if not normalized or not normalized.replace("_", "").isalnum():
             raise ValueError("Provider code may contain letters, numbers, and underscores")
+        return normalized
+
+    @field_validator("broker_country_code")
+    @classmethod
+    def normalize_broker_country_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if len(normalized) != 2 or not normalized.isalpha() or not normalized.isascii():
+            raise ValueError("Broker country must be a two-letter ISO country code")
         return normalized
 
     @model_validator(mode="after")
@@ -137,11 +178,28 @@ class AccountSummary(BaseModel):
     display_name: str
     provider_code: str
     account_type: AccountType
+    broker_country_code: str | None = None
+    tax_reporting_method: TaxReportingMethod = TaxReportingMethod.LEGACY_MANUAL
     currency: Currency
     cash_balance: Decimal
     position_count: int
     is_sample: bool
     subaccounts: list[AccountSubaccountSummary]
+
+
+class AccountTaxProfileUpdate(BaseModel):
+    broker_country_code: str | None = Field(default=None, min_length=2, max_length=2)
+    tax_reporting_method: TaxReportingMethod
+
+    @field_validator("broker_country_code")
+    @classmethod
+    def normalize_broker_country_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().upper()
+        if len(normalized) != 2 or not normalized.isalpha() or not normalized.isascii():
+            raise ValueError("Broker country must be a two-letter ISO country code")
+        return normalized
 
 
 class AccountWealthSummary(BaseModel):
@@ -219,6 +277,9 @@ class InitialPortfolioHolding(BaseModel):
     mic_code: str | None = Field(default=None, max_length=8)
     exchange: str | None = Field(default=None, max_length=80)
     instrument_type: Literal["STOCK", "ETF"]
+    tax_domicile_country_code: str | None = Field(
+        default=None, min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$"
+    )
     quantity: Decimal = Field(gt=0, le=Decimal("1000000000"))
     average_cost: Decimal = Field(gt=0, le=Decimal("100000000"))
     average_cost_currency: Currency | None = None
@@ -527,6 +588,7 @@ class HoldingSummary(BaseModel):
     mic_code: str
     asset_class: AssetClass
     instrument_type: Literal["STOCK", "ETF"]
+    tax_domicile_country_code: str | None = None
     quantity: Decimal
     average_cost: Decimal
     purchase_date: date
@@ -547,6 +609,7 @@ class HoldingSummary(BaseModel):
     estimated_gain_percent: Decimal
     estimated_sale_tax: Decimal
     estimated_tax_rate: Decimal
+    estimated_tax_status: str = "legacy_assumption"
     base_currency: Currency
     is_demo: bool
 
@@ -572,6 +635,9 @@ class HoldingCreate(BaseModel):
     mic_code: str | None = Field(default=None, max_length=8)
     exchange: str | None = Field(default=None, max_length=80)
     instrument_type: Literal["STOCK", "ETF"]
+    tax_domicile_country_code: str | None = Field(
+        default=None, min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$"
+    )
     quantity: Decimal = Field(gt=0, le=Decimal("1000000000"))
     average_cost: Decimal = Field(gt=0, le=Decimal("100000000"))
     average_cost_currency: Currency | None = None
@@ -587,6 +653,9 @@ class HoldingUpdate(BaseModel):
     average_cost: Decimal = Field(gt=0, le=Decimal("100000000"))
     average_cost_currency: Currency | None = None
     purchase_date: date | None = None
+    tax_domicile_country_code: str | None = Field(
+        default=None, min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$"
+    )
     risk_tier: Literal["X", "Y", "Z"] | None = None
     expected_annual_return: Decimal | None = Field(
         default=None, gt=Decimal("-1"), le=Decimal("1")

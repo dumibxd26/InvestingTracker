@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, date, datetime
+from uuid import uuid4
 
 import numpy as np
 import pytest
 
 from app.gbi import simulation as sim
+from app.gbi.adapter import build_goal_spec
 from app.gbi.constants import DEFAULT_SEED
 from app.gbi.controller import analytical_bands, build_goal_insights
 from app.gbi.domain import (
@@ -19,6 +21,7 @@ from app.gbi.domain import (
 )
 from app.gbi.drift import evaluate_goal_portfolio, glide_path_targets, portfolio_volatility
 from app.gbi.rebalance import select_optimal_tax_lots
+from app.models import Currency, Goal, GoalType, RiskLevel
 
 NOW = datetime(2026, 10, 14, tzinfo=UTC)
 RATES = {("EUR", "USD"): 1.08, ("USD", "EUR"): 1 / 1.08, ("RON", "EUR"): 0.2, ("EUR", "RON"): 5.0}
@@ -103,6 +106,54 @@ def _deposit() -> Holding:
         dividend_yield=0.06,
         capital_gains_rate=0.0,
     )
+
+
+def test_goal_tax_profile_preserves_short_and_long_term_rates() -> None:
+    holding = _vwce()
+    holding.capital_gains_rate = 0.06
+    holding.short_term_capital_gains_rate = 0.06
+    holding.long_term_capital_gains_rate = 0.03
+    allocations = [AllocatedHolding(holding, 100.0)]
+
+    goal = Goal(
+        id=uuid4(),
+        user_id=uuid4(),
+        name="Long term",
+        goal_type=GoalType.WEALTH,
+        target_amount=200000,
+        target_currency=Currency.EUR,
+        target_date=date(2036, 10, 14),
+        risk_level=RiskLevel.MODERATE,
+        monthly_contribution=1000,
+    )
+    goal_spec = build_goal_spec(goal, allocations, spot, default_capital_gains_rate=0.10)
+
+    assert goal_spec.tax_profile.short_term_cap_gains_rate == pytest.approx(0.06)
+    assert goal_spec.tax_profile.long_term_cap_gains_rate == pytest.approx(0.03)
+
+
+def test_tax_lot_selection_uses_the_country_rate_for_each_holding_period() -> None:
+    holding = _vwce(units=20.0)
+    holding.capital_gains_rate = 0.06
+    holding.short_term_capital_gains_rate = 0.06
+    holding.long_term_capital_gains_rate = 0.03
+    holding.long_term_holding_period_days = 365
+    holding.tax_lots = [
+        TaxLot("long", date(2024, 1, 1), 10.0, 95.0, 1.0),
+        TaxLot("short", date(2026, 6, 1), 10.0, 95.0, 1.0),
+    ]
+
+    disposals = select_optimal_tax_lots(
+        AllocatedHolding(holding, 100.0),
+        target_gross_in_goal=2400.0,
+        spot_rate_to_goal=1.0,
+        long_term_rate=0.03,
+        short_term_rate=0.06,
+        now=NOW,
+    )
+
+    rates_by_lot = {item.lot_id: item.applicable_tax_rate for item in disposals}
+    assert rates_by_lot == {"long": 0.03, "short": 0.06}
 
 
 def test_mulberry32_matches_reference_sequence() -> None:

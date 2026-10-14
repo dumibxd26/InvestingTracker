@@ -44,9 +44,15 @@ def select_optimal_tax_lots(
 
     candidates = []
     for lot in holding.tax_lots:
-        is_long_term = (now.date() - lot.purchase_date).days >= 365
+        is_long_term = (
+            now.date() - lot.purchase_date
+        ).days >= holding.long_term_holding_period_days
         if holding.is_tax_advantaged:
             rate = 0.0
+        elif is_long_term and holding.long_term_capital_gains_rate is not None:
+            rate = holding.long_term_capital_gains_rate
+        elif not is_long_term and holding.short_term_capital_gains_rate is not None:
+            rate = holding.short_term_capital_gains_rate
         elif holding.capital_gains_rate is not None:
             rate = holding.capital_gains_rate
         else:

@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { Landmark, X } from "lucide-react";
 import { ApiError, api } from "../api";
-import type { AccountType, Currency, UserProfile } from "../types";
+import type { AccountType, Currency, TaxReportingMethod, UserProfile } from "../types";
 
 type InterestModel = "SAME_ACCOUNT" | "SEPARATE_ACCOUNT";
 
@@ -18,6 +18,8 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
   const [saving, setSaving] = useState(false);
   const [interestModel, setInterestModel] = useState<InterestModel>("SAME_ACCOUNT");
   const [interestRateEntered, setInterestRateEntered] = useState(false);
+  const [taxReportingMethod, setTaxReportingMethod] =
+    useState<TaxReportingMethod>("legacy_manual");
   const supportsInterest = accountType !== "EMPLOYER_PLAN";
   const offersInterestModel = accountType === "BANK";
   const separateInterestAccount = offersInterestModel && interestModel === "SEPARATE_ACCOUNT";
@@ -28,6 +30,7 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
     setSaving(true);
     const form = new FormData(event.currentTarget);
     const providerCode = String(form.get("provider") ?? "MANUAL");
+    const brokerCountryCode = String(form.get("brokerCountry") ?? "").trim().toUpperCase();
     const interestPercent = supportsInterest ? String(form.get("interestPercent") ?? "").trim() : "";
     const interestFields = interestPercent
       ? {
@@ -41,6 +44,8 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
         display_name: String(form.get("name") ?? "").trim(),
         provider_code: providerCode,
         account_type: accountType,
+        broker_country_code: brokerCountryCode || null,
+        tax_reporting_method: taxReportingMethod,
         currency,
         opening_cash: String(form.get("openingCash") || "0"),
         ...(separateInterestAccount ? {} : interestFields),
@@ -51,6 +56,8 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
             display_name: String(form.get("interestAccountName") ?? "").trim(),
             provider_code: providerCode,
             account_type: "SAVINGS",
+            broker_country_code: brokerCountryCode || null,
+            tax_reporting_method: taxReportingMethod,
             currency,
             opening_cash: "0",
             ...interestFields,
@@ -116,6 +123,35 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
               </select>
             </label>
           </div>
+          <div className="form-row">
+            <label className="form-field">
+              <span>Broker/account country <small>optional · ISO code</small></span>
+              <input
+                name="brokerCountry"
+                minLength={2}
+                maxLength={2}
+                pattern="[A-Za-z]{2}"
+                placeholder="e.g. RO"
+              />
+            </label>
+            <label className="form-field">
+              <span>How is investment tax reported?</span>
+              <select
+                value={taxReportingMethod}
+                onChange={(event) => setTaxReportingMethod(event.target.value as TaxReportingMethod)}
+                disabled={accountType === "EMPLOYER_PLAN"}
+              >
+                <option value="legacy_manual">Manual/legacy tax assumptions</option>
+                <option value="withholding_agent">Broker withholds tax at source</option>
+                <option value="annual_self_assessment">Annual self-assessment</option>
+                <option value="tax_exempt">Tax-exempt account wrapper</option>
+              </select>
+            </label>
+          </div>
+          <p className="quiet-copy">
+            The broker country is not your tax residence. Country-specific rules apply only when
+            your tax residence and the account reporting method are supported by a verified rule pack.
+          </p>
           <div className="form-row">
             <label className="form-field">
               <span>Initial sub-account currency</span>

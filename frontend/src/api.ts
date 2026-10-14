@@ -10,6 +10,7 @@ import type {
   CashFlowSchedule,
   CashFlowSchedulePayload,
   AccountCreatePayload,
+  AccountTaxProfileUpdatePayload,
   AccountSummary,
   AccountSubaccount,
   InitialPortfolioAccountPayload,
@@ -178,6 +179,12 @@ export const api = {
 
   createAccount: (payload: AccountCreatePayload) =>
     request<AccountSummary>("/accounts", { method: "POST", body: JSON.stringify(payload) }),
+
+  updateAccountTaxProfile: (accountId: string, payload: AccountTaxProfileUpdatePayload) =>
+    request<AccountSummary>(`/accounts/${encodeURIComponent(accountId)}/tax-profile`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
 
   initializePortfolio: (
     accounts: InitialPortfolioAccountPayload[],

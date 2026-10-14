@@ -315,6 +315,7 @@ export default function App() {
           {activeView === "settings" ? (
             <SettingsView
               profile={profile}
+              accounts={data?.accounts ?? []}
               onSaved={handleProfileSaved}
               onLogout={() => void handleLogout()}
             />

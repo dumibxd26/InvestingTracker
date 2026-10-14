@@ -42,6 +42,14 @@ Twelve Data is the initial provider adapter because it covers symbol discovery, 
 
 Broker/bank connectors, transaction imports and reconciliation, a balanced accounting ledger and tax lots, historical TWR/IRR accounting, goal-to-position earmarking, instrument-level buy lists, automatic execution, password recovery/MFA, and production operational controls are not implemented.
 
+## Tax handling status and limits
+
+Tax estimates are keyed by the user's optional tax-residence country and tax year, the account's reporting method and broker country, and the security tax domicile saved on each user-owned holding. The application does not infer tax residence from a broker, exchange, currency, or instrument. The only bundled country/year rules are a **partial Romania 2026 pack**; other combinations are reported as unsupported and fall back only to clearly labeled manual/legacy assumptions.
+
+The Romania pack currently models selected domestic investment-income rules: 16% dividend tax, 10% domestic bank-interest tax, 6%/3% gains withholding based on a 365-day holding period only when the account is marked as using a withholding agent **and** its broker country is set to Romania, and a 16% rate for annual self-assessment estimates. It records official source links and known limitations. The CASS helper implements the 6/12/24-minimum-wage threshold structure, but the application does not yet aggregate a complete tax-year ledger of eligible realized income, losses, exemptions, and other income categories; its result must not be treated as a filing calculation.
+
+Country-rule estimates are not a tax return or professional advice. Holdings currently have one average cost and purchase date rather than transaction-level tax lots, so FIFO and annual netting cannot be established. Foreign dividend withholding and treaty credits are not calculated. Stock sales still use the user-entered after-tax proceeds, and RSU/options/ESPP receipt and sale treatment remains a plan-specific assumption. These gaps are surfaced in the rule-pack limitations and estimate warnings rather than filled with unverified rates. The goal engine receives separate short- and long-term rates where the selected rule pack supplies them, but its projections still use the available simplified holding data.
+
 ## Run locally
 
 1. Install Docker Desktop and make sure its Linux engine is running.
@@ -87,16 +95,17 @@ API tests use isolated SQLite temporary databases; the Docker stack uses Postgre
 | `GET /health` | Local API health |
 | `POST /api/auth/register` / `POST /api/auth/login` | Create an application login or sign in |
 | `POST /api/auth/logout` / `GET /api/auth/me` | Revoke current session or get the signed-in profile |
-| `GET /api/profile` / `PUT /api/profile` | Read or update display name, base currency, and optional manual FX reference |
+| `GET /api/profile` / `PUT /api/profile` | Read or update display name, base currency, optional manual FX reference, and tax residence/year |
 | `GET /api/dashboard?currency=EUR` | Signed-in user's aggregated snapshot |
-| `GET /api/accounts` / `POST /api/accounts` | List or add the signed-in user's manual financial accounts |
+| `GET /api/accounts` / `POST /api/accounts` | List or add the signed-in user's financial accounts |
+| `PUT /api/accounts/{id}/tax-profile` | Set an account's broker country and tax-reporting method |
 | `POST /api/accounts/{id}/subaccounts` | Add a EUR, USD, or RON cash sub-account to an institution |
-| `POST /api/portfolio/initialize` | Atomically initialize institutions and current currency balances plus already-owned stock/ETF positions without charging their costs again |
+| `POST /api/portfolio/initialize` | Atomically initialize institutions and balances plus already-owned stock/ETF positions, including optional security tax domicile, without charging their costs again |
 | `DELETE /api/accounts/{id}` | Remove an account and its balance/assets from the tracker while preserving linked cash-flow history |
 | `GET /api/market/status` | Check whether provider-backed market data is configured |
 | `GET /api/market/search?q=MSFT` | Search provider listings for stocks and ETFs |
-| `POST /api/holdings` | Add a selected stock/ETF listing, record its quote, and convert/debit the purchase cost from the chosen EUR/USD/RON sub-account |
-| `PUT /api/holdings/{id}` / `DELETE /api/holdings/{id}` | Update a position and apply the converted cost-basis difference, or remove it and restore its recorded funding-currency cost |
+| `POST /api/holdings` | Add a selected stock/ETF listing, record its quote and optional security tax domicile, and convert/debit the purchase cost from the chosen EUR/USD/RON sub-account |
+| `PUT /api/holdings/{id}` / `DELETE /api/holdings/{id}` | Update position details and optional security tax domicile and apply the converted cost-basis difference, or remove it and restore its recorded funding-currency cost |
 | `POST /api/holdings/{id}/sell` | Record a sale of all or part of a position at a user-entered after-tax price per unit in the holding's currency; credits proceeds to that currency's wallet in the same account (idempotent via `idempotency_key`; employer-plan holdings cannot be sold) |
 | `POST /api/holdings/{id}/transfer` | Move all or part of a position to another account the user owns; merges into an existing position of the same instrument there. An optional fiat fee can be deducted from the source or destination wallet. No cash moves for the shares. Holdings linked to a goal cannot be moved (idempotent via `idempotency_key`; employer-plan holdings cannot be moved) |
 | `POST /api/cash-transfers` | Move cash between two of the user's wallets (for example XTB EUR to ING RON); same-currency transfers move the same amount, cross-currency transfers take a user-entered received amount with no automatic FX. An optional fiat fee can be deducted from the source or destination wallet. No trade or cash-flow record is created. Idempotent via `idempotency_key`; employer-plan wallets are not allowed |
@@ -105,7 +114,7 @@ API tests use isolated SQLite temporary databases; the Docker stack uses Postgre
 | `POST /api/projections/portfolio/scenario` | Compare that baseline with a hypothetical monthly contribution split across selected quoted holdings, using editable per-holding annual returns; returns the current qualitative X/Y/Z risk mix and explicit assumptions |
 | `GET /api/goals` / `POST /api/goals` | List or add a goal |
 | `PUT /api/goals/{id}` / `DELETE /api/goals/{id}` | Update a goal or archive it from the active plan |
-| `GET /api/goals/{id}/insights` | Insights for an active goal: value after estimated sale tax, bucket drift against the glide path, next-contribution routing, risk warnings, tax-aware sale proposals, projection bands, and recovery options. Returns `available: false` with a reason when the goal has no target amount or no future deadline |
+| `GET /api/goals/{id}/insights` | Insights for an active goal: value after estimated sale tax, bucket drift against the glide path, next-contribution routing, risk warnings, tax-aware sale proposals, projection bands, and recovery options. Tax rules are limited to supported country/year packs and their stated limitations. Returns `available: false` with a reason when the goal has no target amount or no future deadline |
 | `POST /api/deposits` / `DELETE /api/deposits/{id}` | Create a bank/savings term deposit funded from a selected currency wallet, or remove it and restore principal |
 | `PUT /api/goals/funding-shares` | Save fixed goal shares |
 | `GET /api/policy` / `PUT /api/policy` | Read or update reserve, target mix, and funding rule |

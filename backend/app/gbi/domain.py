@@ -30,8 +30,12 @@ class Holding:
     beta: float | None = None
     custom_yield: float | None = None
     dividend_yield: float | None = None
+    distribution_tax_rate: float | None = None
     is_tax_advantaged: bool = False
     capital_gains_rate: float | None = None
+    short_term_capital_gains_rate: float | None = None
+    long_term_capital_gains_rate: float | None = None
+    long_term_holding_period_days: int = 365
 
 
 @dataclass(frozen=True)

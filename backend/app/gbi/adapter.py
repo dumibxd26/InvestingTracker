@@ -1,23 +1,34 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.calculations import fixed_deposit_value
-from app.gbi.constants import CURRENCY_INFLATION_PARITY, DEFAULT_BENCHMARK_CATALOG, CatalogSecurity
+from app.gbi.constants import (
+    CMA_CONFIG,
+    CURRENCY_INFLATION_PARITY,
+    DEFAULT_BENCHMARK_CATALOG,
+    CatalogSecurity,
+)
 from app.gbi.domain import AllocatedHolding, GoalSpec, Holding, TaxInflationProfile, TaxLot
 from app.gbi.drift import SpotRate
 from app.models import (
+    BrokerAccount,
     FixedDeposit,
     Goal,
     GoalDepositAllocation,
     GoalHoldingAllocation,
     Instrument,
     MarketPriceCache,
+    TaxReportingMethod,
+    User,
 )
 from app.models import Holding as HoldingModel
+from app.taxes.engine import TaxEstimate, estimate_capital_gain_tax, estimate_income_tax
+from app.taxes.rules import get_country_tax_rules
 
 DIVIDEND_AND_INTEREST_TAX_RATE = 0.10
 SHORT_TERM_BOND_ETFS = frozenset({"SGOV", "BIL", "XEON", "SHV", "TBIL", "ULST"})
@@ -67,6 +78,32 @@ def _latest_quotes(session: Session, instrument_ids: set) -> dict:
     return latest
 
 
+def _estimate_capital_gain(
+    *,
+    holding: HoldingModel,
+    quote: MarketPriceCache,
+    user: User,
+    account: BrokerAccount,
+    acquired_on: date,
+    sold_on: date,
+    legacy_rate: Decimal,
+    tax_exempt: bool,
+) -> TaxEstimate:
+    return estimate_capital_gain_tax(
+        gross_proceeds=holding.quantity * quote.price,
+        cost_basis=holding.quantity * holding.average_cost,
+        acquired_on=acquired_on,
+        sold_on=sold_on,
+        country_code=user.tax_residence_country_code,
+        tax_year=user.tax_year,
+        intermediary_country_code=account.broker_country_code,
+        reporting_method=str(account.tax_reporting_method),
+        manual_rate=holding.sale_tax_rate,
+        legacy_rate=legacy_rate,
+        tax_exempt=tax_exempt,
+    )
+
+
 def load_allocated_holdings(
     session: Session,
     goal: Goal,
@@ -79,14 +116,25 @@ def load_allocated_holdings(
     allocations: list[AllocatedHolding] = []
 
     holding_rows = session.execute(
-        select(GoalHoldingAllocation.allocated_percentage, HoldingModel, Instrument)
+        select(
+            GoalHoldingAllocation.allocated_percentage,
+            HoldingModel,
+            Instrument,
+            BrokerAccount,
+        )
         .join(HoldingModel, HoldingModel.id == GoalHoldingAllocation.holding_id)
         .join(Instrument, Instrument.id == HoldingModel.instrument_id)
+        .join(BrokerAccount, BrokerAccount.id == HoldingModel.account_id)
         .where(GoalHoldingAllocation.goal_id == goal.id)
         .order_by(Instrument.symbol)
     ).all()
-    quotes = _latest_quotes(session, {instrument.id for _, _, instrument in holding_rows})
-    for percentage, holding, instrument in holding_rows:
+    quotes = _latest_quotes(
+        session, {instrument.id for _, _, instrument, _ in holding_rows}
+    )
+    user = session.get(User, goal.user_id)
+    if user is None:
+        raise ValueError("Goal owner was not found while building tax assumptions")
+    for percentage, holding, instrument, account in holding_rows:
         quote = quotes.get(instrument.id)
         if quote is None:
             notes.append(
@@ -103,6 +151,54 @@ def load_allocated_holdings(
             cost_basis_per_unit=float(holding.average_cost),
             purchase_fx_rate_to_goal=spot_rate(cost_currency, goal_currency),
         )
+        account_tax_exempt = (
+            account.tax_reporting_method == TaxReportingMethod.TAX_EXEMPT
+        )
+        default_gain_rate = Decimal(str(default_capital_gains_rate))
+        rule_pack = get_country_tax_rules(user.tax_residence_country_code, user.tax_year)
+        long_term_days = rule_pack.local_long_term_days if rule_pack else 365
+        capital_gains = _estimate_capital_gain(
+            holding=holding,
+            quote=quote,
+            user=user,
+            account=account,
+            acquired_on=holding.purchase_date,
+            sold_on=today,
+            legacy_rate=default_gain_rate,
+            tax_exempt=account_tax_exempt,
+        )
+        short_term_capital_gains = _estimate_capital_gain(
+            holding=holding,
+            quote=quote,
+            user=user,
+            account=account,
+            acquired_on=today - timedelta(days=max(0, long_term_days - 1)),
+            sold_on=today,
+            legacy_rate=default_gain_rate,
+            tax_exempt=account_tax_exempt,
+        )
+        long_term_capital_gains = _estimate_capital_gain(
+            holding=holding,
+            quote=quote,
+            user=user,
+            account=account,
+            acquired_on=today - timedelta(days=long_term_days),
+            sold_on=today,
+            legacy_rate=default_gain_rate,
+            tax_exempt=account_tax_exempt,
+        )
+        distribution = estimate_income_tax(
+            event_type="dividend",
+            gross_amount=Decimal("1"),
+            country_code=user.tax_residence_country_code,
+            tax_year=user.tax_year,
+            source_country_code=holding.tax_domicile_country_code,
+            reporting_method=str(account.tax_reporting_method),
+            legacy_rate=Decimal(str(DIVIDEND_AND_INTEREST_TAX_RATE)),
+            tax_exempt=account_tax_exempt,
+        )
+        notes.extend(capital_gains.warnings)
+        notes.extend(distribution.warnings)
         allocations.append(
             AllocatedHolding(
                 holding=Holding(
@@ -122,21 +218,45 @@ def load_allocated_holdings(
                     else trading_currency,
                     is_currency_hedged=catalog.is_currency_hedged if catalog else False,
                     tax_lots=[lot],
-                    capital_gains_rate=float(holding.sale_tax_rate)
-                    if holding.sale_tax_rate is not None
-                    else default_capital_gains_rate,
+                    distribution_tax_rate=float(
+                        distribution.rate
+                        if distribution.rate is not None
+                        else Decimal(str(DIVIDEND_AND_INTEREST_TAX_RATE))
+                    ),
+                    is_tax_advantaged=account_tax_exempt,
+                    capital_gains_rate=float(
+                        capital_gains.rate
+                        if capital_gains.rate is not None
+                        else default_gain_rate
+                    ),
+                    short_term_capital_gains_rate=float(
+                        short_term_capital_gains.rate
+                        if short_term_capital_gains.rate is not None
+                        else default_gain_rate
+                    ),
+                    long_term_capital_gains_rate=float(
+                        long_term_capital_gains.rate
+                        if long_term_capital_gains.rate is not None
+                        else default_gain_rate
+                    ),
+                    long_term_holding_period_days=long_term_days,
                 ),
                 allocated_percentage=float(percentage),
             )
         )
 
     deposit_rows = session.execute(
-        select(GoalDepositAllocation.allocated_percentage, FixedDeposit)
+        select(
+            GoalDepositAllocation.allocated_percentage,
+            FixedDeposit,
+            BrokerAccount,
+        )
         .join(FixedDeposit, FixedDeposit.id == GoalDepositAllocation.fixed_deposit_id)
+        .join(BrokerAccount, BrokerAccount.id == FixedDeposit.account_id)
         .where(GoalDepositAllocation.goal_id == goal.id)
         .order_by(FixedDeposit.name)
     ).all()
-    for percentage, deposit in deposit_rows:
+    for percentage, deposit, account in deposit_rows:
         valuation_date = max(deposit.start_date, min(today, deposit.maturity_date))
         value = fixed_deposit_value(
             deposit.principal,
@@ -155,6 +275,20 @@ def load_allocated_holdings(
             cost_basis_per_unit=float(deposit.principal),
             purchase_fx_rate_to_goal=spot_rate(deposit_currency, goal_currency),
         )
+        account_tax_exempt = (
+            account.tax_reporting_method == TaxReportingMethod.TAX_EXEMPT
+        )
+        interest_tax = estimate_income_tax(
+            event_type="interest",
+            gross_amount=Decimal("1"),
+            country_code=user.tax_residence_country_code,
+            tax_year=user.tax_year,
+            source_country_code=account.broker_country_code,
+            reporting_method=str(account.tax_reporting_method),
+            legacy_rate=Decimal(str(DIVIDEND_AND_INTEREST_TAX_RATE)),
+            tax_exempt=account_tax_exempt,
+        )
+        notes.extend(interest_tax.warnings)
         allocations.append(
             AllocatedHolding(
                 holding=Holding(
@@ -170,6 +304,12 @@ def load_allocated_holdings(
                     tax_lots=[lot],
                     custom_yield=rate,
                     dividend_yield=rate,
+                    distribution_tax_rate=float(
+                        interest_tax.rate
+                        if interest_tax.rate is not None
+                        else Decimal(str(DIVIDEND_AND_INTEREST_TAX_RATE))
+                    ),
+                    is_tax_advantaged=account_tax_exempt,
                     capital_gains_rate=0.0,
                 ),
                 allocated_percentage=float(percentage),
@@ -188,7 +328,10 @@ def build_goal_spec(
     """Build the engine goal, weighting the capital-gains rate by each holding's value."""
     goal_currency = goal.target_currency.value
     total_value = 0.0
-    weighted_rate = 0.0
+    weighted_short_term_rate = 0.0
+    weighted_long_term_rate = 0.0
+    distribution_yield_value = 0.0
+    distribution_tax_weighted = 0.0
     for item in allocations:
         holding = item.holding
         value = (
@@ -198,24 +341,56 @@ def build_goal_spec(
             / 100.0
             * spot_rate(holding.trading_currency, goal_currency)
         )
-        rate = (
-            holding.capital_gains_rate
+        short_term_rate = (
+            holding.short_term_capital_gains_rate
+            if holding.short_term_capital_gains_rate is not None
+            else holding.capital_gains_rate
+            if holding.capital_gains_rate is not None
+            else default_capital_gains_rate
+        )
+        long_term_rate = (
+            holding.long_term_capital_gains_rate
+            if holding.long_term_capital_gains_rate is not None
+            else holding.capital_gains_rate
             if holding.capital_gains_rate is not None
             else default_capital_gains_rate
         )
         total_value += value
-        weighted_rate += value * rate
-    capital_gains_rate = (
-        weighted_rate / total_value if total_value > 0 else default_capital_gains_rate
+        weighted_short_term_rate += value * short_term_rate
+        weighted_long_term_rate += value * long_term_rate
+        assumption = CMA_CONFIG[holding.asset_class]
+        distribution_yield = (
+            holding.dividend_yield
+            if holding.dividend_yield is not None
+            else assumption.dividend_yield
+        )
+        distribution_exposure = value * distribution_yield
+        distribution_rate = (
+            holding.distribution_tax_rate
+            if holding.distribution_tax_rate is not None
+            else DIVIDEND_AND_INTEREST_TAX_RATE
+        )
+        distribution_yield_value += distribution_exposure
+        distribution_tax_weighted += distribution_exposure * distribution_rate
+    short_term_capital_gains_rate = (
+        weighted_short_term_rate / total_value if total_value > 0 else default_capital_gains_rate
+    )
+    long_term_capital_gains_rate = (
+        weighted_long_term_rate / total_value if total_value > 0 else default_capital_gains_rate
+    )
+    distribution_tax_rate = (
+        distribution_tax_weighted / distribution_yield_value
+        if distribution_yield_value > 0
+        else DIVIDEND_AND_INTEREST_TAX_RATE
     )
 
     profile = TaxInflationProfile(
         annual_inflation_rate=CURRENCY_INFLATION_PARITY[goal_currency],
         is_target_in_todays_dollars=True,
         index_contributions_to_inflation=False,
-        short_term_cap_gains_rate=capital_gains_rate,
-        long_term_cap_gains_rate=capital_gains_rate,
-        dividend_and_interest_tax_rate=DIVIDEND_AND_INTEREST_TAX_RATE,
+        short_term_cap_gains_rate=short_term_capital_gains_rate,
+        long_term_cap_gains_rate=long_term_capital_gains_rate,
+        dividend_and_interest_tax_rate=distribution_tax_rate,
         annual_tax_free_allowance=0.0,
     )
     return GoalSpec(

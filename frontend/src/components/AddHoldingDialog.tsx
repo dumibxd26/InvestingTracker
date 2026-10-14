@@ -42,6 +42,7 @@ export function AddHoldingDialog({
   const [averageCost, setAverageCost] = useState("");
   const [averageCostCurrency, setAverageCostCurrency] = useState<Currency | null>(null);
   const [purchaseDate, setPurchaseDate] = useState(localDateValue());
+  const [taxDomicileCountryCode, setTaxDomicileCountryCode] = useState("");
   const selectedAccount = eligibleAccounts.find((account) => account.id === accountId);
   const selectedSubaccount = selectedAccount?.subaccounts.find(
     (subaccount) => subaccount.id === subaccountId,
@@ -106,6 +107,7 @@ export function AddHoldingDialog({
         average_cost: averageCost,
         average_cost_currency: averageCostCurrency ?? selected.currency,
         purchase_date: purchaseDate,
+        tax_domicile_country_code: taxDomicileCountryCode.trim().toUpperCase() || null,
       });
       await onCreated();
       onClose();
@@ -160,6 +162,7 @@ export function AddHoldingDialog({
                   onChange={(event) => {
                     setSelected(null);
                     setAverageCostCurrency(null);
+                    setTaxDomicileCountryCode("");
                     setQuery(event.target.value);
                   }}
                   placeholder="Company or ticker · e.g. Microsoft or MSFT"
@@ -173,6 +176,7 @@ export function AddHoldingDialog({
                     onClick={() => {
                       setSelected(null);
                       setQuery("");
+                      setTaxDomicileCountryCode("");
                     }}
                   >
                     <X size={14} />
@@ -324,6 +328,23 @@ export function AddHoldingDialog({
                     value={purchaseDate}
                     onChange={(event) => setPurchaseDate(event.target.value)}
                   />
+                </label>
+                <label className="form-field">
+                  <span>Security tax domicile · optional ISO country code</span>
+                  <input
+                    value={taxDomicileCountryCode}
+                    onChange={(event) =>
+                      setTaxDomicileCountryCode(event.target.value.toUpperCase())
+                    }
+                    minLength={2}
+                    maxLength={2}
+                    pattern="[A-Z]{2}"
+                    placeholder="e.g. US or IE"
+                  />
+                  <small>
+                    Enter the issuer or fund domicile, not the exchange country. Leave blank if
+                    unknown; cross-border tax estimates will use a clearly labeled fallback.
+                  </small>
                 </label>
                 {(!selectedAccount || selectedAccount.subaccounts.length === 0) && (
                   <div className="inline-error" role="status">

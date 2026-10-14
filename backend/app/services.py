@@ -65,6 +65,7 @@ from app.models import (
     StockPurchasePlan,
     StockSale,
     StockTransfer,
+    TaxReportingMethod,
     TrancheStatus,
     User,
     ValuationSnapshot,
@@ -76,6 +77,7 @@ from app.schemas import (
     AccountSubaccountCreate,
     AccountSubaccountSummary,
     AccountSummary,
+    AccountTaxProfileUpdate,
     AccountWealthSummary,
     AllocationSummary,
     AuthResponse,
@@ -135,6 +137,8 @@ from app.schemas import (
     VestingTrancheSummary,
 )
 from app.security import create_access_token, digest_access_token, hash_password, verify_password
+from app.taxes.engine import estimate_capital_gain_tax
+from app.taxes.rules import country_rule_status, get_country_tax_rules
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
@@ -618,6 +622,8 @@ async def create_holding(
         if payload.expected_annual_return is not None:
             holding.expected_annual_return = payload.expected_annual_return
 
+    if payload.tax_domicile_country_code is not None:
+        holding.tax_domicile_country_code = payload.tax_domicile_country_code.upper()
     funding_subaccount.cash_balance -= funding_cost
     session.add(
         MarketPriceCache(
@@ -872,6 +878,11 @@ async def initialize_portfolio(
                         else Decimal("0.05")
                     )
                 ),
+                tax_domicile_country_code=(
+                    holding_request.tax_domicile_country_code.upper()
+                    if holding_request.tax_domicile_country_code
+                    else None
+                ),
                 funding_cost=ZERO,
             )
         )
@@ -995,6 +1006,12 @@ def update_holding(
         holding.risk_tier = payload.risk_tier
     if payload.expected_annual_return is not None:
         holding.expected_annual_return = payload.expected_annual_return
+    if "tax_domicile_country_code" in payload.model_fields_set:
+        holding.tax_domicile_country_code = (
+            payload.tax_domicile_country_code.upper()
+            if payload.tax_domicile_country_code is not None
+            else None
+        )
     session.commit()
 
 
@@ -1526,9 +1543,14 @@ def transfer_stock(
             expected_annual_return=holding.expected_annual_return,
             funding_cost=ZERO,
             sale_tax_rate=holding.sale_tax_rate,
+            tax_domicile_country_code=holding.tax_domicile_country_code,
         )
         session.add(destination_holding)
     else:
+        if destination_holding.tax_domicile_country_code is None:
+            destination_holding.tax_domicile_country_code = (
+                holding.tax_domicile_country_code
+            )
         total_quantity = destination_holding.quantity + quantity
         destination_holding.average_cost = (
             destination_holding.quantity * destination_holding.average_cost
@@ -1748,13 +1770,43 @@ def _target_weights(policy: AllocationPolicy) -> dict[str, Decimal]:
 
 
 def _profile_response(user: User) -> UserProfileResponse:
+    tax_rules = get_country_tax_rules(user.tax_residence_country_code, user.tax_year)
     return UserProfileResponse(
         id=user.id,
         username=user.username or "",
         display_name=user.display_name,
         base_currency=user.base_currency,
         usd_per_eur=user.usd_per_eur,
+        tax_residence_country_code=user.tax_residence_country_code,
+        tax_year=user.tax_year,
+        tax_minimum_monthly_wage=user.tax_minimum_monthly_wage,
+        tax_rules_status=country_rule_status(
+            user.tax_residence_country_code, user.tax_year
+        ),
+        tax_rule_version=tax_rules.version if tax_rules is not None else None,
+        tax_rule_sources=list(tax_rules.source_urls) if tax_rules is not None else [],
+        tax_rule_limitations=list(tax_rules.limitations) if tax_rules is not None else [],
     )
+
+
+def _tax_profile_warnings(user: User) -> list[str]:
+    country_code = user.tax_residence_country_code
+    tax_year = user.tax_year
+    if country_code is None or tax_year is None:
+        return [
+            "Tax residence is not configured. Legacy/manual tax estimates remain in use and "
+            "are not country-specific."
+        ]
+    rule_pack = get_country_tax_rules(country_code, tax_year)
+    if rule_pack is None:
+        return [
+            f"No built-in tax rules are available for {country_code}/{tax_year}. "
+            "Legacy/manual estimates are not a substitute for that country's tax rules."
+        ]
+    return [
+        f"Tax rule pack {rule_pack.version} is {rule_pack.status} and is not tax advice.",
+        *rule_pack.limitations,
+    ]
 
 
 def get_policy_response(session: Session, user_id: uuid.UUID) -> PolicyResponse:
@@ -1825,6 +1877,8 @@ def list_accounts(session: Session, user_id: uuid.UUID) -> list[AccountSummary]:
             display_name=account.display_name,
             provider_code=account.provider_code,
             account_type=account.account_type,
+            broker_country_code=account.broker_country_code,
+            tax_reporting_method=account.tax_reporting_method,
             currency=(subaccounts_by_account[account.id][0].currency),
             cash_balance=(subaccounts_by_account[account.id][0].cash_balance),
             position_count=position_counts.get(account.id, 0),
@@ -1858,6 +1912,8 @@ def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate)
         provider_code=payload.provider_code,
         display_name=payload.display_name,
         account_type=payload.account_type,
+        broker_country_code=payload.broker_country_code,
+        tax_reporting_method=payload.tax_reporting_method,
     )
     session.add(account)
     try:
@@ -1885,11 +1941,37 @@ def create_account(session: Session, user_id: uuid.UUID, payload: AccountCreate)
         display_name=account.display_name,
         provider_code=account.provider_code,
         account_type=account.account_type,
+        broker_country_code=account.broker_country_code,
+        tax_reporting_method=account.tax_reporting_method,
         currency=primary_subaccount.currency,
         cash_balance=primary_subaccount.cash_balance,
         position_count=0,
         is_sample=False,
         subaccounts=[_subaccount_summary(primary_subaccount)],
+    )
+
+
+def update_account_tax_profile(
+    session: Session,
+    user_id: uuid.UUID,
+    account_id: uuid.UUID,
+    payload: AccountTaxProfileUpdate,
+) -> AccountSummary:
+    user = _get_user(session, user_id)
+    account = session.scalar(
+        select(BrokerAccount).where(
+            BrokerAccount.id == account_id,
+            BrokerAccount.user_id == user.id,
+        )
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account was not found")
+    if "broker_country_code" in payload.model_fields_set:
+        account.broker_country_code = payload.broker_country_code
+    account.tax_reporting_method = payload.tax_reporting_method
+    session.commit()
+    return next(
+        item for item in list_accounts(session, user.id) if item.id == account.id
     )
 
 
@@ -2262,6 +2344,20 @@ def update_profile(
     user.display_name = payload.display_name
     user.base_currency = payload.base_currency
     user.usd_per_eur = payload.usd_per_eur
+    tax_period_changed = (
+        "tax_residence_country_code" in payload.model_fields_set
+        and payload.tax_residence_country_code != user.tax_residence_country_code
+    ) or ("tax_year" in payload.model_fields_set and payload.tax_year != user.tax_year)
+    if "tax_residence_country_code" in payload.model_fields_set:
+        user.tax_residence_country_code = payload.tax_residence_country_code
+    if "tax_year" in payload.model_fields_set:
+        user.tax_year = payload.tax_year
+    if user.tax_residence_country_code is None or user.tax_year is None:
+        user.tax_minimum_monthly_wage = None
+    elif "tax_minimum_monthly_wage" in payload.model_fields_set:
+        user.tax_minimum_monthly_wage = payload.tax_minimum_monthly_wage
+    elif tax_period_changed:
+        user.tax_minimum_monthly_wage = None
     session.commit()
     session.refresh(user)
     return _profile_response(user)
@@ -3685,6 +3781,25 @@ def dashboard(
         instrument.is_demo for _, instrument, _, _ in holding_rows
     )
     warnings: list[str] = list(purchase_plan_warnings)
+    has_fixed_deposits = session.scalar(
+        select(FixedDeposit.id)
+        .where(FixedDeposit.user_id == user.id)
+        .limit(1)
+    ) is not None
+    has_interest_bearing_accounts = session.scalar(
+        select(AccountSubaccount.id)
+        .join(BrokerAccount, BrokerAccount.id == AccountSubaccount.account_id)
+        .where(
+            BrokerAccount.user_id == user.id,
+            AccountSubaccount.annual_interest_rate.is_not(None),
+        )
+        .limit(1)
+    ) is not None
+    has_vesting_grants = session.scalar(
+        select(VestingGrant.id).where(VestingGrant.user_id == user.id).limit(1)
+    ) is not None
+    if holding_rows or has_fixed_deposits or has_interest_bearing_accounts or has_vesting_grants:
+        warnings.extend(_tax_profile_warnings(user))
     if sample_data:
         warnings.extend(
             [
@@ -3720,17 +3835,24 @@ def dashboard(
             usd_per_eur,
             fx_rates,
         )
-        taxable_gain = max(
-            ZERO,
-            native_value - holding.quantity * holding.average_cost,
+        tax_estimate = estimate_capital_gain_tax(
+            gross_proceeds=native_value,
+            cost_basis=holding.quantity * holding.average_cost,
+            acquired_on=holding.purchase_date,
+            sold_on=today,
+            country_code=user.tax_residence_country_code,
+            tax_year=user.tax_year,
+            intermediary_country_code=account.broker_country_code,
+            reporting_method=str(account.tax_reporting_method),
+            manual_rate=holding.sale_tax_rate,
+            legacy_rate=DEFAULT_SALE_TAX_RATE,
+            tax_exempt=account.tax_reporting_method == TaxReportingMethod.TAX_EXEMPT,
         )
-        sale_tax_rate = (
-            holding.sale_tax_rate
-            if holding.sale_tax_rate is not None
-            else DEFAULT_SALE_TAX_RATE
-        )
+        warnings.extend(tax_estimate.warnings)
+        sale_tax_rate = tax_estimate.rate or ZERO
+        sale_tax_native = tax_estimate.tax_amount or ZERO
         sale_tax = _to_base(
-            taxable_gain * sale_tax_rate,
+            sale_tax_native,
             quote.currency,
             base_currency,
             usd_per_eur,
@@ -3777,6 +3899,7 @@ def dashboard(
                 mic_code=instrument.mic,
                 asset_class=instrument.asset_class,
                 instrument_type=instrument.instrument_type,
+                tax_domicile_country_code=holding.tax_domicile_country_code,
                 quantity=holding.quantity,
                 average_cost=holding.average_cost,
                 purchase_date=holding.purchase_date,
@@ -3808,6 +3931,7 @@ def dashboard(
                 estimated_gain_percent=estimated_gain_percent,
                 estimated_sale_tax=round_money(sale_tax),
                 estimated_tax_rate=sale_tax_rate,
+                estimated_tax_status=tax_estimate.status,
                 base_currency=base_currency,
                 is_demo=instrument.is_demo,
             )

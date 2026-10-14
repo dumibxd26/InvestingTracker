@@ -16,6 +16,9 @@ export function EditHoldingDialog({ holding, onClose, onSaved }: EditHoldingDial
     holding.price_currency,
   );
   const [purchaseDate, setPurchaseDate] = useState(holding.purchase_date);
+  const [taxDomicileCountryCode, setTaxDomicileCountryCode] = useState(
+    holding.tax_domicile_country_code ?? "",
+  );
   const [riskTier, setRiskTier] = useState<"X" | "Y" | "Z">(holding.risk_tier);
   const [expectedReturnPercent, setExpectedReturnPercent] = useState(
     String(Number(holding.expected_annual_return) * 100),
@@ -33,6 +36,7 @@ export function EditHoldingDialog({ holding, onClose, onSaved }: EditHoldingDial
         average_cost: averageCost,
         average_cost_currency: averageCostCurrency,
         purchase_date: purchaseDate,
+        tax_domicile_country_code: taxDomicileCountryCode.trim().toUpperCase() || null,
         risk_tier: riskTier,
         expected_annual_return: String(Number(expectedReturnPercent) / 100),
       });
@@ -145,6 +149,23 @@ export function EditHoldingDialog({ holding, onClose, onSaved }: EditHoldingDial
               value={purchaseDate}
               onChange={(event) => setPurchaseDate(event.target.value)}
             />
+          </label>
+          <label className="form-field">
+            <span>Security tax domicile · optional ISO country code</span>
+            <input
+              value={taxDomicileCountryCode}
+              onChange={(event) =>
+                setTaxDomicileCountryCode(event.target.value.toUpperCase())
+              }
+              minLength={2}
+              maxLength={2}
+              pattern="[A-Z]{2}"
+              placeholder="e.g. US or IE"
+            />
+            <small>
+              Enter the issuer or fund domicile, not the exchange country. Leave blank if
+              unknown; cross-border tax estimates will use a clearly labeled fallback.
+            </small>
           </label>
           {error && <div className="inline-error" role="alert">{error}</div>}
           <div className="modal-actions">

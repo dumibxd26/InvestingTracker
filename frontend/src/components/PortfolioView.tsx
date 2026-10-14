@@ -64,6 +64,19 @@ function timestamp(value: string): string {
   }).format(date);
 }
 
+function taxEstimateLabel(status: string): string {
+  switch (status) {
+    case "country_rule_estimate":
+      return "country-rule estimate";
+    case "manual_override":
+      return "manual rate";
+    case "tax_exempt":
+      return "tax-exempt account";
+    default:
+      return "legacy/manual, not country-specific";
+  }
+}
+
 export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   const [holdingDialogOpen, setHoldingDialogOpen] = useState(false);
@@ -506,6 +519,12 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                     {amount(holding.market_value, currency)}
                     <small className="quote-timestamp">
                       Gross {amount(holding.gross_market_value, currency)} · est. tax {amount(holding.estimated_sale_tax, currency)} ({(Number(holding.estimated_tax_rate) * 100).toFixed(0)}% of positive gain)
+                    </small>
+                    <small className="quote-timestamp">
+                      {taxEstimateLabel(holding.estimated_tax_status)}
+                      {holding.tax_domicile_country_code
+                        ? ` · domicile ${holding.tax_domicile_country_code}`
+                        : " · domicile unknown"}
                     </small>
                   </td>
                   <td className={`align-right tabular ${holding.change_since_refresh_percent === null ? "" : Number(holding.change_since_refresh_percent) >= 0 ? "positive-text" : "negative-text"}`}>

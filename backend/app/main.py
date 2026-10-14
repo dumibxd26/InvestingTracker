@@ -19,6 +19,7 @@ from app.schemas import (
     AccountSubaccountCreate,
     AccountSubaccountSummary,
     AccountSummary,
+    AccountTaxProfileUpdate,
     AuthResponse,
     CashFlowScheduleCreate,
     CashFlowScheduleResponse,
@@ -101,6 +102,7 @@ from app.services import (
     sell_holding,
     transfer_cash,
     transfer_stock,
+    update_account_tax_profile,
     update_fixed_shares,
     update_goal,
     update_holding,
@@ -268,6 +270,15 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> AccountSummary:
         return create_account(session, current_user.id, payload)
+
+    @app.put("/api/accounts/{account_id}/tax-profile", response_model=AccountSummary)
+    def put_account_tax_profile(
+        account_id: UUID,
+        payload: AccountTaxProfileUpdate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> AccountSummary:
+        return update_account_tax_profile(session, current_user.id, account_id, payload)
 
     @app.post(
         "/api/accounts/{account_id}/subaccounts",
