@@ -9,6 +9,7 @@ A local-first personal wealth tracker built with a React/TypeScript frontend, a 
 - **Backend:** Python 3.12, FastAPI, SQLAlchemy, Pydantic, and `Decimal` for financial calculations.
 - **Database:** PostgreSQL 18. Transactions, account relationships, and exact decimal values fit a relational model; MongoDB is not needed for this application.
 - **Frontend:** React 19, TypeScript, and Vite.
+- **Mobile:** Expo Router, React Native, and TypeScript for Android and iOS.
 - **Authentication:** Username/password registration and login, Argon2id password hashes, hashed bearer-session tokens, and API-level tenant filtering.
 - **AI:** Optional read-only OpenAI-compatible request using a key supplied for the current browser session. The app never stores the provider key or chat history.
 - **Appearance:** Light/dark theme switch, remembered in this browser.
@@ -20,6 +21,7 @@ For this personal MVP, Python makes the calculation and AI integration layers st
 - Username/password application account creation, sign-in/out, and per-user portfolios.
 - Blank personal workspaces with profile-specific display name, base currency, and cached provider FX rates or an optional manual USD-per-EUR reference.
 - Responsive dashboard with separate tracked wealth, invested assets, cash, fixed deposits, and unvested compensation.
+- Native Android and iOS app with secure sign-in storage, mobile navigation, portfolio and goal management, cash-flow tracking, equity plans, profile/tax settings, and the read-only assistant.
 - Manually managed brokerage, bank, savings, and employer-plan account registry; opening cash persists in PostgreSQL as the initial currency sub-account balance.
 - Multi-currency EUR/USD/RON cash sub-accounts under each bank or broker. Existing account currency and opening cash are migrated into its primary sub-account.
 - Guided initial portfolio setup to enter multiple institutions and current currency balances plus already-owned stock/ETF positions in one atomic save. Average cost defaults to the instrument's listing currency and can be overridden.
@@ -68,7 +70,7 @@ Country-rule estimates are not a tax return or professional advice. Holdings cur
 
 4. Open [http://localhost:5173](http://localhost:5173) for the application and [http://localhost:8000/docs](http://localhost:8000/docs) for the API.
 
-The database, API, and frontend ports are bound to `127.0.0.1`. Alembic applies versioned schema migrations before the API starts. PostgreSQL 18 persists data in the named `postgres_data` volume mounted at `/var/lib/postgresql`. Application users, account records, profile settings, goals, and cash flows survive `docker compose restart`, container recreation, and `docker compose down` followed by `docker compose up`. `docker compose down -v` deliberately deletes the database volume and all stored data.
+The database, API, and frontend ports are bound to `127.0.0.1` by default. For a physical phone on a trusted private LAN, set `API_BIND_ADDRESS=0.0.0.0` in `.env` and restart the backend; do not expose this local prototype to the public internet. Alembic applies versioned schema migrations before the API starts. PostgreSQL 18 persists data in the named `postgres_data` volume mounted at `/var/lib/postgresql`. Application users, account records, profile settings, goals, and cash flows survive `docker compose restart`, container recreation, and `docker compose down` followed by `docker compose up`. `docker compose down -v` deliberately deletes the database volume and all stored data.
 
 Do not wipe the existing volume. Existing records from the earlier shared sample/demo profile are preserved in the database but are no longer exposed through authenticated application APIs. They are not assigned automatically to the first registered person, which avoids exposing one person's legacy records to another. New registrations start with a blank portfolio.
 
@@ -81,6 +83,18 @@ npm run dev
 ```
 
 The API and PostgreSQL services must still be running at `http://localhost:8000`.
+
+### Run the React Native app
+
+The Expo app lives in `mobile/` and uses the same authenticated API and database as the web app.
+
+```powershell
+cd mobile
+npm install
+npm start
+```
+
+Scan the Expo QR code with Expo Go, or press `a`/`i` to launch an Android/iOS simulator. Android emulators use `http://10.0.2.2:8000/api` automatically; iOS simulators use `http://localhost:8000/api`. For a physical phone, copy `mobile/.env.example` to `mobile/.env`, set `EXPO_PUBLIC_API_BASE_URL` to `http://<computer-lan-ip>:8000/api`, and set `API_BIND_ADDRESS=0.0.0.0` in the repository `.env`; then run `docker compose up -d backend` from the repository root. Keep the API restricted to a trusted local network; the prototype does not provide HTTPS or production network hardening.
 
 ### Run backend tests
 
