@@ -91,6 +91,7 @@ def test_personal_financial_endpoints_require_a_valid_application_session(tmp_pa
             client.get("/api/profile"),
             client.get("/api/dashboard"),
             client.get("/api/accounts"),
+            client.get(f"/api/accounts/{uuid4()}/broker-transactions"),
             client.get("/api/goals"),
             client.get("/api/policy"),
             client.get("/api/cash-flows"),
@@ -3249,3 +3250,168 @@ def test_security_tax_domicile_is_scoped_to_each_users_holding(monkeypatch, tmp_
     assert second_holding.status_code == 201, second_holding.text
     assert first_domicile == "US"
     assert second_domicile == "IE"
+
+
+def test_xtb_history_import_previews_deduplicates_and_never_changes_balances(tmp_path) -> None:
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    closed = workbook.active
+    closed.title = "Closed Positions"
+    closed.append(
+        [
+            "Ticket",
+            "Instrument",
+            "Type",
+            "Open time",
+            "Close time",
+            "Volume",
+            "Open price",
+            "Close price",
+            "Instrument type",
+            "Currency",
+            "Commission",
+            "Swap",
+            "Taxes",
+            "Profit",
+        ]
+    )
+    closed.append(
+        [
+            41234,
+            "AAPL.US",
+            "Buy",
+            datetime(2025, 6, 1, 10, 30),
+            datetime(2026, 7, 1, 14, 15),
+            2,
+            100,
+            120,
+            "Stock",
+            "EUR",
+            -1,
+            0,
+            0,
+            39,
+        ]
+    )
+    cash = workbook.create_sheet("Cash Operations")
+    cash.append(["Date", "Type", "Amount", "Currency", "Balance", "Reference"])
+    cash.append(
+        [
+            datetime(2026, 2, 2, 9, 0),
+            "Dividend",
+            2.5,
+            "EUR",
+            1002.5,
+            "DIV-22",
+        ]
+    )
+    stream = BytesIO()
+    workbook.save(stream)
+    report_bytes = stream.getvalue()
+
+    with create_test_client(tmp_path) as client:
+        profile = client.put(
+            "/api/profile",
+            json={
+                "display_name": "Test user",
+                "base_currency": "EUR",
+                "tax_residence_country_code": "RO",
+                "tax_year": 2026,
+            },
+        )
+        account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "XTB brokerage",
+                "provider_code": "XTB",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "1000",
+                "broker_country_code": "RO",
+                "tax_reporting_method": "withholding_agent",
+            },
+        )
+        account_id = account.json()["id"]
+        initial_dashboard = client.get("/api/dashboard").json()
+        preview = client.post(
+            f"/api/accounts/{account_id}/broker-imports/preview",
+            data={"stocks_etfs_only": "true"},
+            files={
+                "file": (
+                    "xStation-history.xlsx",
+                    report_bytes,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        imported = client.post(
+            f"/api/accounts/{account_id}/broker-imports",
+            data={
+                "stocks_etfs_only": "true",
+                "expected_sha256": preview.json()["content_sha256"],
+            },
+            files={
+                "file": (
+                    "xStation-history.xlsx",
+                    report_bytes,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        history = client.get(f"/api/accounts/{account_id}/broker-transactions")
+        repeated = client.post(
+            f"/api/accounts/{account_id}/broker-imports",
+            data={
+                "stocks_etfs_only": "true",
+                "expected_sha256": preview.json()["content_sha256"],
+            },
+            files={
+                "file": (
+                    "xStation-history.xlsx",
+                    report_bytes,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        final_dashboard = client.get("/api/dashboard").json()
+        deleted = client.delete(
+            f"/api/accounts/{account_id}/broker-imports/{imported.json()['batch_id']}"
+        )
+        after_delete = client.get(f"/api/accounts/{account_id}/broker-transactions")
+
+    assert profile.status_code == 200, profile.text
+    assert account.status_code == 201, account.text
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["transaction_count"] == 2
+    assert preview.json()["closed_position_count"] == 1
+    assert preview.json()["cash_operation_count"] == 1
+    assert preview.json()["duplicate_count"] == 0
+    assert any("does not change" in warning for warning in preview.json()["warnings"])
+    assert imported.status_code == 201, imported.text
+    assert imported.json()["imported_count"] == 2
+    assert imported.json()["duplicate_count"] == 0
+    assert history.status_code == 200, history.text
+    assert history.json()["total"] == 2
+    position = next(
+        item
+        for item in history.json()["transactions"]
+        if item["event_type"] == "closed_position"
+    )
+    assert position["symbol"] == "AAPL.US"
+    assert position["reported_profit"] == "39.00000000"
+    assert Decimal(position["estimated_tax"]) == Decimal("1.17")
+    assert position["estimated_tax_status"] == "country_rule_estimate"
+    assert len(position["tax_estimate_warnings"]) > 0
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["imported_count"] == 0
+    assert repeated.json()["duplicate_count"] == 2
+    assert final_dashboard["holdings"] == []
+    assert (
+        final_dashboard["totals"]["available_cash"]
+        == initial_dashboard["totals"]["available_cash"]
+    )
+    assert deleted.status_code == 204, deleted.text
+    assert after_delete.json()["total"] == 0

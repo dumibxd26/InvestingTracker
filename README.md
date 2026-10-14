@@ -40,7 +40,13 @@ Set `TWELVE_DATA_API_KEY` in `.env` to enable symbol search and refresh. The key
 
 Twelve Data is the initial provider adapter because it covers symbol discovery, quotes, and FX. Its current plan page describes the free Basic allowance as non-display, while an Individual Grow subscription (listed at $29/month when this integration was designed) permits internal personal-dashboard display. Check current price, market coverage, latency, and display rights before use: [Twelve Data pricing](https://twelvedata.com/pricing). Provider timestamps are shown in the UI and plan-specific delay may apply; this application does not claim every listing is real-time.
 
-Broker/bank connectors, transaction imports and reconciliation, a balanced accounting ledger and tax lots, historical TWR/IRR accounting, goal-to-position earmarking, instrument-level buy lists, automatic execution, password recovery/MFA, and production operational controls are not implemented.
+## XTB history import
+
+From an XTB account card, open **History** and drop in an xStation `.xlsx`, `.csv`, or `.zip` export. The importer previews recognized **Closed Positions** and **Cash Operations**, checks duplicate trades/cash rows, then stores normalized history rows. Export a full date range and one XTB account at a time; separate reports can be imported one after another. The app does not retain the source report file; it stores normalized transaction rows only.
+
+This is deliberately history-only: imports do not change account balances or the current holdings registry, avoiding double-counting positions already entered manually. If the report is explicitly marked as containing only real stocks/ETFs, the app shows an approximate per-trade tax estimate based on XTB-reported profit and the selected tax profile. It is not a reconciliation, a complete tax-lot ledger, or an annual tax calculation. Open positions remain in the holdings registry; unrecognized report layouts are rejected rather than silently imported.
+
+This first importer supports XTB only and uses file uploads rather than storing broker credentials or connecting to an account API. Other brokers need their own validated report adapters. Live broker/bank connections, full balance reconciliation, a complete transaction-level tax-lot ledger, historical TWR/IRR accounting, goal-to-position earmarking, instrument-level buy lists, automatic execution, password recovery/MFA, and production operational controls are not implemented.
 
 ## Tax handling status and limits
 
@@ -48,7 +54,7 @@ Tax estimates are keyed by the user's optional tax-residence country and tax yea
 
 The Romania pack currently models selected domestic investment-income rules: 16% dividend tax, 10% domestic bank-interest tax, 6%/3% gains withholding based on a 365-day holding period only when the account is marked as using a withholding agent **and** its broker country is set to Romania, and a 16% rate for annual self-assessment estimates. It records official source links and known limitations. The CASS helper implements the 6/12/24-minimum-wage threshold structure, but the application does not yet aggregate a complete tax-year ledger of eligible realized income, losses, exemptions, and other income categories; its result must not be treated as a filing calculation.
 
-Country-rule estimates are not a tax return or professional advice. Holdings currently have one average cost and purchase date rather than transaction-level tax lots, so FIFO and annual netting cannot be established. Foreign dividend withholding and treaty credits are not calculated. Stock sales still use the user-entered after-tax proceeds, and RSU/options/ESPP receipt and sale treatment remains a plan-specific assumption. These gaps are surfaced in the rule-pack limitations and estimate warnings rather than filled with unverified rates. The goal engine receives separate short- and long-term rates where the selected rule pack supplies them, but its projections still use the available simplified holding data.
+Country-rule estimates are not a tax return or professional advice. Holdings currently have one average cost and purchase date rather than transaction-level tax lots, so FIFO and annual netting cannot be established. Imported XTB profit values are broker-reported proxies; fees, withheld taxes, tax residence changes, and annual offsets need reconciliation. Foreign dividend withholding and treaty credits are not calculated. Stock sales still use the user-entered after-tax proceeds, and RSU/options/ESPP receipt and sale treatment remains a plan-specific assumption. These gaps are surfaced in the rule-pack limitations and estimate warnings rather than filled with unverified rates. The goal engine receives separate short- and long-term rates where the selected rule pack supplies them, but its projections still use the available simplified holding data.
 
 ## Run locally
 
@@ -99,6 +105,10 @@ API tests use isolated SQLite temporary databases; the Docker stack uses Postgre
 | `GET /api/dashboard?currency=EUR` | Signed-in user's aggregated snapshot |
 | `GET /api/accounts` / `POST /api/accounts` | List or add the signed-in user's financial accounts |
 | `PUT /api/accounts/{id}/tax-profile` | Set an account's broker country and tax-reporting method |
+| `POST /api/accounts/{id}/broker-imports/preview` | Preview an XTB `.xlsx`, `.csv`, or `.zip` history export without saving it |
+| `POST /api/accounts/{id}/broker-imports` | Import a previewed XTB report idempotently; saves closed-position and cash-operation history without changing balances or holdings |
+| `GET /api/accounts/{id}/broker-transactions` | List imported XTB activity, broker-reported profit, and any explicitly-scoped estimate |
+| `DELETE /api/accounts/{id}/broker-imports/{batch_id}` | Remove one imported history batch and its normalized rows |
 | `POST /api/accounts/{id}/subaccounts` | Add a EUR, USD, or RON cash sub-account to an institution |
 | `POST /api/portfolio/initialize` | Atomically initialize institutions and balances plus already-owned stock/ETF positions, including optional security tax domicile, without charging their costs again |
 | `DELETE /api/accounts/{id}` | Remove an account and its balance/assets from the tracker while preserving linked cash-flow history |

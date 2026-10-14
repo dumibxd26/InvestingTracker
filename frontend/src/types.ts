@@ -234,6 +234,66 @@ export interface StockSaleRecord {
   credited_subaccount_id: string;
 }
 
+export interface BrokerTransactionPreview {
+  row_number: number;
+  event_type: "closed_position" | "cash_operation";
+  event_at: string;
+  opened_at: string | null;
+  closed_at: string | null;
+  symbol: string | null;
+  description: string | null;
+  direction: string | null;
+  asset_type: string | null;
+  quantity: string | null;
+  open_price: string | null;
+  close_price: string | null;
+  amount: string | null;
+  currency_code: string;
+  commission: string | null;
+  swap: string | null;
+  taxes: string | null;
+  reported_profit: string | null;
+}
+
+export interface BrokerImportPreview {
+  content_sha256: string;
+  source_format: string;
+  transaction_count: number;
+  closed_position_count: number;
+  cash_operation_count: number;
+  duplicate_count: number;
+  stocks_etfs_only: boolean;
+  warnings: string[];
+  sample: BrokerTransactionPreview[];
+}
+
+export interface BrokerImportResult {
+  batch_id: string;
+  imported_count: number;
+  duplicate_count: number;
+  stocks_etfs_only: boolean;
+  warnings: string[];
+}
+
+export interface BrokerTransactionRecord extends Omit<BrokerTransactionPreview, "row_number"> {
+  id: string;
+  import_batch_id: string;
+  source_sheet: string;
+  broker_reference: string | null;
+  balance_after: string | null;
+  estimated_tax: string | null;
+  estimated_tax_rate: string | null;
+  estimated_tax_status: string;
+  tax_estimate_warnings: string[];
+}
+
+export interface BrokerTransactionList {
+  total: number;
+  offset: number;
+  limit: number;
+  transactions: BrokerTransactionRecord[];
+}
+
 export type TransferFeeSide = "SOURCE" | "DESTINATION";
 
 export interface TransferFeePayload {

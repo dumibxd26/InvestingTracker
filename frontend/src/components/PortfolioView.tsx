@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import {
   ArrowLeftRight,
   ArrowUpRight,
@@ -6,6 +6,7 @@ import {
   Building2,
   CircleDollarSign,
   Clock3,
+  History,
   Info,
   Pencil,
   Percent,
@@ -28,6 +29,12 @@ import { TransferCashDialog } from "./TransferCashDialog";
 import { TransferStockDialog } from "./TransferStockDialog";
 import { amount, assetLabel, dateLabel, number } from "../format";
 import type { AccountSummary, Currency, Dashboard, HoldingSummary } from "../types";
+
+const BrokerActivityDialog = lazy(() =>
+  import("./BrokerActivityDialog").then((module) => ({
+    default: module.BrokerActivityDialog,
+  })),
+);
 
 interface PortfolioViewProps {
   data: Dashboard;
@@ -90,6 +97,7 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [sellingHolding, setSellingHolding] = useState<HoldingSummary | null>(null);
   const [transferringHolding, setTransferringHolding] = useState<HoldingSummary | null>(null);
   const [transferDialog, setTransferDialog] = useState<{ sourceId?: string } | null>(null);
+  const [brokerActivityFor, setBrokerActivityFor] = useState<AccountSummary | null>(null);
   const [mutatingHoldingId, setMutatingHoldingId] = useState<string | null>(null);
   const [mutatingAccountId, setMutatingAccountId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -366,6 +374,17 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                   >
                     <Plus size={13} /> Currency
                   </button>
+                  {account.provider_code.toUpperCase() === "XTB" && (
+                    <button
+                      className="button button-quiet button-small"
+                      type="button"
+                      onClick={() => setBrokerActivityFor(account)}
+                      disabled={account.is_sample}
+                      title="Import and view XTB transaction history"
+                    >
+                      <History size={13} /> History
+                    </button>
+                  )}
                   {account.account_type !== "EMPLOYER_PLAN" && (
                     <button
                       className="button button-quiet button-small"
@@ -713,6 +732,23 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
             setAccountMessage(message);
           }}
         />
+      )}
+      {brokerActivityFor && (
+        <Suspense
+          fallback={
+            <div className="modal-backdrop">
+              <section className="modal-card broker-activity-dialog" role="status">
+                Loading broker history tools…
+              </section>
+            </div>
+          }
+        >
+          <BrokerActivityDialog
+            account={brokerActivityFor}
+            onClose={() => setBrokerActivityFor(null)}
+            onImported={onSaved}
+          />
+        </Suspense>
       )}
     </div>
   );

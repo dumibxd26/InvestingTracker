@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -10,6 +11,12 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.broker_imports import (
+    BrokerImportError,
+    ParsedBrokerReport,
+    ParsedBrokerTransaction,
+    parse_xtb_report,
+)
 from app.calculations import (
     compound_growth_factor,
     fixed_deposit_value,
@@ -38,6 +45,8 @@ from app.models import (
     AllocationPolicy,
     AssetClass,
     BrokerAccount,
+    BrokerImportBatch,
+    BrokerTransaction,
     CashFlow,
     CashFlowSchedule,
     CashTransfer,
@@ -81,6 +90,11 @@ from app.schemas import (
     AccountWealthSummary,
     AllocationSummary,
     AuthResponse,
+    BrokerImportPreviewResponse,
+    BrokerImportResponse,
+    BrokerTransactionListResponse,
+    BrokerTransactionPreview,
+    BrokerTransactionSummary,
     BucketAllocation,
     CashFlowScheduleCreate,
     CashFlowScheduleResponse,
@@ -1973,6 +1987,440 @@ def update_account_tax_profile(
     return next(
         item for item in list_accounts(session, user.id) if item.id == account.id
     )
+
+
+def _broker_import_account(
+    session: Session, user_id: uuid.UUID, account_id: uuid.UUID
+) -> BrokerAccount:
+    account = session.scalar(
+        select(BrokerAccount).where(
+            BrokerAccount.id == account_id,
+            BrokerAccount.user_id == user_id,
+        )
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account was not found")
+    if account.provider_code.strip().upper() != "XTB":
+        raise HTTPException(
+            status_code=422,
+            detail="File-history import currently supports XTB accounts only.",
+        )
+    if account.account_type != AccountType.BROKERAGE:
+        raise HTTPException(
+            status_code=422,
+            detail="XTB history can only be imported into a brokerage account.",
+        )
+    return account
+
+
+def _parse_broker_upload(
+    session: Session,
+    account: BrokerAccount,
+    data: bytes,
+    filename: str,
+) -> ParsedBrokerReport:
+    primary_currency = session.scalar(
+        select(AccountSubaccount.currency)
+        .where(
+            AccountSubaccount.account_id == account.id,
+            AccountSubaccount.is_primary.is_(True),
+        )
+        .limit(1)
+    )
+    if primary_currency is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Add a primary currency wallet to this account before importing history.",
+        )
+    try:
+        return parse_xtb_report(data, filename, primary_currency.value)
+    except BrokerImportError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _existing_broker_event_ids(
+    session: Session,
+    user_id: uuid.UUID,
+    account_id: uuid.UUID,
+    provider_code: str,
+    event_ids: list[str],
+) -> set[str]:
+    if not event_ids:
+        return set()
+    existing: set[str] = set()
+    for offset in range(0, len(event_ids), 5000):
+        existing.update(
+            session.scalars(
+                select(BrokerTransaction.source_event_id).where(
+                    BrokerTransaction.user_id == user_id,
+                    BrokerTransaction.account_id == account_id,
+                    BrokerTransaction.provider_code == provider_code,
+                    BrokerTransaction.source_event_id.in_(event_ids[offset : offset + 5000]),
+                )
+            )
+        )
+    return existing
+
+
+def _broker_transaction_preview(
+    transaction: ParsedBrokerTransaction,
+) -> BrokerTransactionPreview:
+    return BrokerTransactionPreview(
+        row_number=transaction.row_number,
+        event_type=transaction.event_type,
+        event_at=transaction.event_at,
+        opened_at=transaction.opened_at,
+        closed_at=transaction.closed_at,
+        symbol=transaction.symbol,
+        description=transaction.description,
+        direction=transaction.direction,
+        asset_type=transaction.asset_type,
+        quantity=transaction.quantity,
+        open_price=transaction.open_price,
+        close_price=transaction.close_price,
+        amount=transaction.amount,
+        currency_code=transaction.currency_code,
+        commission=transaction.commission,
+        swap=transaction.swap,
+        taxes=transaction.taxes,
+        reported_profit=transaction.reported_profit,
+    )
+
+
+def preview_broker_import(
+    session: Session,
+    user_id: uuid.UUID,
+    account_id: uuid.UUID,
+    filename: str,
+    data: bytes,
+    stocks_etfs_only: bool,
+) -> BrokerImportPreviewResponse:
+    _get_user(session, user_id)
+    account = _broker_import_account(session, user_id, account_id)
+    report = _parse_broker_upload(session, account, data, filename)
+    event_ids = [transaction.source_event_id for transaction in report.transactions]
+    existing_batch = session.scalar(
+        select(BrokerImportBatch).where(
+            BrokerImportBatch.user_id == user_id,
+            BrokerImportBatch.account_id == account.id,
+            BrokerImportBatch.provider_code == account.provider_code,
+            BrokerImportBatch.content_sha256 == report.content_sha256,
+        )
+    )
+    duplicates = (
+        len(report.transactions)
+        if existing_batch is not None
+        else len(
+            _existing_broker_event_ids(
+                session, user_id, account.id, account.provider_code, event_ids
+            )
+        )
+    )
+    warnings = list(report.warnings)
+    warnings.append(
+        "Preview is read-only. Import saves history rows only; it does not change account "
+        "balances or current holdings."
+    )
+    if stocks_etfs_only:
+        warnings.append(
+            "You marked this report as stocks/ETFs only. Estimated tax uses the broker-reported "
+            "profit as a proxy and is not an annual tax calculation."
+        )
+    return BrokerImportPreviewResponse(
+        content_sha256=report.content_sha256,
+        source_format=report.source_format,
+        transaction_count=len(report.transactions),
+        closed_position_count=sum(
+            transaction.event_type == "closed_position"
+            for transaction in report.transactions
+        ),
+        cash_operation_count=sum(
+            transaction.event_type == "cash_operation"
+            for transaction in report.transactions
+        ),
+        duplicate_count=duplicates,
+        stocks_etfs_only=stocks_etfs_only,
+        warnings=warnings,
+        sample=[
+            _broker_transaction_preview(transaction)
+            for transaction in report.transactions[:20]
+        ],
+    )
+
+
+def import_broker_history(
+    session: Session,
+    user_id: uuid.UUID,
+    account_id: uuid.UUID,
+    filename: str,
+    data: bytes,
+    expected_sha256: str,
+    stocks_etfs_only: bool,
+) -> BrokerImportResponse:
+    user = _get_user(session, user_id)
+    account = _broker_import_account(session, user.id, account_id)
+    report = _parse_broker_upload(session, account, data, filename)
+    if report.content_sha256 != expected_sha256:
+        raise HTTPException(
+            status_code=409,
+            detail="The selected file changed after preview. Preview it again before importing.",
+        )
+    existing_batch = session.scalar(
+        select(BrokerImportBatch).where(
+            BrokerImportBatch.user_id == user.id,
+            BrokerImportBatch.account_id == account.id,
+            BrokerImportBatch.provider_code == account.provider_code,
+            BrokerImportBatch.content_sha256 == report.content_sha256,
+        )
+    )
+    if existing_batch is not None:
+        if existing_batch.stocks_etfs_only != stocks_etfs_only:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This report was already imported with a different stocks/ETFs-only "
+                    "setting. Remove that import before changing the setting."
+                ),
+            )
+        return BrokerImportResponse(
+            batch_id=existing_batch.id,
+            imported_count=0,
+            duplicate_count=len(report.transactions),
+            stocks_etfs_only=existing_batch.stocks_etfs_only,
+            warnings=["This exact report file has already been imported."],
+        )
+
+    event_ids = [transaction.source_event_id for transaction in report.transactions]
+    existing_ids = _existing_broker_event_ids(
+        session, user.id, account.id, account.provider_code, event_ids
+    )
+    new_transactions = [
+        transaction
+        for transaction in report.transactions
+        if transaction.source_event_id not in existing_ids
+    ]
+    duplicate_count = len(report.transactions) - len(new_transactions)
+    batch = BrokerImportBatch(
+        user_id=user.id,
+        account_id=account.id,
+        provider_code=account.provider_code,
+        content_sha256=report.content_sha256,
+        source_format=report.source_format,
+        stocks_etfs_only=stocks_etfs_only,
+        record_count=len(new_transactions),
+        duplicate_count=duplicate_count,
+    )
+    try:
+        session.add(batch)
+        session.flush()
+        session.add_all(
+            [
+                BrokerTransaction(
+                    user_id=user.id,
+                    account_id=account.id,
+                    import_batch_id=batch.id,
+                    provider_code=account.provider_code,
+                    source_event_id=transaction.source_event_id,
+                    event_type=transaction.event_type,
+                    source_sheet=transaction.source_sheet,
+                    broker_reference=transaction.broker_reference,
+                    event_at=transaction.event_at,
+                    opened_at=transaction.opened_at,
+                    closed_at=transaction.closed_at,
+                    symbol=transaction.symbol,
+                    description=transaction.description,
+                    direction=transaction.direction,
+                    asset_type=transaction.asset_type,
+                    quantity=transaction.quantity,
+                    open_price=transaction.open_price,
+                    close_price=transaction.close_price,
+                    amount=transaction.amount,
+                    currency_code=transaction.currency_code,
+                    commission=transaction.commission,
+                    swap=transaction.swap,
+                    taxes=transaction.taxes,
+                    reported_profit=transaction.reported_profit,
+                    balance_after=transaction.balance_after,
+                )
+                for transaction in new_transactions
+            ]
+        )
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Some report transactions were imported by another request. "
+                "Preview the file again."
+            ),
+        ) from error
+    return BrokerImportResponse(
+        batch_id=batch.id,
+        imported_count=len(new_transactions),
+        duplicate_count=duplicate_count,
+        stocks_etfs_only=stocks_etfs_only,
+        warnings=list(report.warnings),
+    )
+
+
+def _is_stock_or_etf_asset_type(asset_type: str | None) -> bool:
+    if asset_type is None:
+        return False
+    normalized = re.sub(r"[^a-z]", "", asset_type.lower())
+    return normalized in {
+        "stock",
+        "stocks",
+        "share",
+        "shares",
+        "equity",
+        "equities",
+        "etf",
+        "etfs",
+    }
+
+
+def _broker_transaction_summary(
+    transaction: BrokerTransaction,
+    batch: BrokerImportBatch,
+    user: User,
+    account: BrokerAccount,
+) -> BrokerTransactionSummary:
+    estimated_tax: Decimal | None = None
+    estimated_tax_rate: Decimal | None = None
+    estimated_tax_status = "not_estimated"
+    tax_warnings: list[str] = []
+    can_estimate_trade_tax = (
+        transaction.event_type == "closed_position"
+        and transaction.reported_profit is not None
+        and transaction.opened_at is not None
+        and transaction.closed_at is not None
+        and transaction.direction == "BUY"
+        and (
+            _is_stock_or_etf_asset_type(transaction.asset_type)
+            or (batch.stocks_etfs_only and transaction.asset_type is None)
+        )
+    )
+    if can_estimate_trade_tax:
+        tax_estimate = estimate_capital_gain_tax(
+            gross_proceeds=transaction.reported_profit or ZERO,
+            cost_basis=ZERO,
+            acquired_on=transaction.opened_at.date(),
+            sold_on=transaction.closed_at.date(),
+            country_code=user.tax_residence_country_code,
+            tax_year=transaction.closed_at.year,
+            intermediary_country_code=account.broker_country_code,
+            reporting_method=str(account.tax_reporting_method),
+            manual_rate=None,
+            legacy_rate=DEFAULT_SALE_TAX_RATE,
+            tax_exempt=account.tax_reporting_method == TaxReportingMethod.TAX_EXEMPT,
+        )
+        estimated_tax = tax_estimate.tax_amount
+        estimated_tax_rate = tax_estimate.rate
+        estimated_tax_status = tax_estimate.status
+        tax_warnings = [
+            *tax_estimate.warnings,
+            "This proxy applies the rate to XTB-reported profit; confirm how fees, taxes, "
+            "short positions, losses, and annual offsets are treated before relying on it.",
+            "The current tax residence and account reporting method are applied to historical "
+            "rows; previous-year profile changes are not modeled.",
+        ]
+    elif transaction.event_type == "closed_position":
+        if transaction.direction == "SELL":
+            estimated_tax_status = "not_estimated_short_position"
+            tax_warnings.append("Short positions are not included in this tax estimate.")
+        elif not (
+            _is_stock_or_etf_asset_type(transaction.asset_type) or batch.stocks_etfs_only
+        ):
+            estimated_tax_status = "not_estimated_asset_type_unknown"
+            tax_warnings.append(
+                "Confirm the report contains only stocks/ETFs or provides an instrument type "
+                "before estimating tax."
+            )
+        elif transaction.reported_profit is None:
+            estimated_tax_status = "not_estimated_profit_missing"
+            tax_warnings.append("The broker report did not provide a profit value.")
+    return BrokerTransactionSummary(
+        id=transaction.id,
+        import_batch_id=batch.id,
+        event_type=transaction.event_type,
+        source_sheet=transaction.source_sheet,
+        broker_reference=transaction.broker_reference,
+        event_at=transaction.event_at,
+        opened_at=transaction.opened_at,
+        closed_at=transaction.closed_at,
+        symbol=transaction.symbol,
+        description=transaction.description,
+        direction=transaction.direction,
+        asset_type=transaction.asset_type,
+        quantity=transaction.quantity,
+        open_price=transaction.open_price,
+        close_price=transaction.close_price,
+        amount=transaction.amount,
+        currency_code=transaction.currency_code,
+        commission=transaction.commission,
+        swap=transaction.swap,
+        taxes=transaction.taxes,
+        reported_profit=transaction.reported_profit,
+        balance_after=transaction.balance_after,
+        estimated_tax=estimated_tax,
+        estimated_tax_rate=estimated_tax_rate,
+        estimated_tax_status=estimated_tax_status,
+        tax_estimate_warnings=tax_warnings,
+    )
+
+
+def list_broker_transactions(
+    session: Session,
+    user_id: uuid.UUID,
+    account_id: uuid.UUID,
+    offset: int,
+    limit: int,
+) -> BrokerTransactionListResponse:
+    user = _get_user(session, user_id)
+    account = _broker_import_account(session, user.id, account_id)
+    filters = (
+        BrokerTransaction.user_id == user.id,
+        BrokerTransaction.account_id == account.id,
+    )
+    total = session.scalar(
+        select(func.count(BrokerTransaction.id)).where(*filters)
+    ) or 0
+    rows = session.execute(
+        select(BrokerTransaction, BrokerImportBatch)
+        .join(BrokerImportBatch, BrokerImportBatch.id == BrokerTransaction.import_batch_id)
+        .where(*filters)
+        .order_by(BrokerTransaction.event_at.desc(), BrokerTransaction.id.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    return BrokerTransactionListResponse(
+        total=total,
+        offset=offset,
+        limit=limit,
+        transactions=[
+            _broker_transaction_summary(transaction, batch, user, account)
+            for transaction, batch in rows
+        ],
+    )
+
+
+def delete_broker_import(
+    session: Session, user_id: uuid.UUID, account_id: uuid.UUID, batch_id: uuid.UUID
+) -> None:
+    user = _get_user(session, user_id)
+    _broker_import_account(session, user.id, account_id)
+    batch = session.scalar(
+        select(BrokerImportBatch).where(
+            BrokerImportBatch.id == batch_id,
+            BrokerImportBatch.user_id == user.id,
+            BrokerImportBatch.account_id == account_id,
+        )
+    )
+    if batch is None:
+        raise HTTPException(status_code=404, detail="Broker import was not found")
+    session.delete(batch)
+    session.commit()
 
 
 def create_account_subaccount(

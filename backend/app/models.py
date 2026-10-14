@@ -787,6 +787,114 @@ class StockSale(Base):
     )
 
 
+class BrokerImportBatch(Base):
+    __tablename__ = "broker_import_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "account_id",
+            "provider_code",
+            "content_sha256",
+            name="uq_broker_import_batches_file",
+        ),
+        CheckConstraint(
+            "length(content_sha256) = 64 AND lower(content_sha256) = content_sha256",
+            name="ck_broker_import_batches_sha256",
+        ),
+        CheckConstraint("record_count >= 0", name="ck_broker_import_batches_count"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
+    )
+    provider_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_format: Mapped[str] = mapped_column(String(16), nullable=False)
+    stocks_etfs_only: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    record_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+class BrokerTransaction(Base):
+    __tablename__ = "broker_transactions"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "account_id",
+            "provider_code",
+            "source_event_id",
+            name="uq_broker_transactions_source_event",
+        ),
+        Index(
+            "ix_broker_transactions_account_event_date",
+            "account_id",
+            "event_at",
+        ),
+        CheckConstraint(
+            "event_type IN ('closed_position', 'cash_operation')",
+            name="ck_broker_transactions_event_type",
+        ),
+        CheckConstraint(
+            "length(currency_code) = 3 AND upper(currency_code) = currency_code",
+            name="ck_broker_transactions_currency_code",
+        ),
+        CheckConstraint(
+            "event_type <> 'closed_position' OR "
+            "(opened_at IS NOT NULL AND closed_at IS NOT NULL AND "
+            "quantity IS NOT NULL AND quantity > 0 AND open_price IS NOT NULL AND "
+            "open_price > 0 AND close_price IS NOT NULL AND close_price > 0)",
+            name="ck_broker_transactions_closed_position_fields",
+        ),
+        CheckConstraint(
+            "event_type <> 'cash_operation' OR amount IS NOT NULL",
+            name="ck_broker_transactions_cash_operation_fields",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts_brokers.id", ondelete="CASCADE"), nullable=False
+    )
+    import_batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("broker_import_batches.id", ondelete="CASCADE"), nullable=False
+    )
+    provider_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    source_event_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    source_sheet: Mapped[str] = mapped_column(String(80), nullable=False)
+    broker_reference: Mapped[str | None] = mapped_column(String(100))
+    event_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    symbol: Mapped[str | None] = mapped_column(String(40))
+    description: Mapped[str | None] = mapped_column(String(240))
+    direction: Mapped[str | None] = mapped_column(String(16))
+    asset_type: Mapped[str | None] = mapped_column(String(40))
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(24, 10))
+    open_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 10))
+    close_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 10))
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    currency_code: Mapped[str] = mapped_column(String(3), nullable=False)
+    commission: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    swap: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    taxes: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    reported_profit: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    balance_after: Mapped[Decimal | None] = mapped_column(Numeric(24, 8))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 class CashTransfer(Base):
     __tablename__ = "cash_transfers"
     __table_args__ = (

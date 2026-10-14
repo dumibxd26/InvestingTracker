@@ -2356,6 +2356,7 @@ a:focus-visible {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 }
 
 .account-delete-button {
@@ -3927,6 +3928,136 @@ a:focus-visible {
   background: #fff;
   box-shadow: 0 25px 80px rgb(5 21 13 / 25%);
   animation: modal-in 180ms ease both;
+}
+
+.broker-activity-dialog {
+  width: min(100%, 1080px);
+}
+
+.broker-import-dropzone {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  padding: 20px;
+  border: 1px dashed #b7c8b9;
+  border-radius: 12px;
+  color: #6e8472;
+  background: #f7faf7;
+  text-align: center;
+}
+
+.broker-import-dropzone.is-dragging {
+  border-color: #63886b;
+  background: #edf5ee;
+}
+
+.broker-import-dropzone strong {
+  color: #3f5845;
+  font-size: 12px;
+}
+
+.broker-import-dropzone small,
+.broker-import-privacy,
+.broker-import-warning {
+  color: #829087;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.broker-import-file-input {
+  display: none;
+}
+
+.broker-import-scope {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 12px 0;
+  color: #53665a;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.broker-import-scope input {
+  margin-top: 2px;
+}
+
+.broker-import-scope small {
+  display: block;
+  margin-top: 3px;
+  color: #829087;
+  font-size: 9px;
+}
+
+.broker-import-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.broker-import-privacy {
+  flex: 1 1 280px;
+}
+
+.broker-import-preview,
+.broker-history-section {
+  margin-top: 18px;
+  padding-top: 15px;
+  border-top: 1px solid #eef1ee;
+}
+
+.broker-import-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: #52685a;
+  font-size: 10px;
+}
+
+.broker-import-summary span {
+  color: #829087;
+  text-align: right;
+}
+
+.broker-import-warning {
+  display: block;
+  margin-top: 6px;
+}
+
+.broker-import-table {
+  max-height: 320px;
+  margin-top: 10px;
+}
+
+.broker-history-section h3 {
+  margin-top: 4px;
+  font-size: 14px;
+}
+
+.broker-import-batches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 10px 0;
+}
+
+.broker-import-batches > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border: 1px solid #e7eee7;
+  border-radius: 8px;
+  color: #738278;
+  font-size: 8px;
+}
+
+.broker-load-more {
+  display: block;
+  margin: 10px auto 0;
 }
 
 .cashflow-dialog {
@@ -5806,6 +5937,32 @@ html[data-theme="dark"] .modal-card {
   border-color: var(--line);
   color: var(--ink);
   background: var(--panel);
+}
+
+html[data-theme="dark"] .broker-import-dropzone {
+  border-color: #405b48;
+  color: #a4b9a7;
+  background: #17231b;
+}
+
+html[data-theme="dark"] .broker-import-dropzone.is-dragging {
+  border-color: #80aa87;
+  background: #1c3022;
+}
+
+html[data-theme="dark"] .broker-import-dropzone strong,
+html[data-theme="dark"] .broker-import-summary {
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .broker-import-scope {
+  color: #c0cdc2;
+}
+
+html[data-theme="dark"] .broker-import-preview,
+html[data-theme="dark"] .broker-history-section,
+html[data-theme="dark"] .broker-import-batches > span {
+  border-color: var(--line);
 }
 
 html[data-theme="dark"] .metric-primary,

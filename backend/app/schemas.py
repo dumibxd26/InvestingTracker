@@ -988,6 +988,83 @@ class StockSaleResponse(BaseModel):
     credited_subaccount_id: UUID
 
 
+class BrokerTransactionPreview(BaseModel):
+    row_number: int
+    event_type: Literal["closed_position", "cash_operation"]
+    event_at: datetime
+    opened_at: datetime | None = None
+    closed_at: datetime | None = None
+    symbol: str | None = None
+    description: str | None = None
+    direction: str | None = None
+    asset_type: str | None = None
+    quantity: Decimal | None = None
+    open_price: Decimal | None = None
+    close_price: Decimal | None = None
+    amount: Decimal | None = None
+    currency_code: str
+    commission: Decimal | None = None
+    swap: Decimal | None = None
+    taxes: Decimal | None = None
+    reported_profit: Decimal | None = None
+
+
+class BrokerImportPreviewResponse(BaseModel):
+    content_sha256: str
+    source_format: str
+    transaction_count: int
+    closed_position_count: int
+    cash_operation_count: int
+    duplicate_count: int
+    stocks_etfs_only: bool
+    warnings: list[str]
+    sample: list[BrokerTransactionPreview]
+
+
+class BrokerImportResponse(BaseModel):
+    batch_id: UUID
+    imported_count: int
+    duplicate_count: int
+    stocks_etfs_only: bool
+    warnings: list[str]
+
+
+class BrokerTransactionSummary(BaseModel):
+    id: UUID
+    import_batch_id: UUID
+    event_type: Literal["closed_position", "cash_operation"]
+    source_sheet: str
+    broker_reference: str | None = None
+    event_at: datetime
+    opened_at: datetime | None = None
+    closed_at: datetime | None = None
+    symbol: str | None = None
+    description: str | None = None
+    direction: str | None = None
+    asset_type: str | None = None
+    quantity: Decimal | None = None
+    open_price: Decimal | None = None
+    close_price: Decimal | None = None
+    amount: Decimal | None = None
+    currency_code: str
+    commission: Decimal | None = None
+    swap: Decimal | None = None
+    taxes: Decimal | None = None
+    reported_profit: Decimal | None = None
+    balance_after: Decimal | None = None
+    estimated_tax: Decimal | None = None
+    estimated_tax_rate: Decimal | None = None
+    estimated_tax_status: str
+    tax_estimate_warnings: list[str] = Field(default_factory=list)
+
+
+class BrokerTransactionListResponse(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    transactions: list[BrokerTransactionSummary]
+
+
 class TransferFeeInput(BaseModel):
     fee_amount: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000"))
     fee_currency: Currency | None = None

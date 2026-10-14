@@ -5,11 +5,12 @@ from typing import Annotated
 from uuid import UUID
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.broker_imports import MAX_BROKER_IMPORT_BYTES
 from app.config import get_settings
 from app.database import SessionFactory, get_session
 from app.gbi.schemas import GoalInsightsResponse
@@ -21,6 +22,9 @@ from app.schemas import (
     AccountSummary,
     AccountTaxProfileUpdate,
     AuthResponse,
+    BrokerImportPreviewResponse,
+    BrokerImportResponse,
+    BrokerTransactionListResponse,
     CashFlowScheduleCreate,
     CashFlowScheduleResponse,
     CashReceiptCreate,
@@ -77,6 +81,7 @@ from app.services import (
     create_vesting_grant,
     dashboard,
     delete_account,
+    delete_broker_import,
     delete_fixed_deposit,
     delete_holding,
     delete_purchase_plan,
@@ -84,8 +89,10 @@ from app.services import (
     get_policy_response,
     get_profile,
     goal_insights,
+    import_broker_history,
     initialize_portfolio,
     list_accounts,
+    list_broker_transactions,
     list_cash_flow_schedules,
     list_cash_flows,
     list_goals,
@@ -94,6 +101,7 @@ from app.services import (
     market_data_status,
     portfolio_projection,
     portfolio_projection_scenario,
+    preview_broker_import,
     preview_recommendation,
     record_extra_cash,
     refresh_market_data,
@@ -279,6 +287,90 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> AccountSummary:
         return update_account_tax_profile(session, current_user.id, account_id, payload)
+
+    @app.post(
+        "/api/accounts/{account_id}/broker-imports/preview",
+        response_model=BrokerImportPreviewResponse,
+    )
+    async def post_broker_import_preview(
+        account_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+        file: Annotated[UploadFile, File()],
+        stocks_etfs_only: Annotated[bool, Form()] = False,
+    ) -> BrokerImportPreviewResponse:
+        data = await file.read(MAX_BROKER_IMPORT_BYTES + 1)
+        if len(data) > MAX_BROKER_IMPORT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Report exceeds the {MAX_BROKER_IMPORT_BYTES // (1024 * 1024)} MB "
+                    "upload limit."
+                ),
+            )
+        return preview_broker_import(
+            session,
+            current_user.id,
+            account_id,
+            file.filename or "xtb-report.xlsx",
+            data,
+            stocks_etfs_only,
+        )
+
+    @app.post(
+        "/api/accounts/{account_id}/broker-imports",
+        response_model=BrokerImportResponse,
+        status_code=201,
+    )
+    async def post_broker_import(
+        account_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+        file: Annotated[UploadFile, File()],
+        expected_sha256: Annotated[str, Form(min_length=64, max_length=64)],
+        stocks_etfs_only: Annotated[bool, Form()] = False,
+    ) -> BrokerImportResponse:
+        data = await file.read(MAX_BROKER_IMPORT_BYTES + 1)
+        if len(data) > MAX_BROKER_IMPORT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Report exceeds the {MAX_BROKER_IMPORT_BYTES // (1024 * 1024)} MB "
+                    "upload limit."
+                ),
+            )
+        return import_broker_history(
+            session,
+            current_user.id,
+            account_id,
+            file.filename or "xtb-report.xlsx",
+            data,
+            expected_sha256,
+            stocks_etfs_only,
+        )
+
+    @app.get(
+        "/api/accounts/{account_id}/broker-transactions",
+        response_model=BrokerTransactionListResponse,
+    )
+    def get_broker_transactions(
+        account_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    ) -> BrokerTransactionListResponse:
+        return list_broker_transactions(session, current_user.id, account_id, offset, limit)
+
+    @app.delete("/api/accounts/{account_id}/broker-imports/{batch_id}", status_code=204)
+    def remove_broker_import(
+        account_id: UUID,
+        batch_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        delete_broker_import(session, current_user.id, account_id, batch_id)
+        return None
 
     @app.post(
         "/api/accounts/{account_id}/subaccounts",

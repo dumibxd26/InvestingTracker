@@ -13,6 +13,9 @@ import type {
   AccountTaxProfileUpdatePayload,
   AccountSummary,
   AccountSubaccount,
+  BrokerImportPreview,
+  BrokerImportResult,
+  BrokerTransactionList,
   InitialPortfolioAccountPayload,
   InitialPortfolioHoldingPayload,
   InitialPortfolioResponse,
@@ -78,13 +81,16 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
+    const headers = new Headers(init?.headers);
+    if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+    if (typeof FormData !== "undefined" && init?.body instanceof FormData) {
+      headers.delete("Content-Type");
+    } else if (!headers.has("Content-Type")) {
+      headers.set("Content-Type", "application/json");
+    }
     response = await fetch(`${API_BASE}${path}`, {
       ...init,
-      headers: {
-        "Content-Type": "application/json",
-        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-        ...init?.headers,
-      },
+      headers,
     });
   } catch {
     throw new ApiError(
@@ -121,6 +127,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
+}
+
+function brokerImportForm(
+  file: File,
+  stocksEtfsOnly: boolean,
+  expectedSha256?: string,
+): FormData {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("stocks_etfs_only", String(stocksEtfsOnly));
+  if (expectedSha256) form.append("expected_sha256", expectedSha256);
+  return form;
 }
 
 export const api = {
@@ -185,6 +203,37 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(payload),
     }),
+
+  previewBrokerImport: (accountId: string, file: File, stocksEtfsOnly: boolean) =>
+    request<BrokerImportPreview>(
+      `/accounts/${encodeURIComponent(accountId)}/broker-imports/preview`,
+      {
+        method: "POST",
+        body: brokerImportForm(file, stocksEtfsOnly),
+      },
+    ),
+
+  importBrokerHistory: (
+    accountId: string,
+    file: File,
+    stocksEtfsOnly: boolean,
+    expectedSha256: string,
+  ) =>
+    request<BrokerImportResult>(`/accounts/${encodeURIComponent(accountId)}/broker-imports`, {
+      method: "POST",
+      body: brokerImportForm(file, stocksEtfsOnly, expectedSha256),
+    }),
+
+  brokerTransactions: (accountId: string, offset = 0, limit = 100) =>
+    request<BrokerTransactionList>(
+      `/accounts/${encodeURIComponent(accountId)}/broker-transactions?offset=${offset}&limit=${limit}`,
+    ),
+
+  deleteBrokerImport: (accountId: string, batchId: string) =>
+    request<void>(
+      `/accounts/${encodeURIComponent(accountId)}/broker-imports/${encodeURIComponent(batchId)}`,
+      { method: "DELETE" },
+    ),
 
   initializePortfolio: (
     accounts: InitialPortfolioAccountPayload[],
