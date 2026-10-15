@@ -956,6 +956,32 @@ class CashTransfer(Base):
     )
 
 
+class CashSpend(Base):
+    __tablename__ = "cash_spends"
+    __table_args__ = (
+        UniqueConstraint("user_id", "client_request_id", name="uq_cash_spends_request"),
+        Index("ix_cash_spends_user_date", "user_id", "spend_date"),
+        CheckConstraint("amount > 0", name="ck_cash_spends_amount_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    client_request_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    subaccount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("account_subaccounts.id", ondelete="CASCADE"), nullable=False
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    currency: Mapped[Currency] = mapped_column(
+        SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
+    )
+    spend_date: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
 class StockTransfer(Base):
     __tablename__ = "stock_transfers"
     __table_args__ = (

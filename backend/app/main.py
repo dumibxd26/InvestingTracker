@@ -30,6 +30,8 @@ from app.schemas import (
     CashFlowScheduleCreate,
     CashFlowScheduleResponse,
     CashReceiptCreate,
+    CashSpendCreate,
+    CashSpendResponse,
     CashTransferCreate,
     CashTransferResponse,
     ChatRequest,
@@ -118,6 +120,7 @@ from app.services import (
     register_user,
     search_market_symbols,
     sell_holding,
+    spend_cash,
     transfer_cash,
     transfer_stock,
     update_account_tax_profile,
@@ -518,6 +521,14 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> CashTransferResponse:
         return transfer_cash(session, current_user.id, payload)
+
+    @app.post("/api/cash-spends", response_model=CashSpendResponse, status_code=201)
+    def post_cash_spend(
+        payload: CashSpendCreate,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> CashSpendResponse:
+        return spend_cash(session, current_user.id, payload)
 
     @app.post(
         "/api/holdings/{holding_id}/transfer",

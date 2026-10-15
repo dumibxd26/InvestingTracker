@@ -382,6 +382,22 @@ export interface CashTransferRecord {
   fee_side: TransferFeeSide | null;
 }
 
+export interface CashSpendPayload {
+  idempotency_key: string;
+  subaccount_id: string;
+  spend_date: string;
+  amount: string;
+}
+
+export interface CashSpendRecord {
+  id: string;
+  subaccount_id: string;
+  account_name: string;
+  currency: Currency;
+  amount: string;
+  spend_date: string;
+}
+
 export interface StockTransferPayload extends TransferFeePayload {
   idempotency_key: string;
   destination_account_id: string;

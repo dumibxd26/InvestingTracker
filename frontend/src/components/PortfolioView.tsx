@@ -25,6 +25,7 @@ import { ExtraCashDialog } from "./ExtraCashDialog";
 import { InitialPortfolioDialog } from "./InitialPortfolioDialog";
 import { SavingsInterestDialog } from "./SavingsInterestDialog";
 import { SellHoldingDialog } from "./SellHoldingDialog";
+import { SpendCashDialog } from "./SpendCashDialog";
 import { TransferCashDialog } from "./TransferCashDialog";
 import { TransferStockDialog } from "./TransferStockDialog";
 import { amount, assetLabel, dateLabel, number } from "../format";
@@ -97,6 +98,7 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   const [sellingHolding, setSellingHolding] = useState<HoldingSummary | null>(null);
   const [transferringHolding, setTransferringHolding] = useState<HoldingSummary | null>(null);
   const [transferDialog, setTransferDialog] = useState<{ sourceId?: string } | null>(null);
+  const [spendingFrom, setSpendingFrom] = useState<AccountSummary | null>(null);
   const [brokerActivityFor, setBrokerActivityFor] = useState<AccountSummary | null>(null);
   const [mutatingHoldingId, setMutatingHoldingId] = useState<string | null>(null);
   const [mutatingAccountId, setMutatingAccountId] = useState<string | null>(null);
@@ -349,6 +351,17 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
                       title="Record a bonus, refund, or other money received into this account"
                     >
                       <CircleDollarSign size={13} /> Add funds
+                    </button>
+                  )}
+                  {account.account_type === "BANK" && (
+                    <button
+                      className="button button-quiet button-small"
+                      type="button"
+                      onClick={() => setSpendingFrom(account)}
+                      disabled={account.is_sample || account.subaccounts.length === 0}
+                      title="Record money spent from this bank account"
+                    >
+                      <ArrowUpRight size={13} /> Spend
                     </button>
                   )}
                   {account.account_type !== "EMPLOYER_PLAN" && (
@@ -673,6 +686,16 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
           initialAccountId={addingFundsFor.id}
           onClose={() => setAddingFundsFor(null)}
           onSaved={onSaved}
+        />
+      )}
+      {spendingFrom && (
+        <SpendCashDialog
+          account={spendingFrom}
+          onClose={() => setSpendingFrom(null)}
+          onSaved={async (message) => {
+            await onSaved();
+            setAccountMessage(message);
+          }}
         />
       )}
       {editingInterestFor && (

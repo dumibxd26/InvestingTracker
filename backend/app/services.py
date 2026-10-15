@@ -52,6 +52,7 @@ from app.models import (
     BrokerTransaction,
     CashFlow,
     CashFlowSchedule,
+    CashSpend,
     CashTransfer,
     CompoundingFrequency,
     Currency,
@@ -112,6 +113,8 @@ from app.schemas import (
     CashFlowScheduleCreate,
     CashFlowScheduleResponse,
     CashReceiptCreate,
+    CashSpendCreate,
+    CashSpendResponse,
     CashTransferCreate,
     CashTransferResponse,
     ChartPoint,
@@ -1441,6 +1444,100 @@ def transfer_cash(
     session.refresh(transfer)
     return _cash_transfer_response(
         transfer, source_account.display_name, destination_account.display_name
+    )
+
+
+def spend_cash(
+    session: Session, user_id: uuid.UUID, payload: CashSpendCreate
+) -> CashSpendResponse:
+    user = _get_user(session, user_id)
+    existing = session.scalar(
+        select(CashSpend).where(
+            CashSpend.user_id == user.id,
+            CashSpend.client_request_id == payload.idempotency_key,
+        )
+    )
+    if existing is not None:
+        if (
+            existing.subaccount_id != payload.subaccount_id
+            or existing.spend_date != payload.spend_date
+            or existing.amount != payload.amount
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This spend idempotency key was already used for different data",
+            )
+        subaccount = session.get(AccountSubaccount, existing.subaccount_id)
+        account = session.get(BrokerAccount, subaccount.account_id) if subaccount else None
+        if (
+            subaccount is None
+            or account is None
+            or account.user_id != user.id
+            or account.account_type != AccountType.BANK
+        ):
+            raise HTTPException(status_code=409, detail="The spend's wallet is unavailable")
+        return CashSpendResponse(
+            id=existing.id,
+            subaccount_id=existing.subaccount_id,
+            account_name=account.display_name,
+            currency=existing.currency,
+            amount=existing.amount,
+            spend_date=existing.spend_date,
+        )
+
+    today = datetime.now(UTC).date()
+    if payload.spend_date > today:
+        raise HTTPException(status_code=422, detail="Spend date cannot be in the future")
+
+    subaccount = session.scalar(
+        select(AccountSubaccount)
+        .where(AccountSubaccount.id == payload.subaccount_id)
+        .with_for_update()
+    )
+    if subaccount is None:
+        raise HTTPException(status_code=404, detail="Wallet was not found")
+    account = session.get(BrokerAccount, subaccount.account_id)
+    if account is None or account.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Wallet was not found")
+    if account.account_type != AccountType.BANK:
+        raise HTTPException(status_code=422, detail="Spending is available only for bank accounts")
+    if account.provider_code == "SAMPLE":
+        raise HTTPException(status_code=409, detail="Sample accounts cannot be changed")
+    if subaccount.cash_balance < payload.amount:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Insufficient balance: {subaccount.currency.value} "
+                f"{subaccount.cash_balance:.2f} available"
+            ),
+        )
+
+    spend = CashSpend(
+        user_id=user.id,
+        client_request_id=payload.idempotency_key,
+        subaccount_id=subaccount.id,
+        amount=payload.amount,
+        currency=subaccount.currency,
+        spend_date=payload.spend_date,
+    )
+    session.add(spend)
+    subaccount.cash_balance -= payload.amount
+    try:
+        session.commit()
+    except IntegrityError as error:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This spend was already recorded; refresh the portfolio.",
+        ) from error
+    session.refresh(spend)
+    return CashSpendResponse(
+        id=spend.id,
+        subaccount_id=spend.subaccount_id,
+        account_name=account.display_name,
+        currency=spend.currency,
+        amount=spend.amount,
+        spend_date=spend.spend_date,
     )
 
 

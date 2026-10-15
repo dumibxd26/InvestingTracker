@@ -1285,6 +1285,22 @@ class CashTransferResponse(BaseModel):
     fee_side: Literal["SOURCE", "DESTINATION"] | None = None
 
 
+class CashSpendCreate(BaseModel):
+    idempotency_key: UUID
+    subaccount_id: UUID
+    spend_date: date
+    amount: Decimal = Field(gt=0, le=Decimal("100000000"))
+
+
+class CashSpendResponse(BaseModel):
+    id: UUID
+    subaccount_id: UUID
+    account_name: str
+    currency: Currency
+    amount: Decimal
+    spend_date: date
+
+
 class StockTransferCreate(TransferFeeInput):
     idempotency_key: UUID
     destination_account_id: UUID

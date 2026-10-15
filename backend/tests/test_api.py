@@ -2615,6 +2615,81 @@ def test_cash_transfers_move_balances_between_wallets_with_guards(tmp_path) -> N
     assert balance(xtb_usd_id) == Decimal("150")
 
 
+def test_cash_spends_deduct_bank_wallet_balance_and_are_idempotent(tmp_path) -> None:
+    today = datetime.now(UTC).date()
+    with create_test_client(tmp_path) as client:
+        bank = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Daily bank",
+                "provider_code": "MANUAL",
+                "account_type": "BANK",
+                "currency": "EUR",
+                "opening_cash": "100",
+            },
+        ).json()
+        brokerage = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Brokerage",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "100",
+            },
+        ).json()
+        bank_wallet_id = bank["subaccounts"][0]["id"]
+        spend_path = "/api/cash-spends"
+        entry = {
+            "idempotency_key": str(uuid4()),
+            "subaccount_id": bank_wallet_id,
+            "spend_date": today.isoformat(),
+            "amount": "35.50",
+        }
+
+        spent = client.post(spend_path, json=entry)
+        replay = client.post(spend_path, json=entry)
+        mismatch = client.post(spend_path, json={**entry, "amount": "36"})
+        insufficient = client.post(
+            spend_path, json={**entry, "idempotency_key": str(uuid4()), "amount": "1000"}
+        )
+        future = client.post(
+            spend_path,
+            json={
+                **entry,
+                "idempotency_key": str(uuid4()),
+                "spend_date": (today + timedelta(days=1)).isoformat(),
+            },
+        )
+        brokerage_spend = client.post(
+            spend_path,
+            json={
+                **entry,
+                "idempotency_key": str(uuid4()),
+                "subaccount_id": brokerage["subaccounts"][0]["id"],
+            },
+        )
+        accounts = client.get("/api/accounts").json()
+
+    assert spent.status_code == 201, spent.text
+    assert spent.json()["account_name"] == "Daily bank"
+    assert spent.json()["currency"] == "EUR"
+    assert Decimal(spent.json()["amount"]) == Decimal("35.50")
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["id"] == spent.json()["id"]
+    assert mismatch.status_code == 409
+    assert insufficient.status_code == 422
+    assert future.status_code == 422
+    assert brokerage_spend.status_code == 422
+    bank_balance = next(
+        subaccount["cash_balance"]
+        for account in accounts
+        for subaccount in account["subaccounts"]
+        if subaccount["id"] == bank_wallet_id
+    )
+    assert Decimal(bank_balance) == Decimal("64.50")
+
+
 def test_cash_transfers_reject_other_users_wallets_and_employer_plans(tmp_path) -> None:
     with create_test_client(tmp_path, authenticated=False) as client:
         first = client.post(

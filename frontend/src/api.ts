@@ -47,6 +47,8 @@ import type {
   StockSaleRecord,
   CashTransferPayload,
   CashTransferRecord,
+  CashSpendPayload,
+  CashSpendRecord,
   StockTransferPayload,
   StockTransferRecord,
   TaxAnnualSummary,
@@ -342,6 +344,12 @@ export const api = {
 
   transferCash: (payload: CashTransferPayload) =>
     request<CashTransferRecord>("/cash-transfers", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  spendCash: (payload: CashSpendPayload) =>
+    request<CashSpendRecord>("/cash-spends", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
