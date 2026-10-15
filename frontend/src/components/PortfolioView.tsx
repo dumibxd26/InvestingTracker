@@ -46,7 +46,7 @@ interface PortfolioViewProps {
 const accountTypeLabels = {
   BROKERAGE: "Brokerage",
   BANK: "Bank account",
-  SAVINGS: "Savings / deposit",
+  SAVINGS: "Savings account · separate balance",
   EMPLOYER_PLAN: "Employer plan",
 } as const;
 

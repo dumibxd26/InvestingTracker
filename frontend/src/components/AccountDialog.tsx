@@ -17,7 +17,6 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [interestModel, setInterestModel] = useState<InterestModel>("SAME_ACCOUNT");
-  const [interestRateEntered, setInterestRateEntered] = useState(false);
   const [taxReportingMethod, setTaxReportingMethod] =
     useState<TaxReportingMethod>("legacy_manual");
   const supportsInterest = accountType !== "EMPLOYER_PLAN";
@@ -50,7 +49,7 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
         opening_cash: String(form.get("openingCash") || "0"),
         ...(separateInterestAccount ? {} : interestFields),
       });
-      if (separateInterestAccount && interestPercent) {
+      if (separateInterestAccount) {
         try {
           await api.createAccount({
             display_name: String(form.get("interestAccountName") ?? "").trim(),
@@ -118,7 +117,7 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
               <select value={accountType} onChange={(event) => setAccountType(event.target.value as AccountType)}>
                 <option value="BROKERAGE">Brokerage</option>
                 <option value="BANK">Bank account</option>
-                <option value="SAVINGS">Savings / deposit</option>
+                <option value="SAVINGS">Savings account · separate balance</option>
                 <option value="EMPLOYER_PLAN">Employer plan</option>
               </select>
             </label>
@@ -172,10 +171,10 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
           </div>
           {supportsInterest && (
             <div className="grant-tax-fields">
-              <div className="eyebrow">Economy account interest · optional</div>
+              <div className="eyebrow">Savings interest · optional</div>
               {offersInterestModel && (
                 <fieldset className="interest-model-choice">
-                  <legend>Where is the interest paid?</legend>
+                  <legend>Choose how this bank handles savings</legend>
                   <label className="interest-model-option">
                     <input
                       type="radio"
@@ -183,7 +182,11 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
                       checked={interestModel === "SAME_ACCOUNT"}
                       onChange={() => setInterestModel("SAME_ACCOUNT")}
                     />
-                    <span>This bank account is also the interest account (Salt, XTB)</span>
+                    <span>
+                      <strong>Version 1 · Same account (Salt Bank style)</strong>
+                      <br />
+                      Interest is earned on this balance, which stays available for spending.
+                    </span>
                   </label>
                   <label className="interest-model-option">
                     <input
@@ -192,16 +195,20 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
                       checked={interestModel === "SEPARATE_ACCOUNT"}
                       onChange={() => setInterestModel("SEPARATE_ACCOUNT")}
                     />
-                    <span>Separate interest account, apart from spending (ING, BT)</span>
+                    <span>
+                      <strong>Version 2 · Separate savings account (ING style)</strong>
+                      <br />
+                      Creates a second savings account; this bank account remains for spending.
+                    </span>
                   </label>
                 </fieldset>
               )}
               {separateInterestAccount && (
                 <label className="form-field">
-                  <span>Interest account name</span>
+                  <span>Separate savings account name</span>
                   <input
                     name="interestAccountName"
-                    required={interestRateEntered}
+                    required={separateInterestAccount}
                     minLength={2}
                     maxLength={80}
                     placeholder="e.g. ING savings"
@@ -218,7 +225,6 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
                     max="100"
                     step="0.01"
                     placeholder="e.g. 3.5"
-                    onChange={(event) => setInterestRateEntered(event.target.value.trim() !== "")}
                   />
                 </label>
                 <label className="form-field">
@@ -228,7 +234,7 @@ export function AccountDialog({ profile, onClose, onCreated }: AccountDialogProp
               </div>
               <p className="quiet-copy">The yearly rate is divided by 12 and credited to the balance once a month on the same day of the month. Leave the rate blank for no interest. It is an estimate, not a bank connection.</p>
               {separateInterestAccount && (
-                <p className="quiet-copy">The interest account is created as a savings account in the same currency, starting at 0. The spending account earns no interest. Move money into the interest account with Add funds on the Portfolio page.</p>
+                <p className="quiet-copy">The separate savings account starts with a zero balance; the opening balance stays in the spending account. Use Transfer on the Portfolio page to move cash between them. For an existing bank, add a separate savings account from Add account, then transfer the amount you want to save.</p>
               )}
             </div>
           )}
