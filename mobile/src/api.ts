@@ -14,6 +14,10 @@ import type {
   Dashboard,
   FixedDepositCreatePayload,
   GoalCreatePayload,
+  FinancialPlanPayload,
+  ContributionSchedule,
+  GoalRecord,
+  GoalUpdatePayload,
   GoalSummary,
   HoldingCreatePayload,
   MarketRefreshResult,
@@ -99,6 +103,10 @@ async function request<T>(
         typeof payload.detail === "string"
       ) {
         message = payload.detail;
+      } else if (typeof payload === "object" && payload !== null && "detail" in payload && Array.isArray(payload.detail)) {
+        message = payload.detail.map((item: unknown) =>
+          typeof item === "object" && item !== null && "msg" in item ? String(item.msg) : "Invalid input",
+        ).join("; ");
       }
     } catch {
       message = `Request failed (${response.status})`;
@@ -208,6 +216,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  listGoals: () => request<GoalRecord[]>("/goals"),
+  updateGoal: (id: string, payload: GoalUpdatePayload) =>
+    request<GoalRecord>(`/goals/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
+  financialPlan: () => request<FinancialPlanPayload>("/financial-plan"),
+  saveFinancialPlan: (payload: FinancialPlanPayload) =>
+    request<FinancialPlanPayload>("/financial-plan", { method: "PUT", body: JSON.stringify(payload) }),
+  goalContributions: (id: string, months = 120) =>
+    request<ContributionSchedule>(`/goals/${encodeURIComponent(id)}/contributions?months=${months}`),
 
   deleteGoal: (goalId: string) =>
     request<void>(`/goals/${encodeURIComponent(goalId)}`, {

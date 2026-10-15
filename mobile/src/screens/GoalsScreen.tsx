@@ -8,7 +8,11 @@ import {
 } from "react-native";
 import { api, ApiError } from "../api";
 import { formatDate, formatMoney } from "../format";
-import type { Currency, GoalCreatePayload, GoalType } from "../types";
+import type { Currency, GoalCreatePayload, GoalType, GoalRecord, ContributionRule, MoneyBasis } from "../types";
+import { PlanningEditor, basisOptions } from "../components/PlanningEditor";
+import { ContributionRulesEditor } from "../components/ContributionRulesEditor";
+import { ContributionPreview } from "../components/ContributionPreview";
+import { newRule } from "../planning";
 import { colors } from "../theme";
 import {
   ActionButton,
@@ -54,7 +58,11 @@ export function GoalsScreen() {
   const [target, setTarget] = useState("");
   const [monthlyContribution, setMonthlyContribution] = useState("0");
   const [targetDate, setTargetDate] = useState("");
-  const [priority, setPriority] = useState("");
+  const [editingGoal, setEditingGoal] = useState<GoalRecord | null>(null);
+  const [rules, setRules] = useState<ContributionRule[] | null>(() => [newRule()]);
+  const [targetBasis, setTargetBasis] = useState<MoneyBasis>("real");
+  const [inflation, setInflation] = useState("");
+  const [revision, setRevision] = useState(0);
   const [riskLevel, setRiskLevel] = useState<"low" | "moderate" | "high" | "">("");
   const [flexibility, setFlexibility] = useState<"essential" | "flexible" | "">("");
 
@@ -64,12 +72,7 @@ export function GoalsScreen() {
       return;
     }
     if (!goalType || !riskLevel || !flexibility) {
-      setFormError("Choose a goal type, priority, risk comfort, and flexibility.");
-      return;
-    }
-    const numericPriority = Number(priority);
-    if (!Number.isInteger(numericPriority) || numericPriority < 1 || numericPriority > 5) {
-      setFormError("Priority must be between 1 and 5.");
+      setFormError("Choose a goal type, risk comfort, and flexibility.");
       return;
     }
     if (!target.trim() || !Number.isFinite(Number(target)) || Number(target) <= 0) {
@@ -88,15 +91,22 @@ export function GoalsScreen() {
       name: name.trim(),
       goal_type: goalType,
       target_currency: targetCurrency,
-      priority: numericPriority,
+      target_money_basis: targetBasis,
+      annual_inflation_rate: inflation === "" ? null : String(Number(inflation) / 100),
+      contribution_rules: rules,
       risk_level: riskLevel,
       monthly_contribution: monthlyContribution || "0",
       flexibility,
-      current_amount: "0",
-      current_annual_income: "0",
-      linked_account_ids: [],
-      holding_allocations: [],
-      fixed_deposit_allocations: [],
+      current_amount: editingGoal?.current_amount ?? "0",
+      current_annual_income: editingGoal?.current_annual_income ?? "0",
+      linked_account_ids: editingGoal?.linked_account_ids ?? [],
+      holding_allocations: editingGoal?.holding_allocations ?? [],
+      fixed_deposit_allocations: editingGoal?.fixed_deposit_allocations ?? [],
+      ...(editingGoal ? {
+        visualization_budget_amount: editingGoal.visualization_budget_amount,
+        visualization_budget_period: editingGoal.visualization_budget_period,
+        ...(editingGoal.fixed_percent == null ? {} : { fixed_percent: editingGoal.fixed_percent }),
+      } : {}),
       ...(target.trim()
         ? goalType === "passive_income"
           ? { target_annual_income: target.trim() }
@@ -108,8 +118,10 @@ export function GoalsScreen() {
     setBusy(true);
     setFormError("");
     try {
-      await api.createGoal(payload);
+      if (editingGoal) await api.updateGoal(editingGoal.id, { ...payload, current_amount: payload.current_amount ?? "0", current_annual_income: payload.current_annual_income ?? "0" });
+      else await api.createGoal(payload);
       await reload();
+      setRevision(r => r + 1);
       setCreateOpen(false);
       setName("");
       setTarget("");
@@ -124,6 +136,23 @@ export function GoalsScreen() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function editGoal(id: string) {
+    setBusy(true);
+    try {
+      const goal = (await api.listGoals()).find(g => g.id === id);
+      if (!goal) throw new Error("Goal not found.");
+      setEditingGoal(goal); setName(goal.name); setGoalType(goal.goal_type);
+      setTargetCurrency(goal.target_currency);
+      setTarget((goal.goal_type === "passive_income" ? goal.target_annual_income : goal.target_amount) ?? "");
+      setMonthlyContribution(goal.monthly_contribution); setTargetDate(goal.target_date ?? "");
+      setRiskLevel(goal.risk_level); setFlexibility(goal.flexibility);
+      setRules(goal.contribution_rules ?? null); setTargetBasis(goal.target_money_basis ?? "real");
+      setInflation(goal.annual_inflation_rate == null ? "" : String(Number(goal.annual_inflation_rate) * 100));
+      setFormError(""); setCreateOpen(true);
+    } catch (e) { Alert.alert("Could not load goal", String(e)); }
+    finally { setBusy(false); }
   }
 
   function deleteGoal(id: string, goalName: string) {
@@ -177,10 +206,11 @@ export function GoalsScreen() {
             A goal is a purpose, not a separate account.
           </Text>
           <Text style={styles.cardMeta}>
-            Set a deadline, priority, and comfort with risk. Investments can
+            Set a deadline and comfort with risk. Investments can
             stay together while you track different purposes.
           </Text>
         </Card>
+        <PlanningEditor currency={currency} onSaved={async () => { setRevision(r => r + 1); await reload(); }} />
         <ActionButton
           label="Add a goal"
           onPress={() => {
@@ -191,7 +221,7 @@ export function GoalsScreen() {
             setTarget("");
             setMonthlyContribution("0");
             setTargetDate("");
-            setPriority("");
+            setEditingGoal(null); setRules([newRule()]); setTargetBasis("real"); setInflation("");
             setRiskLevel("");
             setFlexibility("");
             setCreateOpen(true);
@@ -211,7 +241,7 @@ export function GoalsScreen() {
                   <View style={styles.goalCopy}>
                     <Text style={styles.goalName}>{goal.name}</Text>
                     <Text style={styles.cardMeta}>
-                      {goal.goal_type.replace(/_/g, " ")}  |  Priority {goal.priority}
+                      {goal.goal_type.replace(/_/g, " ")} · {goal.target_money_basis === "nominal" ? "Nominal target" : "Today's-money target"}
                     </Text>
                   </View>
                   <Badge
@@ -244,6 +274,8 @@ export function GoalsScreen() {
                     {goal.risk_level} risk  |  {goal.flexibility}
                   </Text>
                 </View>
+                <ContributionPreview goalId={goal.id} revision={`${revision}:${JSON.stringify(goal)}`} />
+                <ActionButton label="Edit goal" disabled={busy} onPress={() => void editGoal(goal.id)} />
                 <Pressable
                   accessibilityRole="button"
                   onPress={() => deleteGoal(goal.id, goal.name)}
@@ -291,8 +323,8 @@ export function GoalsScreen() {
 
       <FormSheet
         visible={createOpen}
-        title="Create a goal"
-        subtitle="You choose the purpose, target, priority, and contribution plan."
+        title={editingGoal ? "Edit goal" : "Create a goal"}
+        subtitle="You choose the purpose, target, and contribution timeline."
         onClose={() => setCreateOpen(false)}
       >
         <Field
@@ -326,11 +358,12 @@ export function GoalsScreen() {
           keyboardType="decimal-pad"
         />
         <Field
-          label="Monthly contribution"
+          label="Fixed monthly amount (nominal; used only in fixed monthly mode)"
           value={monthlyContribution}
           onChangeText={setMonthlyContribution}
           placeholder="0"
           keyboardType="decimal-pad"
+          editable={rules === null}
         />
         <DateField
           label="Target date (optional)"
@@ -338,15 +371,10 @@ export function GoalsScreen() {
           onChange={setTargetDate}
           optional
         />
-        <ChoiceGroup
-          label="Priority"
-          options={[1, 2, 3, 4, 5].map((item) => ({
-            label: String(item),
-            value: String(item),
-          }))}
-          value={priority}
-          onChange={setPriority}
-        />
+        <ChoiceGroup label="Target amount basis" options={basisOptions} value={targetBasis} onChange={v => setTargetBasis(v as MoneyBasis)} />
+        <Text>Real targets use reference-date purchasing power; nominal targets are fixed future amounts.</Text>
+        <Field label="Target-cost annual inflation override (%; optional)" value={inflation} onChangeText={setInflation} keyboardType="numbers-and-punctuation" helper="Target cost only. Income and contributions use the global timeline." />
+        <ContributionRulesEditor rules={rules} onChange={setRules} currency={targetCurrency} />
         <ChoiceGroup
           label="Risk comfort"
           options={riskOptions}

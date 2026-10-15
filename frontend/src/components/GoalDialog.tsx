@@ -2,6 +2,10 @@ import { useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 import { api, ApiError } from "../api";
 import { amount, dateLabel, number } from "../format";
+import { ContributionRulesEditor } from "./ContributionRulesEditor";
+import { PlanField, PlanSelect } from "./PlanningEditor";
+import type { ContributionRule, MoneyBasis } from "../types";
+import { newRule } from "../planning";
 import type {
   AccountSummary,
   Currency,
@@ -100,6 +104,9 @@ export function GoalDialog({
   >(goal?.visualization_budget_period ?? "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [rules, setRules] = useState<ContributionRule[] | null>(() => goal ? goal.contribution_rules ?? null : [newRule()]);
+  const [targetBasis, setTargetBasis] = useState<MoneyBasis>(goal?.target_money_basis ?? "real");
+  const [inflation, setInflation] = useState(goal?.annual_inflation_rate == null ? "" : String(Number(goal.annual_inflation_rate) * 100));
 
   function changeGoalType(nextType: GoalType | "") {
     if (nextType !== goalType) {
@@ -139,11 +146,10 @@ export function GoalDialog({
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") ?? "").trim();
     const targetDate = String(form.get("targetDate") ?? "");
-    const priority = String(form.get("priority") ?? "");
     const riskLevel = String(form.get("riskLevel") ?? "");
     const flexibility = String(form.get("flexibility") ?? "");
-    if (!goalType || !priority || !riskLevel || !flexibility || !target) {
-      setError("Complete the goal type, target, priority, risk comfort, and deadline flexibility.");
+    if (!goalType || !riskLevel || !flexibility || !target) {
+      setError("Complete the goal type, target, risk comfort, and deadline flexibility.");
       setSaving(false);
       return;
     }
@@ -167,7 +173,9 @@ export function GoalDialog({
       name,
       goal_type: goalType,
       target_currency: targetCurrency,
-      priority: Number(priority),
+      target_money_basis: targetBasis,
+      annual_inflation_rate: inflation === "" ? null : String(Number(inflation) / 100),
+      contribution_rules: rules,
       risk_level: riskLevel as GoalCreatePayload["risk_level"],
       monthly_contribution: String(form.get("monthlyContribution") || "0"),
       flexibility: flexibility as GoalCreatePayload["flexibility"],
@@ -215,7 +223,7 @@ export function GoalDialog({
       <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="goal-dialog-title">
         <div className="modal-heading">
           <div>
-            <div className="eyebrow">Your plan, your priorities</div>
+            <div className="eyebrow">Your financial plan</div>
             <h2 id="goal-dialog-title">{goal ? "Edit financial goal" : "Add a financial goal"}</h2>
           </div>
           <button className="icon-button" type="button" aria-label="Close" onClick={onClose}>
@@ -223,7 +231,7 @@ export function GoalDialog({
           </button>
         </div>
         <p className="modal-intro">
-          Goals describe what the money is for. You choose the deadline, priority, and risk comfort.
+          Goals describe what the money is for. You choose the deadline and risk comfort.
         </p>
         <form className="goal-form" onSubmit={handleSubmit}>
           <label className="form-field">
@@ -428,10 +436,15 @@ export function GoalDialog({
               <input name="targetDate" type="date" defaultValue={goal?.target_date ?? ""} />
             </label>
             <label className="form-field">
-              <span>Monthly contribution for cash-allocation rules ({targetCurrency}) <small>optional</small></span>
-              <input name="monthlyContribution" type="number" min="0" step="0.01" defaultValue={goal?.monthly_contribution ?? "0"} placeholder="Leave blank if not planned" />
+              <span>Fixed monthly amount ({targetCurrency}; nominal; used only in fixed monthly mode)</span>
+              <input name="monthlyContribution" type="number" min="0" step="0.01" defaultValue={goal?.monthly_contribution ?? "0"} placeholder="0" readOnly={rules !== null} />
             </label>
           </div>
+          <PlanSelect label="Target amount basis" value={targetBasis} options={["real", "nominal"]} onChange={v => setTargetBasis(v as MoneyBasis)} />
+          <p className="quiet-copy">Real targets are expressed in reference-date purchasing power. Nominal targets are fixed future currency amounts.</p>
+          <PlanField label="Target-cost annual inflation override (%; blank uses timeline)"><input type="number" min="-50" max="100" step="any" value={inflation} onChange={e => setInflation(e.target.value)} /></PlanField>
+          <p className="quiet-copy">This override changes target-cost inflation only. Income and contributions always use the global financial timeline.</p>
+          <ContributionRulesEditor rules={rules} onChange={setRules} currency={targetCurrency} />
           <div className="form-row">
             <label className="form-field">
               <span>Visualization-only budget <small>optional</small></span>
@@ -461,26 +474,11 @@ export function GoalDialog({
           </div>
           <p className="goal-visual-budget-note">
             The visualization-only budget is saved for future goal charts. It does not post money,
-            change an account balance, or affect cash-allocation rules. The existing monthly
-            contribution above is a separate input for the cash-allocation rule.
+            change an account balance, or affect cash-allocation rules. Your contribution mode
+            above drives projections and funding needs: either the fixed monthly amount or your
+            scheduled contribution rules, including planned bonuses.
           </p>
           <div className="form-row">
-            <label className="form-field">
-              <span>Priority</span>
-              <select name="priority" required defaultValue={goal ? String(goal.priority) : ""}>
-                <option value="" disabled>Choose priority</option>
-                <option value="1">1 · Highest</option>
-                <option value="2">2</option>
-                <option value="3">3 · Standard</option>
-                <option value="4">4</option>
-                <option value="5">5 · Lowest</option>
-                <option value="6">6</option>
-                <option value="7">7</option>
-                <option value="8">8</option>
-                <option value="9">9</option>
-                <option value="10">10 · Lowest</option>
-              </select>
-            </label>
             <label className="form-field">
               <span>Risk comfort</span>
               <select name="riskLevel" required defaultValue={goal?.risk_level ?? ""}>

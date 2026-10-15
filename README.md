@@ -26,15 +26,74 @@ For this personal MVP, Python makes the calculation and AI integration layers st
 - Multi-currency EUR/USD/RON cash sub-accounts under each bank or broker. Existing account currency and opening cash are migrated into its primary sub-account.
 - Guided initial portfolio setup to enter multiple institutions and current currency balances plus already-owned stock/ETF positions in one atomic save. Average cost defaults to the instrument's listing currency and can be overridden.
 - Provider-backed stock/ETF search and holdings entry; manually refreshable Twelve Data quotes and EUR/USD, EUR/RON, and USD/RON FX rates. Automatic hourly refresh is disabled.
-- User-created goals where the user supplies the purpose, currency, amount, priority, risk comfort, deadline flexibility, and contribution plan; active goals can be edited or archived from Goals & plan.
+- User-created goals with purpose, currency, target, risk comfort, deadline flexibility, and contribution rules; active goals can be edited or archived from Goals & plan.
 - One-time and recurring salary, bonus, bill, windfall, dividend, interest, and contribution forecasts.
 - One-time “extra cash received” entries that update the selected owned currency sub-account and are protected against duplicate retries.
-- Priority-first, contribution-proportional, and fixed-percentage goal funding.
+- Scheduled-contribution-proportional and fixed-percentage goal funding, without goal priorities.
 - No allocation rule or asset target weights are preloaded; the user must set them before generating an investment preview.
 - Deterministic, buy-only asset-class allocation preview with reserve protection and a ten-minute preview expiry. It does not create cash flows or place trades.
 - Read-only AI assistant that receives a compact portfolio snapshot only when the user submits a question.
 - Dark mode with the selected preference saved in the browser.
 - FastAPI Swagger UI at `/docs`.
+
+## Financial timeline and goal planning
+
+Goals & plan includes a shared **forecast-only financial timeline**. Its salary and bonus assumptions
+do not create cash-flow entries, credit wallets, or place trades. Existing cash-flow schedules and
+automatic salary credits remain separate tracking features.
+
+- Enter net salary, future job salaries, fixed bonuses, fixed contributions, and targets in the
+  purchasing power of the displayed **reference date** by default. This date is fixed when the plan
+  is first saved or the account is created; it does not move forward every time the page is opened.
+- **Annual salary growth is the total nominal increase before inflation.** With a 5% salary raise
+  and 3% inflation, purchasing power grows by `1.05 / 1.03 - 1`, about 1.94%. The application does
+  not add inflation on top of the raise. A 0% raise holds the nominal salary fixed and loses
+  purchasing power when inflation is positive.
+- A future salary entered in reference-date money is inflated once to its job's start date.
+  Subsequent salary growth is nominal. For example, a salary of EUR 5,000 in reference-date money
+  starting four years later at 3% inflation begins at approximately EUR 5,628 nominal. New job
+  segments replace the previous salary; end the old salary before starting the new one.
+- Use **nominal** amounts for known future contracts or deliberately fixed payments. They are not
+  inflation-adjusted. Income growth compounds at the entered annual rate using elapsed time.
+- Configure an annual inflation assumption and optional dated rate changes. A per-goal inflation
+  override applies to the goal's target cost, not to salary or other goals. Rates are assumptions,
+  not forecasts; the initial 3% is editable and not derived from the currency.
+- Bonuses can be fixed, recurring or one-time, or a percentage of an identified salary's annualized
+  amount at the payment date. Salary-percentage bonuses are not inflation-adjusted a second time.
+- Each goal can combine salary/bonus percentages, fixed contributions per income payment, fixed
+  monthly/quarterly/annual contributions, and one-time lump sums. Fixed values use the goal currency.
+  Dated rules support future savings increases: end the old rule and start the replacement, or add
+  a supplementary rule. Overlapping rules intentionally add together.
+- Percentage rules follow each linked income payment. Independent fixed rules follow their own
+  recurrence. Rules can follow all salary income (including future jobs), all bonuses, or one
+  specific source. Percentages sharing an income source across active goals must not exceed 100% during
+  overlapping periods. Fixed commitments are not silently reduced when money is insufficient.
+- Optional monthly living expenses are entered in reference-date money. Contribution previews flag
+  months where combined savings exceed projected income after expenses, and warn when expenses are
+  unspecified. Such goals remain visible as conditional, overcommitted projections.
+- Previews show nominal and reference-date contribution amounts. The investment simulation, tax
+  basis, analytical bands, and recovery calculations all consume the same month-by-month nominal
+  contribution schedule. Recovery savings are an **additional constant nominal amount per month**,
+  not a replacement for bonuses or scheduled changes.
+
+Future FX conversions hold current rates constant; unavailable currency conversions are reported
+explicitly. Income and inflation assumptions are deterministic; uncertain bonuses, unemployment
+probabilities, and stochastic salary scenarios are not modeled. Goal simulation horizons are
+limited to 100 years, with up to 10 additional years for deadline-extension recovery.
+
+API endpoints: `GET/PUT /api/financial-plan` and
+`GET /api/goals/{goal_id}/contributions?months=120` (1-1,200 months).
+Goal create/update payloads accept `target_money_basis`, an optional `annual_inflation_rate`, and
+`contribution_rules`. Rates and shares in the API are decimal ratios (`0.05` means 5%).
+For compatibility, `contribution_rules: null` keeps the original constant nominal
+`monthly_contribution`; an empty array explicitly schedules no contributions. Omitted new fields
+on updates preserve their existing values.
+
+Before starting an existing installation, run `alembic upgrade head` from the backend directory.
+The financial-timeline migration preserves existing monthly contributions, removes the priority
+column, and converts saved priority-first funding policies and recommendation records to proportional
+funding. Goal lists are sorted by name rather than priority. Proportional extra-cash previews use
+each goal's average planned contributions over the next 12 months, including bonuses and lump sums.
 
 ## Market data setup
 
@@ -94,7 +153,9 @@ npm install
 npm start
 ```
 
-Scan the Expo QR code with Expo Go, or press `a`/`i` to launch an Android/iOS simulator. Android emulators use `http://10.0.2.2:8000/api` automatically; iOS simulators use `http://localhost:8000/api`. For a physical phone, copy `mobile/.env.example` to `mobile/.env`, set `EXPO_PUBLIC_API_BASE_URL` to `http://<computer-lan-ip>:8000/api`, and set `API_BIND_ADDRESS=0.0.0.0` in the repository `.env`; then run `docker compose up -d backend` from the repository root. Keep the API restricted to a trusted local network; the prototype does not provide HTTPS or production network hardening.
+Scan the Expo QR code with Expo Go, or press `a`/`i` to launch an Android/iOS simulator. Android emulators use `http://10.0.2.2:8000/api` automatically; iOS simulators use `http://localhost:8000/api`. iOS allows HTTP only for local-network development; configure HTTPS before connecting to remote hosts. For a physical phone, copy `mobile/.env.example` to `mobile/.env`, set `EXPO_PUBLIC_API_BASE_URL` to `http://<computer-lan-ip>:8000/api`, and set `API_BIND_ADDRESS=0.0.0.0` in the repository `.env`; then run `docker compose up -d backend` from the repository root. Keep the API restricted to a trusted local network; the prototype does not provide HTTPS or production network hardening.
+
+For a native Android debug build, install Android Studio and a JDK 21, start an emulator, then run `npm run android` from `mobile/`. iOS native builds and the iOS Simulator require macOS; the iOS app configuration and JavaScript bundle can still be checked from other platforms.
 
 ### Run backend tests
 
@@ -135,8 +196,9 @@ API tests use isolated SQLite temporary databases; the Docker stack uses Postgre
 | `POST /api/holdings/{id}/transfer` | Move all or part of a position to another account the user owns; merges into an existing position of the same instrument there. An optional fiat fee can be deducted from the source or destination wallet. No cash moves for the shares. Holdings linked to a goal cannot be moved (idempotent via `idempotency_key`; employer-plan holdings cannot be moved) |
 | `POST /api/cash-transfers` | Move cash between two of the user's wallets (for example XTB EUR to ING RON); same-currency transfers move the same amount, cross-currency transfers take a user-entered received amount with no automatic FX. An optional fiat fee can be deducted from the source or destination wallet. No trade or cash-flow record is created. Idempotent via `idempotency_key`; employer-plan wallets are not allowed |
 | `POST /api/market/refresh` | Manually refresh held symbols and EUR/USD/RON FX rates |
-| `GET /api/projections/portfolio?target_date=2036-10-11` | Deterministic editable-return projection for current account assets; excludes forecasts and unvested awards |
-| `POST /api/projections/portfolio/scenario` | Compare that baseline with a hypothetical monthly contribution split across selected quoted holdings, using editable per-holding annual returns; returns the current qualitative X/Y/Z risk mix and explicit assumptions |
+| `GET /api/projections/portfolio?target_date=2036-10-11` | Deterministic baseline projection with optional tax and inflation assumptions; excludes forecasts and unvested awards |
+| `POST /api/projections/portfolio/range` | Compare a baseline with per-investment worst/best cases for selected holdings, deposits, and projection-only investments, using an entered inflation assumption and optional monthly contributions and tax |
+| `POST /api/projections/portfolio/scenario` | Legacy contribution-scenario endpoint for selected quoted holdings; returns the current qualitative X/Y/Z risk mix and explicit assumptions |
 | `GET /api/goals` / `POST /api/goals` | List or add a goal |
 | `PUT /api/goals/{id}` / `DELETE /api/goals/{id}` | Update a goal or archive it from the active plan |
 | `GET /api/goals/{id}/insights` | Insights for an active goal: value after estimated sale tax, bucket drift against the glide path, next-contribution routing, risk warnings, tax-aware sale proposals, projection bands, and recovery options. Tax rules are limited to supported country/year packs and their stated limitations. Returns `available: false` with a reason when the goal has no target amount or no future deadline |
@@ -178,7 +240,10 @@ The default Compose port bindings are loopback-only. Do not expose this service 
 - Stock transfers move a holding between two accounts the user owns, with no cash movement for the shares. A full move removes the source position; a partial move prorates the funding cost. The destination merges with an existing position of the same instrument, using a weighted-average cost and the earliest purchase date. Moved positions keep no funding wallet link. Holdings linked to a goal must be unlinked first.
 - The application no longer seeds demo users or sample financial records. Historical sample rows from an older shared profile are preserved but inaccessible through the new user-scoped APIs.
 - The Overview investment treemap groups identical normalized ticker symbols across accounts/listings, sizes each tile by its combined estimated after-tax market value, and colors it by its combined estimated after-tax gain/loss percentage. Existing holdings are backfilled at a 5% nominal return assumption; new ETFs default to X/6% and individual stocks to Y/5%. Users can edit risk tier and return per holding. These starting values are placeholders, not provider-derived ratings or expected performance.
-- Portfolio projections apply each holding's user-entered effective annual total-return assumption as current value × `(1 + return)^(days / 365)`, hold current FX constant, keep ordinary cash flat (except savings wallets with a monthly interest rate), and accrue deposits only to maturity. Effective APY uses `(1 + APY)^(days / 365)`; nominal APR uses the configured periodic rate, including a prorated partial period; at-maturity products use simple APR. The separate contribution scenario invests hypothetical monthly amounts at the percentages and per-holding return assumptions supplied in the request, compounds end-of-period contributions with each holding's `(1 + annual return)^(1 / 12)` monthly factor (first contribution one month after the as-of date), applies the current estimated sale-tax rate to positive gains, and does not change tracked balances. It excludes unvested awards and future cash flows. The X/Y/Z risk tiers are qualitative labels weighted by current after-tax holding value, not historical volatility or probability-of-loss estimates; no crypto instrument type or historical volatility analysis is implemented yet. Projection results are not promises or investment advice.
+- Baseline projections apply each holding's editable effective annual total-return assumption as current value × `(1 + return)^(days / 365)`, hold current FX constant, keep ordinary cash flat (except savings wallets with monthly interest), and accrue fixed deposits only to maturity. Effective APY uses `(1 + APY)^(days / 365)`; nominal APR uses the configured periodic rate, including a prorated partial period; at-maturity products use simple APR. The projection panel defaults to after-tax values: holdings use the saved estimated sale-tax rate on positive gains at hypothetical liquidation, savings/deposit interest uses the account's country-rule estimate when available (otherwise a labeled 10% assumption, unless the account is explicitly tax-exempt), and projection-only investments use the tax rate entered by the user. These are estimates, not a tax return; CASS and future law changes are excluded.
+- The projection panel asks for an annual inflation assumption as part of each calculation and deflates nominal results by `(1 + annual inflation)^(days / 365)`. The rate is held constant within that selected horizon. Changing the projection period or end date clears the prior rate, so a five-year and ten-year projection can use different assumptions. Inflation is not inherited from the tax-residence profile or treated as a forecast.
+- In **What could my accounts be worth?**, users select holdings, fixed deposits, and projection-only investments, then edit a worst and best annual-return assumption for each. Stock/ETF defaults are the saved expected return plus/minus the app's capital-market volatility assumption; deposit defaults start around the contract rate. These are editable sensitivity cases, not confidence intervals or probabilities. Each chart line changes one investment against the same baseline; the combined worst/best totals apply every selected investment's respective case at once. Optional monthly contributions are split by user-entered percentages (which must total 100%) and the first contribution is one month after the as-of date; deposit contributions made after maturity remain flat cash. Projection-only investments are not persisted, and no projection changes tracked balances. The scenario summary shows the account's value-weighted qualitative X/Y/Z mix for quoted holdings only; it is not measured volatility or probability of loss. Unvested awards and future cash-flow forecasts are excluded. Results are not promises or investment advice.
+- The separate legacy contribution endpoint still supports hypothetical monthly amounts to quoted holdings, compounds end-of-period contributions with each holding's `(1 + annual return)^(1 / 12)` factor, and does not change tracked balances. No crypto instrument type or historical volatility analysis is implemented.
 - New profiles start without a funding rule, asset-class weights, reserve target, balances, or goals; the user chooses these before an allocation preview is enabled.
 - Provider quotes are informational marks and may be delayed according to the selected provider plan and listing. Quotes are fetched on explicit symbol search/add and manual refresh; FX and existing quote marks do not refresh automatically. They are not executable prices.
 - The Overview breaks wealth down by account: tracked cash, gross owned holdings, estimated tax on gains, after-tax holdings, fixed-deposit accrual, and account total. The account total excludes unvested awards and future income; those remain separate.

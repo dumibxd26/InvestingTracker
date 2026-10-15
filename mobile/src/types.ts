@@ -1,4 +1,11 @@
 export type {
+  FinancialPlanPayload,
+  IncomeSource,
+  MoneyBasis,
+  ContributionRule,
+  ContributionSchedule,
+  GoalRecord,
+  GoalUpdatePayload,
   AccountCreatePayload,
   AccountSummary,
   AccountTaxProfileUpdatePayload,

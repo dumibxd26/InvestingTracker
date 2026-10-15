@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
@@ -23,12 +24,14 @@ from app.calculations import (
     generate_vesting_schedule,
     goal_progress,
     rebalance_with_contribution,
+    round_allocations,
     round_money,
     route_funding_to_goals,
 )
 from app.cash_flow_logic import add_months, occurrence_dates
 from app.config import get_settings
 from app.gbi.adapter import build_goal_spec, load_allocated_holdings
+from app.gbi.constants import CMA_CONFIG, MAX_EXTENSION_MONTHS
 from app.gbi.controller import build_goal_insights
 from app.gbi.domain import to_plain
 from app.gbi.schemas import GoalInsightsResponse
@@ -52,6 +55,7 @@ from app.models import (
     CashTransfer,
     CompoundingFrequency,
     Currency,
+    FinancialPlan,
     FixedDeposit,
     FlowDirection,
     FlowKind,
@@ -80,6 +84,15 @@ from app.models import (
     ValuationSnapshot,
     VestingGrant,
     VestingTranche,
+)
+from app.planning import (
+    ContributionRule,
+    ContributionSchedule,
+    Convert,
+    FinancialPlanPayload,
+    contribution_months,
+    inflation_factor,
+    matching_sources,
 )
 from app.schemas import (
     AccountCreate,
@@ -126,12 +139,17 @@ from app.schemas import (
     MarketSymbolSearchResult,
     PolicyResponse,
     PolicyUpdate,
+    PortfolioProjectionRangeRequest,
+    PortfolioProjectionRangeResponse,
     PortfolioProjectionResponse,
     PortfolioProjectionScenarioRequest,
     PortfolioProjectionScenarioResponse,
     ProfileUpdate,
     ProjectionAccountValue,
     ProjectionPoint,
+    ProjectionRangeInvestmentResult,
+    ProjectionRangeLine,
+    ProjectionRangeLinePoint,
     ProjectionScenarioInvestment,
     ProjectionScenarioRiskSummary,
     RecommendationRequest,
@@ -154,7 +172,11 @@ from app.schemas import (
     VestingTrancheSummary,
 )
 from app.security import create_access_token, digest_access_token, hash_password, verify_password
-from app.taxes.engine import estimate_capital_gain_tax, estimate_country_cass
+from app.taxes.engine import (
+    estimate_capital_gain_tax,
+    estimate_country_cass,
+    estimate_income_tax,
+)
 from app.taxes.rules import country_rule_status, get_country_tax_rules
 
 ZERO = Decimal("0")
@@ -163,6 +185,7 @@ CENT = Decimal("0.01")
 SAVINGS_INTEREST_SOURCE = "SAVINGS_INTEREST"
 MAX_INTEREST_CATCH_UP_MONTHS = 600
 DEFAULT_SALE_TAX_RATE = Decimal("0.03")
+DEFAULT_INTEREST_TAX_RATE = Decimal("0.10")
 
 
 def _get_user(session: Session, user_id: uuid.UUID) -> User:
@@ -240,6 +263,36 @@ def _fx_matrix(session: Session, user: User) -> dict[tuple[Currency, Currency], 
         rates.setdefault((Currency.EUR, Currency.USD), user.usd_per_eur)
         rates.setdefault((Currency.USD, Currency.EUR), ONE / user.usd_per_eur)
     return rates
+
+
+def _projection_volatility_assumption(
+    instrument: Instrument, risk_tier: str
+) -> Decimal:
+    if instrument.asset_class == AssetClass.FIXED_INCOME:
+        asset_class = "INVESTMENT_BOND"
+    elif instrument.asset_class == AssetClass.SATELLITE or risk_tier == "Z":
+        asset_class = "HIGH_BETA_SPEC"
+    elif instrument.instrument_type == "ETF":
+        asset_class = "BROAD_EQUITY_ETF"
+    else:
+        asset_class = "BLUE_CHIP_STOCK"
+    return Decimal(str(CMA_CONFIG[asset_class].volatility))
+
+
+def _interest_tax_rate_for_account(
+    user: User, account: BrokerAccount | AccountSummary
+) -> tuple[Decimal, list[str]]:
+    estimate = estimate_income_tax(
+        event_type="interest",
+        gross_amount=ONE,
+        country_code=user.tax_residence_country_code,
+        tax_year=user.tax_year,
+        source_country_code=account.broker_country_code,
+        reporting_method=str(account.tax_reporting_method),
+        legacy_rate=DEFAULT_INTEREST_TAX_RATE,
+        tax_exempt=account.tax_reporting_method == TaxReportingMethod.TAX_EXEMPT,
+    )
+    return estimate.rate or ZERO, list(estimate.warnings)
 
 
 def _market_fx_summaries(session: Session) -> list[MarketFXRateSummary]:
@@ -2770,6 +2823,12 @@ def register_user(session: Session, payload: RegisterRequest, session_days: int)
                 target_weights={},
             )
         )
+        session.add(FinancialPlan(
+            user_id=user.id,
+            configuration=FinancialPlanPayload(
+                anchor_date=date.today(), expenses_currency=user.base_currency
+            ).model_dump(mode="json"),
+        ))
         session.add(
             LoginSession(
                 user_id=user.id,
@@ -3467,10 +3526,167 @@ def list_goals(session: Session, user_id: uuid.UUID) -> list[GoalResponse]:
         session.scalars(
             select(Goal)
             .where(Goal.user_id == user.id, Goal.is_active.is_(True))
-            .order_by(Goal.priority, Goal.name)
+            .order_by(Goal.name, Goal.id)
         )
     )
     return [_goal_response(session, goal) for goal in goals]
+
+
+def get_financial_plan(session: Session, user_id: uuid.UUID) -> FinancialPlanPayload:
+    user = _get_user(session, user_id)
+    stored = session.get(FinancialPlan, user.id)
+    if stored is None:
+        return FinancialPlanPayload(anchor_date=date.today(), expenses_currency=user.base_currency)
+    return FinancialPlanPayload.model_validate(stored.configuration)
+
+
+def _validate_contribution_sources(
+    plan: FinancialPlanPayload, rule_sets: list[list[ContributionRule] | None]
+) -> None:
+    sources = {source.id: source for source in plan.income_sources}
+    changes: dict[str, dict[date, Decimal]] = {}
+    for rules in rule_sets:
+        for rule in rules or []:
+            if rule.source_id is None and rule.source_kind is None:
+                continue
+            applicable = matching_sources(rule, plan)
+            if not applicable:
+                raise HTTPException(
+                    status_code=422,
+                    detail="A contribution references income missing from this plan.",
+                )
+            if rule.calculation != "percentage":
+                continue
+            for source in applicable:
+                start = max(rule.start_date, source.start_date)
+                end = min(rule.end_date or date.max, source.end_date or date.max)
+                if start > end:
+                    continue
+                deltas = changes.setdefault(source.id, {})
+                deltas[start] = deltas.get(start, ZERO) + rule.value
+                if end != date.max:
+                    after = end + timedelta(days=1)
+                    deltas[after] = deltas.get(after, ZERO) - rule.value
+    for source_id, deltas in changes.items():
+        total = ZERO
+        for at in sorted(deltas):
+            total += deltas[at]
+            if total > ONE:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Contributions from {sources[source_id].name} exceed 100% on {at}. "
+                        "Reduce overlapping shares across goals."
+                    ),
+                )
+
+
+def _goal_rules(goal: Goal) -> list[ContributionRule] | None:
+    if goal.contribution_rules is None:
+        return None
+    return [ContributionRule.model_validate(rule) for rule in goal.contribution_rules]
+
+
+def update_financial_plan(
+    session: Session, user_id: uuid.UUID, payload: FinancialPlanPayload
+) -> FinancialPlanPayload:
+    session.scalar(select(User).where(User.id == user_id).with_for_update())
+    _get_user(session, user_id)
+    stored = session.get(FinancialPlan, user_id)
+    if payload.anchor_date > date.today():
+        raise HTTPException(status_code=422, detail="The planning reference date cannot be future.")
+    if payload.anchor_date < add_months(date.today(), -1200):
+        raise HTTPException(
+            status_code=422, detail="The planning reference date cannot be over 100 years ago."
+        )
+    if stored is not None and (
+        payload.anchor_date != FinancialPlanPayload.model_validate(stored.configuration).anchor_date
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The reference date is fixed so existing today's-money amounts "
+                "keep their meaning."
+            ),
+        )
+    goals = list(session.scalars(select(Goal).where(
+        Goal.user_id == user_id, Goal.is_active.is_(True)
+    )))
+    _validate_contribution_sources(payload, [_goal_rules(goal) for goal in goals])
+    if stored is None:
+        stored = FinancialPlan(user_id=user_id, configuration=payload.model_dump(mode="json"))
+        session.add(stored)
+    else:
+        stored.configuration = payload.model_dump(mode="json")
+    session.commit()
+    return payload
+
+
+def _ensure_financial_plan(session: Session, user_id: uuid.UUID) -> FinancialPlanPayload:
+    plan = get_financial_plan(session, user_id)
+    if session.get(FinancialPlan, user_id) is None:
+        session.add(FinancialPlan(user_id=user_id, configuration=plan.model_dump(mode="json")))
+        session.flush()
+    return plan
+
+
+def _planning_convert(session: Session, user: User) -> Convert:
+    rates = _fx_matrix(session, user)
+
+    def convert(value: Decimal, source: Currency, destination: Currency) -> Decimal:
+        return _to_base(value, source, destination, user.usd_per_eur, rates)
+
+    return convert
+
+
+def goal_contribution_schedule(
+    session: Session, user_id: uuid.UUID, goal_id: uuid.UUID, months: int = 120
+) -> ContributionSchedule:
+    user = _get_user(session, user_id)
+    goals = list(session.scalars(select(Goal).where(
+        Goal.user_id == user.id, Goal.is_active.is_(True)
+    )))
+    goal = next((item for item in goals if item.id == goal_id), None)
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Active goal was not found")
+    plan = get_financial_plan(session, user.id)
+    convert = _planning_convert(session, user)
+    today = date.today()
+    own_months = contribution_months(
+        plan, _goal_rules(goal), goal.monthly_contribution,
+        goal.target_currency, today, months, convert,
+    )
+    totals = [ZERO] * months
+    for item in goals:
+        schedule = own_months if item.id == goal.id else contribution_months(
+            plan, _goal_rules(item), item.monthly_contribution,
+            item.target_currency, today, months, convert,
+        )
+        amounts = [
+            convert(point.nominal_contribution, item.target_currency, goal.target_currency)
+            for point in schedule
+        ]
+        for index, value in enumerate(amounts):
+            totals[index] += value
+    warnings = []
+    if plan.monthly_expenses is None:
+        warnings.append(
+            "Living expenses are not configured; income is not the same as disposable income."
+        )
+    overcommitted = [
+        point.date.isoformat() for index, point in enumerate(own_months)
+        if totals[index] > max(ZERO, point.nominal_income - point.nominal_expenses)
+    ]
+    if overcommitted:
+        warnings.append(
+            f"Combined goal contributions exceed projected disposable income in "
+            f"{len(overcommitted)} month(s), first on {overcommitted[0]}. "
+            "These projections assume additional funding; no goal is silently deprioritized."
+        )
+    return ContributionSchedule(
+        anchor_date=plan.anchor_date, currency=goal.target_currency,
+        months=own_months, warnings=warnings,
+    )
 
 
 def _allocation_pairs(items: list[Any]) -> list[tuple[uuid.UUID, Decimal]]:
@@ -3655,7 +3871,15 @@ def _replace_goal_sources(
 
 
 def create_goal(session: Session, user_id: uuid.UUID, payload: GoalCreate) -> GoalResponse:
+    session.scalar(select(User).where(User.id == user_id).with_for_update())
     user = _get_user(session, user_id)
+    plan = _ensure_financial_plan(session, user.id)
+    existing = list(session.scalars(select(Goal).where(
+        Goal.user_id == user.id, Goal.is_active.is_(True)
+    )))
+    _validate_contribution_sources(
+        plan, [_goal_rules(goal) for goal in existing] + [payload.contribution_rules]
+    )
     if not _can_convert(
         payload.target_currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
     ):
@@ -3686,6 +3910,10 @@ def create_goal(session: Session, user_id: uuid.UUID, payload: GoalCreate) -> Go
     goal_values = payload.model_dump(
         exclude={"linked_account_ids", "holding_allocations", "fixed_deposit_allocations"}
     )
+    goal_values["contribution_rules"] = (
+        [rule.model_dump(mode="json") for rule in payload.contribution_rules]
+        if payload.contribution_rules is not None else None
+    )
     goal = Goal(user_id=user.id, **goal_values)
     session.add(goal)
     session.flush()
@@ -3712,6 +3940,7 @@ def create_goal(session: Session, user_id: uuid.UUID, payload: GoalCreate) -> Go
 def update_goal(
     session: Session, user_id: uuid.UUID, goal_id: uuid.UUID, payload: GoalUpdate
 ) -> GoalResponse:
+    session.scalar(select(User).where(User.id == user_id).with_for_update())
     user = _get_user(session, user_id)
     goal = session.scalar(
         select(Goal)
@@ -3724,6 +3953,17 @@ def update_goal(
     )
     if goal is None:
         raise HTTPException(status_code=404, detail="Active goal was not found")
+    plan = _ensure_financial_plan(session, user.id)
+    existing = list(session.scalars(select(Goal).where(
+        Goal.user_id == user.id, Goal.is_active.is_(True), Goal.id != goal.id
+    )))
+    requested_rules = (
+        payload.contribution_rules if "contribution_rules" in payload.model_fields_set
+        else _goal_rules(goal)
+    )
+    _validate_contribution_sources(
+        plan, [_goal_rules(item) for item in existing] + [requested_rules]
+    )
     if not _can_convert(
         payload.target_currency, user.base_currency, _fx_matrix(session, user), user.usd_per_eur
     ):
@@ -3759,6 +3999,14 @@ def update_goal(
     goal_values = payload.model_dump(
         exclude={"linked_account_ids", "holding_allocations", "fixed_deposit_allocations"}
     )
+    for field in ("contribution_rules", "annual_inflation_rate", "target_money_basis"):
+        if field not in payload.model_fields_set:
+            goal_values.pop(field, None)
+    if "contribution_rules" in goal_values:
+        goal_values["contribution_rules"] = (
+            [rule.model_dump(mode="json") for rule in requested_rules]
+            if requested_rules is not None else None
+        )
     for field, value in goal_values.items():
         setattr(goal, field, value)
     _replace_goal_sources(
@@ -3882,6 +4130,12 @@ def goal_insights(
             available=False,
             unavailable_reason="The target date has passed. Move it forward to see projections.",
         )
+    horizon = max(1, round(max(0.1, (goal.target_date - today).days / 365.25) * 12))
+    if horizon > 1200:
+        return GoalInsightsResponse(
+            available=False,
+            unavailable_reason="Goal projections support deadlines up to 100 years from today.",
+        )
 
     fx_rates = _fx_matrix(session, user)
 
@@ -3899,6 +4153,49 @@ def goal_insights(
     default_rate = float(DEFAULT_SALE_TAX_RATE)
     allocations, notes = load_allocated_holdings(session, goal, spot_rate, today, default_rate)
     spec = build_goal_spec(goal, allocations, spot_rate, default_rate)
+    plan = get_financial_plan(session, user.id)
+    convert = _planning_convert(session, user)
+    months = horizon + MAX_EXTENSION_MONTHS
+    schedule = contribution_months(
+        plan, _goal_rules(goal), goal.monthly_contribution,
+        goal.target_currency, today, months, convert,
+    )
+    target_plan = plan
+    if goal.annual_inflation_rate is not None:
+        target_plan = plan.model_copy(update={
+            "annual_inflation_rate": goal.annual_inflation_rate, "inflation_changes": [],
+        })
+    today_factor = inflation_factor(target_plan, today)
+    target_factors = (1.0,) + tuple(
+        float(inflation_factor(target_plan, point.date) / today_factor) for point in schedule
+    )
+    spec = replace(
+        spec,
+        target_amount=(
+            spec.target_amount * float(today_factor)
+            if goal.target_money_basis == "real" else spec.target_amount
+        ),
+        monthly_contribution=float(schedule[0].nominal_contribution),
+        monthly_contributions=tuple(float(point.nominal_contribution) for point in schedule),
+        inflation_factors=target_factors,
+        tax_profile=replace(
+            spec.tax_profile,
+            annual_inflation_rate=float(target_plan.annual_inflation_rate),
+            is_target_in_todays_dollars=goal.target_money_basis == "real",
+            index_contributions_to_inflation=False,
+        ),
+    )
+    notes.extend([
+        "Income and contribution timelines are forecast assumptions, not wallet credits or trades.",
+        "Annual salary growth is the total nominal raise before inflation, "
+        "not growth above inflation.",
+        f"Today's-money inputs use the fixed reference date {plan.anchor_date.isoformat()}.",
+        "Future currency conversions hold current FX rates constant; "
+        "future payroll taxes are not modeled.",
+    ])
+    notes.extend(goal_contribution_schedule(
+        session, user.id, goal.id, min(horizon, 1200)
+    ).warnings)
     now = datetime(today.year, today.month, today.day, tzinfo=UTC)
     insights = build_goal_insights(spec, allocations, spot_rate, now, notes=notes)
     return GoalInsightsResponse.model_validate({"available": True, **to_plain(insights)})
@@ -4575,8 +4872,21 @@ def dashboard(
                 principal=deposit.principal,
                 accrued_interest=accrued_interest,
                 current_value=accrued_value,
+                current_value_base=round_money(deposit_base_value),
+                principal_value_base=round_money(
+                    _to_base(
+                        deposit.principal,
+                        deposit.currency,
+                        base_currency,
+                        usd_per_eur,
+                        fx_rates,
+                    )
+                ),
                 currency=deposit.currency,
                 annual_rate=deposit.annual_rate,
+                annual_return_volatility_assumption=Decimal(
+                    str(CMA_CONFIG["CASH_DEPOSIT"].volatility)
+                ),
                 rate_basis=deposit.rate_basis,
                 compounding=deposit.compounding,
                 period_months=deposit.period_months,
@@ -4728,9 +5038,14 @@ def dashboard(
         session.scalars(
             select(Goal)
             .where(Goal.user_id == user.id, Goal.is_active.is_(True))
-            .order_by(Goal.priority, Goal.name)
+            .order_by(Goal.name, Goal.id)
         )
     )
+    financial_plan = get_financial_plan(session, user.id)
+
+    def goal_convert(value: Decimal, source: Currency, destination: Currency) -> Decimal:
+        return _to_base(value, source, destination, usd_per_eur, fx_rates)
+
     linked_accounts_by_goal: dict[uuid.UUID, list[uuid.UUID]] = {}
     for goal_id, account_id in session.execute(
         select(GoalAccountLink.goal_id, GoalAccountLink.account_id)
@@ -4826,9 +5141,17 @@ def dashboard(
                 currency=base_currency,
                 progress_percent=progress_percent.quantize(Decimal("0.01")),
                 target_date=goal.target_date,
-                priority=goal.priority,
                 risk_level=goal.risk_level,
-                monthly_contribution=goal.monthly_contribution,
+                monthly_contribution=round_money(goal_convert(
+                    contribution_months(
+                        financial_plan, _goal_rules(goal), goal.monthly_contribution,
+                        goal.target_currency, today, 1, goal_convert,
+                    )[0].nominal_contribution,
+                    goal.target_currency, base_currency,
+                )),
+                target_money_basis=goal.target_money_basis,
+                annual_inflation_rate=goal.annual_inflation_rate,
+                contribution_rules=_goal_rules(goal),
                 visualization_budget_amount=goal.visualization_budget_amount,
                 visualization_budget_period=goal.visualization_budget_period,
                 fixed_percent=goal.fixed_percent,
@@ -4963,6 +5286,8 @@ def portfolio_projection(
     requested_currency: Currency | None = None,
     *,
     snapshot: dict[str, Any] | None = None,
+    include_taxes: bool = True,
+    annual_inflation_rate: Decimal = ZERO,
 ) -> PortfolioProjectionResponse:
     user = _get_user(session, user_id)
     today = date.today()
@@ -4973,6 +5298,11 @@ def portfolio_projection(
         raise HTTPException(
             status_code=422,
             detail="Projection dates can be at most 40 years in the future.",
+        )
+    if annual_inflation_rate <= -ONE:
+        raise HTTPException(
+            status_code=422,
+            detail="Annual inflation must be greater than −100%.",
         )
 
     snapshot = snapshot if snapshot is not None else dashboard(session, user.id, requested_currency)
@@ -4987,7 +5317,50 @@ def portfolio_projection(
         for subaccount in account.subaccounts
         if subaccount.annual_interest_rate and subaccount.interest_start_date is not None
     ]
+    accounts_by_id = {account.id: account for account in snapshot["accounts"]}
     deposits = list(session.scalars(select(FixedDeposit).where(FixedDeposit.user_id == user.id)))
+    deposit_tax_rates: dict[uuid.UUID, Decimal] = {}
+    projection_warnings: list[str] = []
+    for deposit in deposits:
+        account = accounts_by_id.get(deposit.account_id)
+        if account is None:
+            continue
+        rate, warnings = _interest_tax_rate_for_account(user, account)
+        deposit_tax_rates[deposit.id] = rate
+        if include_taxes:
+            projection_warnings.extend(warnings)
+
+    current_sale_tax_by_account: dict[uuid.UUID, Decimal] = {}
+    if not include_taxes:
+        for holding in holdings:
+            current_sale_tax_by_account[holding.account_id] = (
+                current_sale_tax_by_account.get(holding.account_id, ZERO)
+                + holding.estimated_sale_tax
+            )
+
+    current_deposit_tax_by_account: dict[uuid.UUID, Decimal] = {}
+    if include_taxes:
+        for deposit in deposits:
+            tax_rate = deposit_tax_rates.get(deposit.id, ZERO)
+            current_value = fixed_deposit_value(
+                deposit.principal,
+                deposit.annual_rate,
+                deposit.start_date,
+                min(today, deposit.maturity_date),
+                deposit.compounding,
+                deposit.rate_basis,
+            )
+            current_tax = max(ZERO, current_value - deposit.principal) * tax_rate
+            current_deposit_tax_by_account[deposit.account_id] = (
+                current_deposit_tax_by_account.get(deposit.account_id, ZERO)
+                + _to_base(
+                    current_tax,
+                    deposit.currency,
+                    base_currency,
+                    usd_per_eur,
+                    fx_rates,
+                )
+            )
 
     def project_at(projection_date: date) -> list[ProjectionAccountValue]:
         years = Decimal((projection_date - today).days) / Decimal(365)
@@ -5003,8 +5376,16 @@ def portfolio_projection(
             if future_payments <= 0:
                 continue
             monthly_growth = (ONE + wallet.annual_interest_rate / Decimal(12)) ** future_payments
+            future_interest = wallet.cash_balance * (monthly_growth - ONE)
+            account = accounts_by_id.get(account_id)
+            interest_tax = ZERO
+            if include_taxes and account is not None:
+                tax_rate, warnings = _interest_tax_rate_for_account(user, account)
+                interest_tax = max(ZERO, future_interest) * tax_rate
+                if future_interest > ZERO:
+                    projection_warnings.extend(warnings)
             cash_by_account[account_id] = cash_by_account.get(account_id, ZERO) + _to_base(
-                wallet.cash_balance * (monthly_growth - ONE),
+                future_interest - interest_tax,
                 wallet.currency,
                 base_currency,
                 usd_per_eur,
@@ -5031,8 +5412,10 @@ def portfolio_projection(
                 usd_per_eur,
                 fx_rates,
             )
-            future_tax = max(ZERO, future_gross_base - cost_basis_base) * (
-                holding.estimated_tax_rate
+            future_tax = (
+                max(ZERO, future_gross_base - cost_basis_base) * holding.estimated_tax_rate
+                if include_taxes
+                else ZERO
             )
             projected_value = future_gross_base - future_tax
             holding_by_account[holding.account_id] = (
@@ -5050,10 +5433,21 @@ def portfolio_projection(
                 deposit.compounding,
                 deposit.rate_basis,
             )
+            deposit_tax = (
+                max(ZERO, value_at_accrual_date - deposit.principal)
+                * deposit_tax_rates.get(deposit.id, ZERO)
+                if include_taxes
+                else ZERO
+            )
+            if include_taxes and value_at_accrual_date > deposit.principal:
+                account = accounts_by_id.get(deposit.account_id)
+                if account is not None:
+                    _, warnings = _interest_tax_rate_for_account(user, account)
+                    projection_warnings.extend(warnings)
             deposit_by_account[deposit.account_id] = (
                 deposit_by_account.get(deposit.account_id, ZERO)
                 + _to_base(
-                    value_at_accrual_date,
+                    value_at_accrual_date - deposit_tax,
                     deposit.currency,
                     base_currency,
                     usd_per_eur,
@@ -5066,17 +5460,25 @@ def portfolio_projection(
             projected_cash = cash_by_account.get(account.id, ZERO)
             projected_holdings = holding_by_account.get(account.id, ZERO)
             projected_deposits = deposit_by_account.get(account.id, ZERO)
+            projected_total = projected_cash + projected_holdings + projected_deposits
+            real_factor = compound_growth_factor(
+                annual_inflation_rate,
+                Decimal((projection_date - today).days) / Decimal(365),
+            )
             result.append(
                 ProjectionAccountValue(
                     account_id=account.id,
                     account_name=account.display_name,
-                    current_value=account.total_after_tax_value,
+                    current_value=round_money(
+                        account.total_after_tax_value
+                        + current_sale_tax_by_account.get(account.id, ZERO)
+                        - current_deposit_tax_by_account.get(account.id, ZERO)
+                    ),
                     projected_cash_value=round_money(projected_cash),
                     projected_holdings_value=round_money(projected_holdings),
                     projected_deposit_value=round_money(projected_deposits),
-                    projected_total_value=round_money(
-                        projected_cash + projected_holdings + projected_deposits
-                    ),
+                    projected_total_value=round_money(projected_total),
+                    real_projected_total_value=round_money(projected_total / real_factor),
                 )
             )
         return result
@@ -5107,6 +5509,15 @@ def portfolio_projection(
                     )
                 ),
                 accounts=account_values,
+                real_total_value=round_money(
+                    sum(
+                        (
+                            account.real_projected_total_value or ZERO
+                            for account in account_values
+                        ),
+                        ZERO,
+                    )
+                ),
             )
         )
 
@@ -5115,41 +5526,55 @@ def portfolio_projection(
         (account.projected_total_value for account in projected_accounts),
         ZERO,
     )
+    current_net_worth = (
+        snapshot["totals"]["net_worth"]
+        + sum(current_sale_tax_by_account.values(), ZERO)
+        - sum(current_deposit_tax_by_account.values(), ZERO)
+    )
+    tax_assumption = (
+        "Taxes are excluded from projected amounts."
+        if not include_taxes
+        else "Stocks/ETFs use their estimated sale-tax rate on positive gains; "
+        "savings and fixed-deposit interest use the account's country-rule estimate "
+        "when available, otherwise the labeled 10% interest-tax assumption. Tax is "
+        "estimated at the projection date."
+    )
     return PortfolioProjectionResponse(
         base_currency=base_currency,
         as_of=datetime.now(UTC),
         target_date=target_date,
-        current_net_worth=snapshot["totals"]["net_worth"],
+        current_net_worth=round_money(current_net_worth),
         projected_net_worth=round_money(projected_total),
-        estimated_change=round_money(projected_total - snapshot["totals"]["net_worth"]),
+        estimated_change=round_money(projected_total - current_net_worth),
         accounts=projected_accounts,
         timeline=timeline,
-        warnings=[
+        warnings=list(dict.fromkeys([
             (
                 "Illustrative deterministic scenario, not a prediction or guarantee. "
-                "Annual returns are user-editable and not inferred from historical volatility. "
-                "Existing positions start at a 5% nominal assumption."
+                "Annual returns are user-editable assumptions and are not forecasts."
             ),
             (
                 "Stock/ETF assumptions are nominal total returns (including reinvested dividends) "
                 "in listing currency. Current FX rates are held constant."
             ),
-            (
-                "Each holding uses its own sale-tax estimate on positive projected gains "
-                "(3% by default, or the rate set by a share purchase plan). Savings wallets "
-                "with a monthly interest rate compound each month; other cash stays flat and "
-                "deposits accrue to maturity without reinvestment."
-            ),
+            tax_assumption,
             (
                 "Unvested awards, scheduled share purchases, future cash-flow forecasts, and "
                 "additional contributions are excluded."
             ),
             (
-                "Risk tiers are qualitative placeholders: ETFs default to X and individual "
-                "stocks to Y. No return distribution, volatility, or probability of loss is "
-                "calculated."
+                f"Inflation of {annual_inflation_rate * Decimal(100):.2f}% a year is held "
+                "constant; real values show purchasing power in today's currency."
             ),
-        ],
+            *projection_warnings,
+            (
+                "Country-specific annual social contributions (including CASS) and future tax "
+                "law changes are not included."
+            ),
+        ])),
+        real_projected_net_worth=timeline[-1].real_total_value,
+        include_taxes=include_taxes,
+        annual_inflation_rate=annual_inflation_rate,
     )
 
 
@@ -5192,7 +5617,10 @@ def portfolio_projection_scenario(
                 status_code=404,
                 detail="A selected investment was not found or has no current quote.",
             )
-        if payload.scope_account_id is not None and holding.account_id != payload.scope_account_id:
+        if (
+            payload.scope_account_id is not None
+            and holding.account_id != payload.scope_account_id
+        ):
             raise HTTPException(
                 status_code=422,
                 detail="Selected investments must belong to the selected projection account.",
@@ -5454,6 +5882,601 @@ def portfolio_projection_scenario(
     )
 
 
+def portfolio_projection_range(
+    session: Session,
+    user_id: uuid.UUID,
+    payload: PortfolioProjectionRangeRequest,
+) -> PortfolioProjectionRangeResponse:
+    user = _get_user(session, user_id)
+    snapshot = dashboard(session, user.id, payload.currency)
+    baseline = portfolio_projection(
+        session,
+        user.id,
+        payload.target_date,
+        payload.currency,
+        snapshot=snapshot,
+        include_taxes=payload.include_taxes,
+        annual_inflation_rate=payload.annual_inflation_rate,
+    )
+    today = date.today()
+    fx_rates = _fx_matrix(session, user)
+    accounts = {account.id: account for account in snapshot["accounts"]}
+    if payload.scope_account_id is not None and payload.scope_account_id not in accounts:
+        raise HTTPException(status_code=404, detail="Projection account was not found")
+    scope_account = (
+        accounts.get(payload.scope_account_id)
+        if payload.scope_account_id is not None
+        else None
+    )
+    all_holdings = {holding.id: holding for holding in snapshot["holdings"]}
+    deposits = {
+        deposit.id: deposit
+        for deposit in session.scalars(
+            select(FixedDeposit).where(FixedDeposit.user_id == user.id)
+        )
+    }
+    deposit_summaries = {deposit.id: deposit for deposit in snapshot["deposits"]}
+    warnings = list(baseline.warnings)
+    assets: list[dict[str, Any]] = []
+
+    for investment in payload.investments:
+        if investment.asset_type == "holding":
+            holding = all_holdings.get(investment.asset_id)
+            if holding is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="A selected holding was not found or has no current quote.",
+                )
+            account = accounts.get(holding.account_id)
+            if account is None:
+                raise HTTPException(status_code=404, detail="A selected account was not found")
+            if (
+                payload.scope_account_id is not None
+                and holding.account_id != payload.scope_account_id
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Selected investments must belong to the selected projection account.",
+                )
+            if account.account_type == AccountType.EMPLOYER_PLAN:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Employer-plan holdings cannot be included in a projection scenario.",
+                )
+            current_gross = _to_base(
+                holding.quantity * holding.price,
+                holding.price_currency,
+                baseline.base_currency,
+                user.usd_per_eur,
+                fx_rates,
+            )
+            cost_basis = _to_base(
+                holding.quantity * holding.average_cost,
+                holding.price_currency,
+                baseline.base_currency,
+                user.usd_per_eur,
+                fx_rates,
+            )
+            assets.append(
+                {
+                    "input": investment,
+                    "type": "holding",
+                    "name": f"{holding.symbol} · {holding.account_name}",
+                    "account_id": holding.account_id,
+                    "risk_tier": holding.risk_tier,
+                    "volatility": holding.annual_return_volatility_assumption,
+                    "current_value": current_gross,
+                    "cost_basis": cost_basis,
+                    "tax_rate": holding.estimated_tax_rate,
+                    "expected_return": holding.expected_annual_return,
+                    "model": holding,
+                    "maturity_date": None,
+                }
+            )
+        elif investment.asset_type == "deposit":
+            deposit = deposits.get(investment.asset_id)
+            summary = deposit_summaries.get(investment.asset_id)
+            if deposit is None or summary is None:
+                raise HTTPException(status_code=404, detail="A selected deposit was not found")
+            account = accounts.get(deposit.account_id)
+            if account is None:
+                raise HTTPException(status_code=404, detail="A selected account was not found")
+            if (
+                payload.scope_account_id is not None
+                and deposit.account_id != payload.scope_account_id
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Selected investments must belong to the selected projection account.",
+                )
+            tax_rate, tax_warnings = _interest_tax_rate_for_account(user, account)
+            if payload.include_taxes:
+                warnings.extend(tax_warnings)
+            assets.append(
+                {
+                    "input": investment,
+                    "type": "deposit",
+                    "name": f"{deposit.name} · {account.display_name}",
+                    "account_id": deposit.account_id,
+                    "risk_tier": None,
+                    "volatility": summary.annual_return_volatility_assumption,
+                    "current_value": _to_base(
+                        summary.current_value,
+                        deposit.currency,
+                        baseline.base_currency,
+                        user.usd_per_eur,
+                        fx_rates,
+                    ),
+                    "cost_basis": _to_base(
+                        deposit.principal,
+                        deposit.currency,
+                        baseline.base_currency,
+                        user.usd_per_eur,
+                        fx_rates,
+                    ),
+                    "tax_rate": tax_rate,
+                    "expected_return": deposit.annual_rate,
+                    "model": deposit,
+                    "maturity_date": deposit.maturity_date,
+                }
+            )
+        else:
+            assert investment.name is not None
+            assert investment.current_value is not None
+            assert investment.cost_basis is not None
+            assert investment.tax_rate is not None
+            assets.append(
+                {
+                    "input": investment,
+                    "type": "other",
+                    "name": investment.name,
+                    "account_id": payload.scope_account_id,
+                    "risk_tier": None,
+                    "volatility": None,
+                    "current_value": investment.current_value,
+                    "cost_basis": investment.cost_basis,
+                    "tax_rate": investment.tax_rate,
+                    "expected_return": None,
+                    "model": None,
+                    "maturity_date": None,
+                }
+            )
+
+    monthly_contribution = _to_base(
+        payload.monthly_contribution,
+        payload.currency,
+        baseline.base_currency,
+        user.usd_per_eur,
+        fx_rates,
+    )
+    for asset in assets:
+        asset["monthly_contribution"] = (
+            monthly_contribution
+            * asset["input"].contribution_percentage
+            / Decimal("100")
+        )
+
+    def selected_baseline_value(asset: dict[str, Any], at_date: date) -> Decimal:
+        years = Decimal((at_date - today).days) / Decimal(365)
+        if asset["type"] == "holding":
+            holding = asset["model"]
+            gross = _to_base(
+                holding.quantity
+                * holding.price
+                * compound_growth_factor(holding.expected_annual_return, years),
+                holding.price_currency,
+                baseline.base_currency,
+                user.usd_per_eur,
+                fx_rates,
+            )
+            basis = _to_base(
+                holding.quantity * holding.average_cost,
+                holding.price_currency,
+                baseline.base_currency,
+                user.usd_per_eur,
+                fx_rates,
+            )
+        elif asset["type"] == "deposit":
+            deposit = asset["model"]
+            gross = _to_base(
+                fixed_deposit_value(
+                    deposit.principal,
+                    deposit.annual_rate,
+                    deposit.start_date,
+                    min(at_date, deposit.maturity_date),
+                    deposit.compounding,
+                    deposit.rate_basis,
+                ),
+                deposit.currency,
+                baseline.base_currency,
+                user.usd_per_eur,
+                fx_rates,
+            )
+            basis = asset["cost_basis"]
+        else:
+            return asset["current_value"]
+        tax = (
+            max(ZERO, gross - basis) * asset["tax_rate"]
+            if payload.include_taxes
+            else ZERO
+        )
+        return gross - tax
+
+    def monthly_future_value(
+        monthly_amount: Decimal, annual_return: Decimal, payment_count: int
+    ) -> Decimal:
+        if payment_count <= 0 or monthly_amount == ZERO:
+            return ZERO
+        monthly_growth = compound_growth_factor(
+            annual_return, Decimal("1") / Decimal("12")
+        )
+        if abs(monthly_growth - ONE) < Decimal("1e-24"):
+            return monthly_amount * payment_count
+        return (
+            monthly_amount
+            * (monthly_growth**payment_count - ONE)
+            / (monthly_growth - ONE)
+        )
+
+    def evaluate_asset(
+        asset: dict[str, Any], annual_return: Decimal, at_date: date
+    ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+        years = Decimal((at_date - today).days) / Decimal(365)
+        payment_dates = _monthly_payment_dates(today, at_date)
+        contribution_principal = asset["monthly_contribution"] * len(payment_dates)
+        if asset["type"] == "deposit":
+            maturity_date = asset["maturity_date"]
+            earning_days = max(0, min((at_date - today).days, (maturity_date - today).days))
+            earning_years = Decimal(earning_days) / Decimal(365)
+        else:
+            earning_years = years
+        gross = asset["current_value"] * compound_growth_factor(
+            annual_return, earning_years
+        )
+        if asset["type"] == "deposit":
+            maturity_date = asset["maturity_date"]
+            active_contributions = sum(
+                payment_date <= maturity_date for payment_date in payment_dates
+            )
+            contribution_value = monthly_future_value(
+                asset["monthly_contribution"],
+                annual_return,
+                active_contributions,
+            )
+            contribution_value += asset["monthly_contribution"] * (
+                len(payment_dates) - active_contributions
+            )
+        else:
+            contribution_value = monthly_future_value(
+                asset["monthly_contribution"],
+                annual_return,
+                len(payment_dates),
+            )
+        gross += contribution_value
+        taxable_basis = asset["cost_basis"] + contribution_principal
+        estimated_tax = (
+            max(ZERO, gross - taxable_basis) * asset["tax_rate"]
+            if payload.include_taxes
+            else ZERO
+        )
+        return gross, estimated_tax, gross - estimated_tax, contribution_principal
+
+    def baseline_total_at(point: ProjectionPoint, *, real: bool = False) -> Decimal:
+        if payload.scope_account_id is None:
+            value = point.real_total_value if real else point.total_value
+            return value if value is not None else point.total_value
+        account = next(
+            (
+                item
+                for item in point.accounts
+                if item.account_id == payload.scope_account_id
+            ),
+            None,
+        )
+        if account is None:
+            return ZERO
+        if real and account.real_projected_total_value is not None:
+            return account.real_projected_total_value
+        return account.projected_total_value
+
+    custom_current_value = sum(
+        (
+            asset["current_value"]
+            - (
+                max(ZERO, asset["current_value"] - asset["cost_basis"])
+                * asset["tax_rate"]
+                if payload.include_taxes
+                else ZERO
+            )
+            for asset in assets
+            if asset["type"] == "other"
+        ),
+        ZERO,
+    )
+    scoped_baseline_account = next(
+        (
+            account
+            for account in baseline.accounts
+            if account.account_id == payload.scope_account_id
+        ),
+        None,
+    )
+    if payload.scope_account_id is not None and scoped_baseline_account is None:
+        raise HTTPException(status_code=404, detail="Projection account was not found")
+    baseline_current_value = (
+        scoped_baseline_account.current_value
+        if scoped_baseline_account is not None
+        else baseline.current_net_worth
+    )
+    scenario_current_value = baseline_current_value + custom_current_value
+    custom_current_net_by_key = {
+        asset["input"].asset_key: (
+            asset["current_value"]
+            - (
+                max(ZERO, asset["current_value"] - asset["cost_basis"])
+                * asset["tax_rate"]
+                if payload.include_taxes
+                else ZERO
+            )
+        )
+        for asset in assets
+        if asset["type"] == "other"
+    }
+    scenario_baseline_timeline: list[ProjectionRangeLinePoint] = []
+    for point in baseline.timeline:
+        years = Decimal((point.date - today).days) / Decimal(365)
+        deflator = compound_growth_factor(payload.annual_inflation_rate, years)
+        nominal = baseline_total_at(point) + custom_current_value
+        real = baseline_total_at(point, real=True) + custom_current_value / deflator
+        scenario_baseline_timeline.append(
+            ProjectionRangeLinePoint(
+                date=point.date,
+                label=point.label,
+                nominal_value=round_money(nominal),
+                real_value=round_money(real),
+            )
+        )
+
+    baseline_target_nominal = baseline_total_at(baseline.timeline[-1])
+    baseline_target_real = baseline_total_at(baseline.timeline[-1], real=True)
+    target_years = Decimal((payload.target_date - today).days) / Decimal(365)
+    target_deflator = compound_growth_factor(payload.annual_inflation_rate, target_years)
+    baseline_with_custom_nominal = baseline_target_nominal + custom_current_value
+    baseline_with_custom_real = (
+        baseline_target_real
+        + custom_current_value / target_deflator
+    )
+    lines: list[ProjectionRangeLine] = []
+    results: list[ProjectionRangeInvestmentResult] = []
+    combined_worst = baseline_with_custom_nominal
+    combined_best = baseline_with_custom_nominal
+
+    for asset in assets:
+        input_asset = asset["input"]
+        target_contribution_principal = asset["monthly_contribution"] * len(
+            _monthly_payment_dates(today, payload.target_date)
+        )
+        for case, annual_return in (
+            ("worst", input_asset.worst_annual_return),
+            ("best", input_asset.best_annual_return),
+        ):
+            line_points: list[ProjectionRangeLinePoint] = []
+            final_gross = ZERO
+            final_tax = ZERO
+            final_value = ZERO
+            for point in baseline.timeline:
+                gross, tax, net, _ = evaluate_asset(asset, annual_return, point.date)
+                if asset["type"] == "other":
+                    delta = net - custom_current_net_by_key[input_asset.asset_key]
+                else:
+                    delta = net - selected_baseline_value(asset, point.date)
+                nominal_total = baseline_total_at(point) + custom_current_value + delta
+                years = Decimal((point.date - today).days) / Decimal(365)
+                real_total = nominal_total / compound_growth_factor(
+                    payload.annual_inflation_rate, years
+                )
+                line_points.append(
+                    ProjectionRangeLinePoint(
+                        date=point.date,
+                        label=point.label,
+                        nominal_value=round_money(nominal_total),
+                        real_value=round_money(real_total),
+                    )
+                )
+                final_gross = gross
+                final_tax = tax
+                final_value = net
+
+            final_real_value = final_value / target_deflator
+            lines.append(
+                ProjectionRangeLine(
+                    asset_key=input_asset.asset_key,
+                    asset_name=asset["name"],
+                    case=case,
+                    annual_return_assumption=annual_return,
+                    projected_net_worth=line_points[-1].nominal_value,
+                    real_projected_net_worth=line_points[-1].real_value,
+                    points=line_points,
+                )
+            )
+            if case == "worst":
+                worst_gross, worst_tax, worst_value = final_gross, final_tax, final_value
+                worst_real = final_real_value
+                if asset["type"] == "other":
+                    combined_worst += final_value - custom_current_net_by_key[
+                        input_asset.asset_key
+                    ]
+                else:
+                    combined_worst += final_value - selected_baseline_value(
+                        asset, payload.target_date
+                    )
+            else:
+                best_gross, best_tax, best_value = final_gross, final_tax, final_value
+                best_real = final_real_value
+                if asset["type"] == "other":
+                    combined_best += final_value - custom_current_net_by_key[
+                        input_asset.asset_key
+                    ]
+                else:
+                    combined_best += final_value - selected_baseline_value(
+                        asset, payload.target_date
+                    )
+        results.append(
+            ProjectionRangeInvestmentResult(
+                asset_key=input_asset.asset_key,
+                asset_type=asset["type"],
+                name=asset["name"],
+                risk_tier=asset["risk_tier"],
+                annual_return_volatility_assumption=asset["volatility"],
+                current_value=round_money(asset["current_value"]),
+                contribution_percentage=input_asset.contribution_percentage,
+                monthly_contribution=round_money(asset["monthly_contribution"]),
+                contribution_principal=round_money(target_contribution_principal),
+                worst_annual_return=input_asset.worst_annual_return,
+                best_annual_return=input_asset.best_annual_return,
+                estimated_tax_rate=asset["tax_rate"],
+                worst_projected_gross_value=round_money(worst_gross),
+                best_projected_gross_value=round_money(best_gross),
+                worst_estimated_tax=round_money(worst_tax),
+                best_estimated_tax=round_money(best_tax),
+                worst_projected_value=round_money(worst_value),
+                best_projected_value=round_money(best_value),
+                worst_real_projected_value=round_money(worst_real),
+                best_real_projected_value=round_money(best_real),
+            )
+        )
+
+    risk_values = {tier: ZERO for tier in ("X", "Y", "Z")}
+    scoped_holdings = [
+        holding
+        for holding in snapshot["holdings"]
+        if payload.scope_account_id is None
+        or holding.account_id == payload.scope_account_id
+    ]
+    for holding in scoped_holdings:
+        risk_values[holding.risk_tier] += holding.market_value
+    current_invested_value = sum(risk_values.values(), ZERO)
+    risk_scores = {"X": Decimal("1"), "Y": Decimal("2"), "Z": Decimal("3")}
+    risk_mix = {
+        tier: (
+            (risk_values[tier] / current_invested_value).quantize(Decimal("0.0001"))
+            if current_invested_value > ZERO
+            else ZERO
+        )
+        for tier in ("X", "Y", "Z")
+    }
+    weighted_risk_score = (
+        sum(
+            (risk_values[tier] * risk_scores[tier] for tier in ("X", "Y", "Z")),
+            ZERO,
+        )
+        / current_invested_value
+        if current_invested_value > ZERO
+        else None
+    )
+    selected_stock_contribution_weight = sum(
+        (
+            asset["input"].contribution_percentage
+            for asset in assets
+            if asset["type"] == "holding"
+        ),
+        ZERO,
+    )
+    contribution_risk_score = (
+        sum(
+            (
+                asset["input"].contribution_percentage
+                * risk_scores[asset["risk_tier"]]
+                for asset in assets
+                if asset["type"] == "holding"
+            ),
+            ZERO,
+        )
+        / selected_stock_contribution_weight
+        if selected_stock_contribution_weight > ZERO
+        else ZERO
+    )
+    scope_name = (
+        scope_account.display_name if scope_account is not None else "All tracked accounts"
+    )
+    return PortfolioProjectionRangeResponse(
+        baseline=baseline,
+        scenario_baseline_timeline=scenario_baseline_timeline,
+        scenario_current_net_worth=round_money(scenario_current_value),
+        baseline_projected_net_worth=round_money(baseline_with_custom_nominal),
+        baseline_real_projected_net_worth=round_money(baseline_with_custom_real),
+        worst_case_projected_net_worth=round_money(combined_worst),
+        best_case_projected_net_worth=round_money(combined_best),
+        worst_case_real_projected_net_worth=round_money(combined_worst / target_deflator),
+        best_case_real_projected_net_worth=round_money(combined_best / target_deflator),
+        monthly_contribution=round_money(monthly_contribution),
+        scope_account_id=payload.scope_account_id,
+        include_taxes=payload.include_taxes,
+        annual_inflation_rate=payload.annual_inflation_rate,
+        risk_summary=ProjectionScenarioRiskSummary(
+            scope_account_id=payload.scope_account_id,
+            scope_account_name=scope_name,
+            current_invested_value=round_money(current_invested_value),
+            risk_mix=risk_mix,
+            weighted_risk_score=(
+                weighted_risk_score.quantize(Decimal("0.01"))
+                if weighted_risk_score is not None
+                else None
+            ),
+            contribution_weighted_risk_score=contribution_risk_score.quantize(
+                Decimal("0.01")
+            ),
+            methodology=(
+                "Current risk is the value-weighted mix of the app's qualitative X/Y/Z "
+                "holding tiers; deposits and custom investments are not included. It is not "
+                "measured volatility or a probability of loss."
+            ),
+        ),
+        investments=results,
+        lines=lines,
+        assumptions=[
+            (
+                "Each investment's best and worst lines change only that investment while "
+                "holding the rest of the portfolio at its baseline assumptions. The summary "
+                "best/worst totals apply every selected investment's corresponding case at once."
+            ),
+            (
+                "Monthly contributions are paid at month-end and use each selected investment's "
+                "own annual return assumption. Contribution weights must total 100% when a "
+                "monthly amount is entered."
+            ),
+            (
+                "Existing stocks/ETFs use the selected annual return compounded from today's "
+                "gross value. Fixed deposits accrue only through maturity; future contributions "
+                "made after maturity are held as flat cash. FX is held at today's rate."
+            ),
+            (
+                "With tax enabled, stock/ETF gains use the current estimated sale-tax rate; "
+                "deposit and savings interest use the account-country rule when available or "
+                "the labeled 10% legacy estimate; custom investments use the tax rate you enter. "
+                "Tax is calculated at each displayed date on gains above cost basis plus "
+                "contribution principal. Losses do not receive a tax credit."
+            ),
+            (
+                "The annual inflation assumption is held constant for the selected period. "
+                "Real values equal nominal values divided by (1 + inflation)^(elapsed days / 365)."
+            ),
+            (
+                "Default stock/ETF return ranges are the saved expected return plus or minus "
+                "the app's asset-class volatility assumption; deposit ranges start at the "
+                "contract rate plus or minus the cash-deposit assumption. Edit both cases. "
+                "These are sensitivity bands, not confidence intervals or predictions."
+            ),
+            (
+                "Custom investments are projection-only inputs and are not saved to your "
+                "holdings or account balances. Country-specific annual social contributions "
+                "and future tax-law changes are excluded."
+            ),
+        ],
+        warnings=list(dict.fromkeys(warnings)),
+    )
+
+
 def list_cash_flows(session: Session, user_id: uuid.UUID, months: int = 12) -> list[FlowResponse]:
     user = _get_user(session, user_id)
     _post_due_cash_flow_schedules(session, user.id)
@@ -5489,21 +6512,29 @@ def preview_recommendation(
         session.scalars(
             select(Goal)
             .where(Goal.user_id == user.id, Goal.is_active.is_(True))
-            .order_by(Goal.priority, Goal.name)
+            .order_by(Goal.name, Goal.id)
         )
     )
+    plan = get_financial_plan(session, user.id)
+    convert = _planning_convert(session, user)
+    planned = {
+        goal: sum((
+            convert(point.nominal_contribution, goal.target_currency, base_currency)
+            for point in contribution_months(
+                plan, _goal_rules(goal), goal.monthly_contribution,
+                goal.target_currency, date.today(), 12, convert,
+            )
+        ), ZERO) / Decimal(12)
+        for goal in goals
+    }
     try:
-        goal_amounts = route_funding_to_goals(deployable, goals, policy.funding_rule, date.today())
+        goal_amounts = route_funding_to_goals(
+            deployable, goals, policy.funding_rule, date.today(), planned
+        )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
-    rounded_goal_amounts = {goal: round_money(amount) for goal, amount in goal_amounts.items()}
-    goal_residual = round_money(deployable) - sum(rounded_goal_amounts.values(), ZERO)
-    if rounded_goal_amounts:
-        highest_priority_goal = min(
-            rounded_goal_amounts, key=lambda item: (item.priority, item.name)
-        )
-        rounded_goal_amounts[highest_priority_goal] += goal_residual
+    rounded_goal_amounts = round_allocations(goal_amounts)
 
     goal_allocations = [
         GoalAllocation(
@@ -5514,8 +6545,8 @@ def preview_recommendation(
                 Decimal("0.01")
             ),
             rationale=(
-                f"Priority {goal.priority}; "
-                f"{goal.monthly_contribution} {goal.target_currency.value}/month planned"
+                f"{round_money(planned[goal])} {base_currency.value}/month planned "
+                "(average of the next 12 scheduled months)"
             ),
         )
         for goal, amount in rounded_goal_amounts.items()
@@ -5567,11 +6598,7 @@ def preview_recommendation(
         raise HTTPException(status_code=422, detail=str(error)) from error
     pre_contribution_total = sum(current_values.values(), ZERO)
     post_total = pre_contribution_total + investable
-    rounded_asset_amounts = {key: round_money(amount) for key, amount in asset_amounts.items()}
-    asset_residual = round_money(investable) - sum(rounded_asset_amounts.values(), ZERO)
-    if rounded_asset_amounts:
-        largest_allocation = max(rounded_asset_amounts, key=rounded_asset_amounts.get)
-        rounded_asset_amounts[largest_allocation] += asset_residual
+    rounded_asset_amounts = round_allocations(asset_amounts)
     asset_allocations = []
     for asset_class in AssetClass:
         key = asset_class.value

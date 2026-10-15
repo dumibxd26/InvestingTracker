@@ -23,6 +23,8 @@ class GoalPayload(BaseModel):
     risk_profile: str
     target_success_probability: float
     tax_profile: TaxProfilePayload
+    monthly_contributions: tuple[float, ...] | None = None
+    inflation_factors: tuple[float, ...] | None = None
 
 
 class SlicePayload(BaseModel):
@@ -158,6 +160,7 @@ class YearlyPointPayload(BaseModel):
     nominal_after_tax: dict[str, float]
     real_todays_dollars: dict[str, float]
     inflated_target_at_year: float
+    month_offset: int | None = None
 
 
 class SimulationPayload(BaseModel):

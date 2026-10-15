@@ -39,7 +39,6 @@ function GoalCard({ goal, currency }: { goal: GoalSummary; currency: Currency })
         <span className={`goal-icon goal-${goal.goal_type}`}>
           {incomeGoal ? <CircleDollarSign size={18} /> : <Sparkles size={18} />}
         </span>
-        <span className="goal-priority">P{goal.priority}</span>
       </div>
       <div className="goal-title-row">
         <h3>{goal.name}</h3>
@@ -192,6 +191,7 @@ export function Overview({
         currency={currency}
         accounts={data.accounts}
         holdings={data.holdings}
+        deposits={data.deposits}
       />
 
       <div className="dashboard-grid dashboard-grid-top">
@@ -206,7 +206,7 @@ export function Overview({
 
       <div className="section-heading">
         <div>
-          <div className="eyebrow">Your priorities</div>
+          <div className="eyebrow">Your goals</div>
           <h2>Goals that move you forward</h2>
         </div>
         <div className="section-actions">
@@ -220,7 +220,7 @@ export function Overview({
           <div className="empty-state panel">
             <TargetIcon />
             <strong>Start with what matters to you.</strong>
-            <span>Add a goal; you can change its priority or target later.</span>
+            <span>Add a goal; you can change its timeline or target later.</span>
             <button className="button button-primary" onClick={onAddGoal}><Plus size={16} /> Add a goal</button>
           </div>
         )}

@@ -30,7 +30,6 @@ def test_compound_growth_factor_preserves_partial_year_precision() -> None:
 @dataclass(eq=False)
 class GoalStub:
     name: str
-    priority: int = 1
     monthly_contribution: Decimal = D("0")
     current_amount: Decimal = D("0")
     target_amount: Decimal | None = None
@@ -68,16 +67,16 @@ def test_simplex_projection_assigns_exact_budget_when_all_gaps_are_negative() ->
     assert all(value >= 0 for value in allocations.values())
 
 
-def test_priority_rule_funds_highest_priority_contribution_need_first() -> None:
-    urgent = GoalStub("Home", priority=1, monthly_contribution=D("300"))
-    flexible = GoalStub("Wealth", priority=2, monthly_contribution=D("800"))
+def test_proportional_rule_funds_each_goal_without_priority() -> None:
+    urgent = GoalStub("Home", monthly_contribution=D("300"))
+    flexible = GoalStub("Wealth", monthly_contribution=D("800"))
 
     allocation = route_funding_to_goals(
-        D("500"), [flexible, urgent], FundingRule.PRIORITY_FIRST, date(2026, 1, 1)
+        D("500"), [flexible, urgent], FundingRule.PROPORTIONAL, date(2026, 1, 1)
     )
 
-    assert allocation[urgent] == D("300")
-    assert allocation[flexible] == D("200")
+    assert allocation[urgent] == D("500") * D("300") / D("1100")
+    assert allocation[flexible] == D("500") - allocation[urgent]
 
 
 def test_proportional_rule_and_fixed_rule_conserve_every_cent() -> None:

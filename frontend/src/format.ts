@@ -99,8 +99,6 @@ export function goalLabel(goalType: GoalType): string {
 
 export function fundingLabel(rule: string): string {
   switch (rule) {
-    case "priority_first":
-      return "Priority first";
     case "proportional":
       return "Proportional";
     case "fixed_percentages":

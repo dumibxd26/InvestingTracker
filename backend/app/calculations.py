@@ -3,7 +3,7 @@ from __future__ import annotations
 from calendar import monthrange
 from collections.abc import Hashable
 from datetime import date
-from decimal import ROUND_HALF_UP, Decimal, localcontext
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal, localcontext
 
 from app.models import CompoundingFrequency, FundingRule, GoalType, RateBasis
 
@@ -13,6 +13,18 @@ ZERO = Decimal("0")
 
 def round_money(value: Decimal) -> Decimal:
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def round_allocations[T: Hashable](values: dict[T, Decimal]) -> dict[T, Decimal]:
+    if any(value < ZERO for value in values.values()):
+        raise ValueError("Allocations cannot be negative")
+    rounded = {key: value.quantize(CENT, rounding=ROUND_DOWN) for key, value in values.items()}
+    remainder = round_money(sum(values.values(), ZERO)) - sum(rounded.values(), ZERO)
+    cents = int(remainder / CENT)
+    ordered = sorted(values, key=lambda key: values[key] - rounded[key], reverse=True)
+    for key in ordered[:cents]:
+        rounded[key] += CENT
+    return rounded
 
 
 def convert_currency(
@@ -101,6 +113,7 @@ def route_funding_to_goals[T: Hashable](
     goals: list[T],
     funding_rule: FundingRule,
     today: date | None = None,
+    planned_contributions: dict[T, Decimal] | None = None,
 ) -> dict[T, Decimal]:
     active_goals = [goal for goal in goals if getattr(goal, "is_active", True)]
     if amount < ZERO:
@@ -108,19 +121,13 @@ def route_funding_to_goals[T: Hashable](
     if not active_goals or amount == ZERO:
         return {goal: ZERO for goal in active_goals}
     today = today or date.today()
-    needs = {goal: _goal_need(goal, today) for goal in active_goals}
-
-    if funding_rule == FundingRule.PRIORITY_FIRST:
-        result = {goal: ZERO for goal in active_goals}
-        remaining = amount
-        for goal in sorted(active_goals, key=lambda item: (item.priority, item.name)):
-            allocation = min(remaining, needs[goal])
-            result[goal] = allocation
-            remaining -= allocation
-        if remaining > ZERO:
-            first_goal = min(active_goals, key=lambda item: (item.priority, item.name))
-            result[first_goal] += remaining
-        return result
+    needs = {
+        goal: planned_contributions[goal] if planned_contributions is not None
+        else _goal_need(goal, today)
+        for goal in active_goals
+    }
+    if any(need < ZERO for need in needs.values()):
+        raise ValueError("Planned goal contributions cannot be negative")
 
     if funding_rule == FundingRule.FIXED_PERCENTAGES:
         weights = {goal: (goal.fixed_percent or ZERO) for goal in active_goals}

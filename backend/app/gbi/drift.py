@@ -141,7 +141,7 @@ def evaluate_goal_portfolio(
     remaining_years = max(0.1, (goal.target_date - now.date()).days / 365.25)
     glide = glide_path_targets(remaining_years, goal.risk_profile)
     target_weights = glide.weights
-    goal_inflation = CURRENCY_INFLATION_PARITY[goal.base_currency]
+    goal_inflation = goal.tax_profile.annual_inflation_rate
 
     slices: list[EvaluatedSlice] = []
     for allocation in allocations:
@@ -182,7 +182,11 @@ def evaluate_goal_portfolio(
             holding.dividend_yield if holding.dividend_yield is not None else cma.dividend_yield
         )
 
-        ppp_drift = goal_inflation - CURRENCY_INFLATION_PARITY[holding.underlying_currency]
+        ppp_drift = (
+            goal_inflation - CURRENCY_INFLATION_PARITY[holding.underlying_currency]
+            if holding.underlying_currency != goal.base_currency
+            else 0.0
+        )
         is_unhedged = (
             not holding.is_currency_hedged and holding.underlying_currency != goal.base_currency
         )

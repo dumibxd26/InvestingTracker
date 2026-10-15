@@ -4,7 +4,6 @@ import math
 from datetime import datetime
 
 from app.gbi.constants import (
-    CURRENCY_INFLATION_PARITY,
     DEFAULT_BENCHMARK_CATALOG,
     DEFAULT_SEED,
     EQUITY_FX_CORRELATION,
@@ -14,7 +13,7 @@ from app.gbi.constants import (
 from app.gbi.domain import AllocatedHolding, AnalyticalBands, GoalInsights, GoalSpec
 from app.gbi.drift import SpotRate, evaluate_goal_portfolio
 from app.gbi.rebalance import generate_rebalance_plan
-from app.gbi.simulation import solve_recovery
+from app.gbi.simulation import contribution_schedule, solve_recovery
 
 
 def analytical_bands(
@@ -25,9 +24,20 @@ def analytical_bands(
     optimistic = expected + 0.5 * evaluation_sigma
     conservative = expected - 0.5 * evaluation_sigma
     contribution = goal.monthly_contribution
+    deposits = contribution_schedule(
+        contribution, goal.monthly_contributions, goal.tax_profile, months
+    )
 
     def projected(rate: float) -> float:
         monthly_growth = math.exp(rate / 12.0)
+        if (
+            goal.monthly_contributions is not None
+            or goal.tax_profile.index_contributions_to_inflation
+        ):
+            balance = start_value
+            for deposit in deposits:
+                balance = balance * monthly_growth + deposit
+            return balance
         if abs(monthly_growth - 1.0) < 1e-12:
             annuity = float(months)
         else:
@@ -68,10 +78,15 @@ def build_goal_insights(
     )
 
     tax = goal.tax_profile
-    inflation = CURRENCY_INFLATION_PARITY[goal.base_currency]
+    inflation = tax.annual_inflation_rate
     assumptions = [
         "Capital-market assumptions are long-run baselines, not forecasts.",
-        f"Inflation parity for {goal.base_currency}: {inflation * 100:.1f}% a year; the target "
+        (
+            "The supplied monthly inflation factors determine purchasing power; the target "
+            if goal.inflation_factors is not None
+            else f"Inflation assumption for {goal.base_currency}: {inflation * 100:.1f}% a year; "
+            "the target "
+        )
         + (
             "is in today's money and is inflated each year."
             if tax.is_target_in_todays_dollars
@@ -89,8 +104,8 @@ def build_goal_insights(
         f"{EQUITY_FX_CORRELATION:.2f} equity-FX correlation.",
         f"Simulation uses {2 * half_paths:,} antithetic paths with seed {seed}; "
         "results are deterministic for the same inputs.",
-        "Only the stocks, ETFs and deposits linked to this goal are modelled; manual progress "
-        "entered on the goal is excluded.",
+        "Linked stocks, ETFs and deposits plus manually entered goal savings are modelled. "
+        "Manual savings are included once as cash with an equal tax-free cost basis.",
     ]
     assumptions.extend(notes or [])
 

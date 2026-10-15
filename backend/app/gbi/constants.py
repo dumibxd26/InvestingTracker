@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 ASSET_CLASSES: tuple[str, ...] = (
+    "CASH_BALANCE",
     "CASH_DEPOSIT",
     "SHORT_TERM_BOND",
     "INVESTMENT_BOND",
@@ -43,6 +44,7 @@ def _cma(
 
 
 CMA_CONFIG: dict[str, CapitalMarketAssumption] = {
+    "CASH_BALANCE": _cma("CASH_BALANCE", "CASH", 0.0, 0.0, 0.0, 1),
     "CASH_DEPOSIT": _cma("CASH_DEPOSIT", "CASH", 0.038, 0.038, 0.005, 1),
     "SHORT_TERM_BOND": _cma("SHORT_TERM_BOND", "CASH", 0.043, 0.041, 0.018, 1),
     "INVESTMENT_BOND": _cma("INVESTMENT_BOND", "BONDS", 0.050, 0.040, 0.060, 2),

@@ -24,6 +24,18 @@ interface TickerGroup {
   estimatedGainPercent: number;
 }
 
+type HeatmapSizeBy = "marketValue" | "costBasis";
+
+function areaValue(group: TickerGroup, sizeBy: HeatmapSizeBy): number {
+  return group[sizeBy];
+}
+
+function areaLabel(sizeBy: HeatmapSizeBy): string {
+  return sizeBy === "marketValue"
+    ? "combined after-tax holding value"
+    : "invested cost basis of units currently held";
+}
+
 const riskStyles = {
   X: { label: "X · Lower relative risk" },
   Y: { label: "Y · Moderate / concentrated" },
@@ -77,17 +89,18 @@ function treemap(
   y: number,
   width: number,
   height: number,
+  sizeBy: HeatmapSizeBy,
 ): TreemapRect[] {
   if (groups.length === 0) return [];
   if (groups.length === 1) {
     return [{ symbol: groups[0].symbol, x, y, width, height }];
   }
-  const total = groups.reduce((sum, group) => sum + group.marketValue, 0);
+  const total = groups.reduce((sum, group) => sum + areaValue(group, sizeBy), 0);
   let leftTotal = 0;
   let splitIndex = 1;
   let closestDifference = Number.POSITIVE_INFINITY;
   for (let index = 1; index < groups.length; index += 1) {
-    leftTotal += groups[index - 1].marketValue;
+    leftTotal += areaValue(groups[index - 1], sizeBy);
     const difference = Math.abs(total / 2 - leftTotal);
     if (difference < closestDifference) {
       closestDifference = difference;
@@ -95,19 +108,33 @@ function treemap(
     }
   }
   leftTotal = groups.slice(0, splitIndex)
-    .reduce((sum, group) => sum + group.marketValue, 0);
+    .reduce((sum, group) => sum + areaValue(group, sizeBy), 0);
   const ratio = total > 0 ? leftTotal / total : 0.5;
   if (width >= height) {
     const leftWidth = width * ratio;
     return [
-      ...treemap(groups.slice(0, splitIndex), x, y, leftWidth, height),
-      ...treemap(groups.slice(splitIndex), x + leftWidth, y, width - leftWidth, height),
+      ...treemap(groups.slice(0, splitIndex), x, y, leftWidth, height, sizeBy),
+      ...treemap(
+        groups.slice(splitIndex),
+        x + leftWidth,
+        y,
+        width - leftWidth,
+        height,
+        sizeBy,
+      ),
     ];
   }
   const topHeight = height * ratio;
   return [
-    ...treemap(groups.slice(0, splitIndex), x, y, width, topHeight),
-    ...treemap(groups.slice(splitIndex), x, y + topHeight, width, height - topHeight),
+    ...treemap(groups.slice(0, splitIndex), x, y, width, topHeight, sizeBy),
+    ...treemap(
+      groups.slice(splitIndex),
+      x,
+      y + topHeight,
+      width,
+      height - topHeight,
+      sizeBy,
+    ),
   ];
 }
 
@@ -130,25 +157,27 @@ function HeatmapCanvas({
   groups,
   currency,
   maxGainMagnitude,
+  sizeBy,
   large = false,
   onSelect,
 }: {
   groups: TickerGroup[];
   currency: Currency;
   maxGainMagnitude: number;
+  sizeBy: HeatmapSizeBy;
   large?: boolean;
   onSelect: (symbol: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [tooltip, setTooltip] = useState<TooltipPosition | null>(null);
-  const rectangles = treemap(groups, 0, 0, 1000, 560);
+  const rectangles = treemap(groups, 0, 0, 1000, 560, sizeBy);
   const groupsBySymbol = new Map(groups.map((group) => [group.symbol, group]));
 
   function showTooltip(event: ReactPointerEvent<SVGGElement>, symbol: string) {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
     const tooltipWidth = large ? 280 : 255;
-    const tooltipHeight = large ? 155 : 145;
+    const tooltipHeight = large ? 180 : 165;
     setTooltip({
       symbol,
       left: Math.max(8, Math.min(event.clientX - rect.left + 14, rect.width - tooltipWidth - 8)),
@@ -196,7 +225,7 @@ function HeatmapCanvas({
               className="treemap-clickable"
               role="button"
               tabIndex={0}
-              aria-label={`${symbol}: ${amount(group.marketValue, currency)}, estimated gain ${amount(group.estimatedGain, currency)} (${group.estimatedGainPercent.toFixed(1)}%). Open listings and accounts.`}
+              aria-label={`${symbol}: ${amount(areaValue(group, sizeBy), currency)} by ${areaLabel(sizeBy)}, current after-tax value ${amount(group.marketValue, currency)}, estimated gain ${amount(group.estimatedGain, currency)} (${group.estimatedGainPercent.toFixed(1)}%). Open listings and accounts.`}
               onPointerEnter={(event) => showTooltip(event, symbol)}
               onPointerMove={(event) => showTooltip(event, symbol)}
               onFocus={() => setTooltip({ symbol, left: 12, top: 12 })}
@@ -226,7 +255,7 @@ function HeatmapCanvas({
                   {showValue && (
                     <>
                       <text x={x + 12} y={y + 39} className="treemap-value">
-                        {amount(group.marketValue, currency)}
+                        {amount(areaValue(group, sizeBy), currency)}
                       </text>
                       <text x={x + 12} y={y + 55} className="treemap-gain">
                         {group.estimatedGain >= 0 ? "+" : ""}
@@ -247,7 +276,12 @@ function HeatmapCanvas({
           style={{ left: tooltip.left, top: tooltip.top }}
         >
           <strong>{hoveredGroup.symbol} · {hoveredGroup.name}</strong>
-          <span>After-tax value: {amount(hoveredGroup.marketValue, currency)}</span>
+          <span>
+            Area · {sizeBy === "marketValue" ? "current value" : "initial investment"}:{" "}
+            {amount(areaValue(hoveredGroup, sizeBy), currency)}
+          </span>
+          <span>Current after-tax value: {amount(hoveredGroup.marketValue, currency)}</span>
+          <span>Invested cost basis · held units: {amount(hoveredGroup.costBasis, currency)}</span>
           <span className={hoveredGroup.estimatedGain >= 0 ? "positive-text" : "negative-text"}>
             Estimated gain/loss: {hoveredGroup.estimatedGain >= 0 ? "+" : ""}
             {amount(hoveredGroup.estimatedGain, currency)} ({hoveredGroup.estimatedGainPercent.toFixed(1)}%)
@@ -256,6 +290,42 @@ function HeatmapCanvas({
           <small>{hoveredListings.join("; ")}</small>
         </div>
       )}
+    </div>
+  );
+}
+
+function HeatmapSizeToggle({
+  value,
+  onChange,
+  fullScreen = false,
+}: {
+  value: HeatmapSizeBy;
+  onChange: (value: HeatmapSizeBy) => void;
+  fullScreen?: boolean;
+}) {
+  return (
+    <div
+      className={`heatmap-size-toggle${fullScreen ? " heatmap-size-toggle-fullscreen" : ""}`}
+      role="group"
+      aria-label="Size holdings by"
+    >
+      <span>Size by</span>
+      <button
+        className={value === "marketValue" ? "is-selected" : ""}
+        type="button"
+        aria-pressed={value === "marketValue"}
+        onClick={() => onChange("marketValue")}
+      >
+        Current value
+      </button>
+      <button
+        className={value === "costBasis" ? "is-selected" : ""}
+        type="button"
+        aria-pressed={value === "costBasis"}
+        onClick={() => onChange("costBasis")}
+      >
+        Initial investment
+      </button>
     </div>
   );
 }
@@ -269,6 +339,7 @@ export function InvestmentHeatmap({
 }) {
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [fullScreen, setFullScreen] = useState(false);
+  const [sizeBy, setSizeBy] = useState<HeatmapSizeBy>("marketValue");
   useEffect(() => {
     if (!fullScreen) return;
     const previousOverflow = document.body.style.overflow;
@@ -282,13 +353,14 @@ export function InvestmentHeatmap({
       window.removeEventListener("keydown", closeOnEscape);
     };
   }, [fullScreen]);
+  const allGroups = useMemo(() => groupByTicker(holdings), [holdings]);
   const groups = useMemo(
-    () => groupByTicker(holdings)
-      .filter((group) => group.marketValue > 0)
-      .sort((a, b) => b.marketValue - a.marketValue),
-    [holdings],
+    () => allGroups
+      .filter((group) => areaValue(group, sizeBy) > 0)
+      .sort((a, b) => areaValue(b, sizeBy) - areaValue(a, sizeBy)),
+    [allGroups, sizeBy],
   );
-  const totalValue = groups.reduce((sum, group) => sum + group.marketValue, 0);
+  const totalValue = allGroups.reduce((sum, group) => sum + group.marketValue, 0);
   const maxGainMagnitude = Math.max(
     1,
     ...groups.map((group) => Math.abs(group.estimatedGainPercent)),
@@ -301,7 +373,7 @@ export function InvestmentHeatmap({
     Z: holdings.filter((holding) => holding.risk_tier === "Z")
       .reduce((sum, holding) => sum + Number(holding.market_value), 0),
   };
-  const selected = groups.find((group) => group.symbol === selectedTicker) ?? null;
+  const selected = allGroups.find((group) => group.symbol === selectedTicker) ?? null;
 
   return (
     <>
@@ -312,7 +384,10 @@ export function InvestmentHeatmap({
             <h2>Investment heatmap</h2>
           </div>
           <div className="heatmap-heading-actions">
-            <span className="panel-kicker">Area = combined after-tax holding value</span>
+            {groups.length > 0 && (
+              <HeatmapSizeToggle value={sizeBy} onChange={setSizeBy} />
+            )}
+            <span className="panel-kicker">Area = {areaLabel(sizeBy)}</span>
             {groups.length > 0 && (
               <button
                 className="text-button heatmap-expand-button"
@@ -331,6 +406,7 @@ export function InvestmentHeatmap({
               groups={groups}
               currency={currency}
               maxGainMagnitude={maxGainMagnitude}
+              sizeBy={sizeBy}
               onSelect={setSelectedTicker}
             />
             <div className="heatmap-legend" aria-label="Gain and loss color legend">
@@ -352,7 +428,9 @@ export function InvestmentHeatmap({
               ))}
             </div>
             <div className="table-note">
-              Heatmap colors show estimated gain/loss from average cost after the app’s 3% positive-gain tax estimate. This is not tax-lot or realized P&amp;L accounting. Risk tiers are qualitative placeholders, not measured volatility or safety grades. ETFs default to X and stocks to Y; existing positions start at 5% and new ETFs at 6% nominal return. Both fields are editable per holding.
+              Tile area uses {sizeBy === "marketValue"
+                ? "estimated after-tax current value"
+                : "the cost basis of the units currently held (average cost × current units)"}. Colors still show estimated gain/loss from average cost after the app’s 3% positive-gain tax estimate. This is not tax-lot or realized P&amp;L accounting. Risk tiers are qualitative placeholders, not measured volatility or safety grades. ETFs default to X and stocks to Y; existing positions start at 5% and new ETFs at 6% nominal return. Both fields are editable per holding.
             </div>
           </>
         ) : (
@@ -374,23 +452,27 @@ export function InvestmentHeatmap({
           >
             <header className="heatmap-fullscreen-heading">
               <div>
-                <div className="eyebrow">Area = combined after-tax holding value</div>
+                <div className="eyebrow">Area = {areaLabel(sizeBy)}</div>
                 <h2 id="heatmap-fullscreen-title">Investment heatmap</h2>
                 <p>Hover over a tile for position details. Select a tile to see each account and listing.</p>
               </div>
-              <button
-                className="icon-button"
-                type="button"
-                aria-label="Exit full-screen heatmap"
-                onClick={() => setFullScreen(false)}
-              >
-                <Minimize2 size={18} />
-              </button>
+              <div className="heatmap-fullscreen-actions">
+                <HeatmapSizeToggle value={sizeBy} onChange={setSizeBy} fullScreen />
+                <button
+                  className="icon-button"
+                  type="button"
+                  aria-label="Exit full-screen heatmap"
+                  onClick={() => setFullScreen(false)}
+                >
+                  <Minimize2 size={18} />
+                </button>
+              </div>
             </header>
             <HeatmapCanvas
               groups={groups}
               currency={currency}
               maxGainMagnitude={maxGainMagnitude}
+              sizeBy={sizeBy}
               large
               onSelect={setSelectedTicker}
             />
@@ -422,6 +504,10 @@ export function InvestmentHeatmap({
             </div>
             <div className="ticker-detail-summary">
               <div><span>Combined estimated after-tax value</span><strong>{amount(selected.marketValue, currency)}</strong></div>
+              <div>
+                <span>Invested cost basis · units currently held</span>
+                <strong>{amount(selected.costBasis, currency)}</strong>
+              </div>
               <div>
                 <span>Estimated gain/loss after current tax assumption</span>
                 <strong className={selected.estimatedGain >= 0 ? "positive-text" : "negative-text"}>

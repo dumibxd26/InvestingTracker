@@ -5,6 +5,8 @@ import { amount, dateLabel, goalLabel } from "../format";
 import type { AssetClass, Currency, Dashboard, FundingRule, GoalInsights, GoalRecord } from "../types";
 import { GoalDialog } from "./GoalDialog";
 import { GoalInsightsPanel } from "./GoalInsightsPanel";
+import { PlanningEditor } from "./PlanningEditor";
+import { ContributionPreview } from "./ContributionPreview";
 
 interface GoalsViewProps {
   data: Dashboard;
@@ -51,6 +53,18 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
   const [insightsGoalId, setInsightsGoalId] = useState<string | null>(null);
   const [insights, setInsights] = useState<{ goalId: string; data: GoalInsights } | null>(null);
   const [insightsError, setInsightsError] = useState("");
+  const [planRevision, setPlanRevision] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setInsights(null); setInsightsError("");
+    if (insightsGoalId) {
+      api.goalInsights(insightsGoalId).then(value => {
+        if (active) setInsights({ goalId: insightsGoalId, data: value });
+      }).catch(cause => { if (active) setInsightsError(String(cause)); });
+    }
+    return () => { active = false; };
+  }, [insightsGoalId, data, planRevision]);
 
   useEffect(() => {
     setFundingRule(data.policy.funding_rule ?? "");
@@ -138,19 +152,8 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
     }
   }
 
-  async function toggleInsights(goalId: string) {
-    if (insightsGoalId === goalId) {
-      setInsightsGoalId(null);
-      return;
-    }
-    setInsightsGoalId(goalId);
-    setInsightsError("");
-    try {
-      const data = await api.goalInsights(goalId);
-      setInsights({ goalId, data });
-    } catch (cause) {
-      setInsightsError(cause instanceof ApiError ? cause.message : "Goal insights could not be loaded.");
-    }
+  function toggleInsights(goalId: string) {
+    setInsightsGoalId(current => current === goalId ? null : goalId);
   }
 
   async function deleteGoal(goal: Pick<GoalRecord, "id" | "name">) {
@@ -187,13 +190,14 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
         <div className="explainer-mark"><Target size={20} /></div>
         <div>
           <strong>A goal is a purpose—not a separate account.</strong>
-          <p>Set a deadline, priority, and comfort with risk. You can keep investments together at your broker while tracking different goals here.</p>
+          <p>Set a deadline and comfort with risk. You can keep investments together at your broker while tracking different goals here.</p>
         </div>
       </section>
+      <PlanningEditor currency={currency} onSaved={async () => { setPlanRevision(r => r + 1); await onSaved(); }} />
 
       <section className="panel goals-list-panel">
         <div className="panel-heading">
-          <div><div className="eyebrow">Your priorities</div><h2>{data.goals.length} active goals</h2></div>
+          <div><div className="eyebrow">Your goals</div><h2>{data.goals.length} active goals</h2></div>
           <span className="panel-kicker">You can change these any time</span>
         </div>
         {goalError && <div className="inline-error goal-list-error" role="alert">{goalError}</div>}
@@ -210,7 +214,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
                   <div className="full-goal-copy">
                     <div className="full-goal-title"><h3>{goal.name}</h3><span className="goal-type">{goalLabel(goal.goal_type)}</span></div>
                     <div className="full-goal-meta">
-                      <span>Priority {goal.priority}</span>
+                      <span>{goal.target_money_basis === "nominal" ? "Nominal target" : "Today's-money target"}</span>
                       <span>{goal.risk_level} risk comfort</span>
                       <span>{goal.flexibility === "essential" ? "Essential date" : "Flexible date"}</span>
                     </div>
@@ -274,6 +278,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
               </article>
               {insightsGoalId === goal.id && (
                 <div className="goal-insights-wrap">
+                  <ContributionPreview goalId={goal.id} revision={`${planRevision}:${JSON.stringify(data.goals)}`} />
                   {insights?.goalId === goal.id ? (
                     <GoalInsightsPanel insights={insights.data} />
                   ) : insightsError ? (
@@ -303,22 +308,19 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
             <span>When new money is available</span>
             <select value={fundingRule} onChange={(event) => setFundingRule(event.target.value as FundingRule)}>
               <option value="" disabled>Choose a funding rule</option>
-              <option value="priority_first">Fund higher-priority goals first</option>
-              <option value="proportional">Divide by monthly contribution needs</option>
+              <option value="proportional">Divide by next 12 months' average contributions (including bonuses)</option>
               <option value="fixed_percentages">Use fixed percentages I set</option>
             </select>
           </label>
           <p className="policy-help">
-            {fundingRule === "priority_first"
-              ? "Goals receive up to their planned monthly contribution in priority order; any remainder goes to the highest-priority goal."
-              : fundingRule === "proportional"
-                ? "Cash is split in proportion to each goal’s planned monthly contribution."
+            {fundingRule === "proportional"
+                ? "Cash is split in proportion to each goal’s average monthly contributions over the next 12 months, including bonuses and one-off contributions."
                 : "Each active goal receives the share you set below. Shares must total exactly 100%."}
           </p>
           <div className="fixed-shares-list">
             {data.goals.map((goal) => (
               <label className="share-row" key={goal.id}>
-                <span><strong>{goal.name}</strong><small>Priority {goal.priority}</small></span>
+                <span><strong>{goal.name}</strong></span>
                 <span className="input-suffix share-input">
                   <input
                     aria-label={`${goal.name} fixed funding share percentage`}

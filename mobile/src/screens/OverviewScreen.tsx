@@ -165,8 +165,7 @@ export function OverviewScreen() {
                 <View style={styles.flex}>
                   <Text style={styles.cardTitle}>{goal.name}</Text>
                   <Text style={styles.cardMeta}>
-                    Priority {goal.priority}
-                    {goal.target_date ? `  |  Target ${formatDate(goal.target_date)}` : ""}
+                    {goal.target_date ? `Target ${formatDate(goal.target_date)}` : "Ongoing"}
                   </Text>
                 </View>
                 <Badge

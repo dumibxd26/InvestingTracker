@@ -73,7 +73,6 @@ class RiskLevel(StrEnum):
 
 
 class FundingRule(StrEnum):
-    PRIORITY_FIRST = "priority_first"
     PROPORTIONAL = "proportional"
     FIXED_PERCENTAGES = "fixed_percentages"
 
@@ -434,13 +433,15 @@ class Goal(Base):
         SqlEnum(Currency, values_callable=enum_values, name="currency_code"), nullable=False
     )
     target_date: Mapped[date | None] = mapped_column(Date)
-    priority: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     risk_level: Mapped[RiskLevel] = mapped_column(
         SqlEnum(RiskLevel, values_callable=enum_values, name="risk_level"), nullable=False
     )
     monthly_contribution: Mapped[Decimal] = mapped_column(
         Numeric(20, 4), default=Decimal("0"), nullable=False
     )
+    target_money_basis: Mapped[str] = mapped_column(String(10), default="real", nullable=False)
+    annual_inflation_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 8))
+    contribution_rules: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     visualization_budget_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     visualization_budget_period: Mapped[str | None] = mapped_column(String(8))
     fixed_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 6))
@@ -449,6 +450,15 @@ class Goal(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )
+
+
+class FinancialPlan(Base):
+    __tablename__ = "financial_plans"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    configuration: Mapped[dict] = mapped_column(JSON, nullable=False)
 
 
 class AllocationPolicy(Base):

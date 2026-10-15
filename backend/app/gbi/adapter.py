@@ -316,6 +316,32 @@ def load_allocated_holdings(
             )
         )
 
+    manual_cash = float(getattr(goal, "current_amount", 0.0) or 0.0)
+    if manual_cash > 0:
+        allocations.append(
+            AllocatedHolding(
+                holding=Holding(
+                    holding_id=f"goal-cash-{goal.id}",
+                    ticker="CASH",
+                    name="Manual goal savings",
+                    asset_class="CASH_BALANCE",
+                    total_units=1.0,
+                    current_price=manual_cash,
+                    trading_currency=goal_currency,
+                    underlying_currency=goal_currency,
+                    is_currency_hedged=False,
+                    tax_lots=[
+                        TaxLot(f"goal-cash-{goal.id}", today, 1.0, manual_cash, 1.0)
+                    ],
+                    capital_gains_rate=0.0,
+                    short_term_capital_gains_rate=0.0,
+                    long_term_capital_gains_rate=0.0,
+                    distribution_tax_rate=0.0,
+                ),
+                allocated_percentage=100.0,
+            )
+        )
+
     return allocations, notes
 
 
@@ -355,9 +381,10 @@ def build_goal_spec(
             if holding.capital_gains_rate is not None
             else default_capital_gains_rate
         )
-        total_value += value
-        weighted_short_term_rate += value * short_term_rate
-        weighted_long_term_rate += value * long_term_rate
+        if holding.asset_class != "CASH_BALANCE":
+            total_value += value
+            weighted_short_term_rate += value * short_term_rate
+            weighted_long_term_rate += value * long_term_rate
         assumption = CMA_CONFIG[holding.asset_class]
         distribution_yield = (
             holding.dividend_yield
@@ -384,9 +411,14 @@ def build_goal_spec(
         else DIVIDEND_AND_INTEREST_TAX_RATE
     )
 
+    inflation_override = getattr(goal, "annual_inflation_rate", None)
     profile = TaxInflationProfile(
-        annual_inflation_rate=CURRENCY_INFLATION_PARITY[goal_currency],
-        is_target_in_todays_dollars=True,
+        annual_inflation_rate=(
+            float(inflation_override)
+            if inflation_override is not None
+            else CURRENCY_INFLATION_PARITY[goal_currency]
+        ),
+        is_target_in_todays_dollars=getattr(goal, "target_money_basis", "real") != "nominal",
         index_contributions_to_inflation=False,
         short_term_cap_gains_rate=short_term_capital_gains_rate,
         long_term_cap_gains_rate=long_term_capital_gains_rate,

@@ -606,7 +606,7 @@ def test_allocation_preview_conserves_the_investable_budget(tmp_path) -> None:
         policy = client.put(
             "/api/policy",
             json={
-                "funding_rule": "priority_first",
+                "funding_rule": "proportional",
                 "emergency_reserve": "0",
                 "target_weights": {
                     "equities": "0.70",
@@ -808,7 +808,7 @@ def test_policy_rejects_target_weights_that_do_not_sum_to_one(tmp_path) -> None:
         response = client.put(
             "/api/policy",
             json={
-                "funding_rule": "priority_first",
+                "funding_rule": "proportional",
                 "emergency_reserve": "9000",
                 "target_weights": {
                     "equities": "0.70",
@@ -1996,6 +1996,188 @@ def test_portfolio_projection_uses_position_return_assumption_and_account_values
     assert past_date.status_code == 422
 
 
+def test_projection_range_returns_per_asset_cases_and_combined_after_tax_values(
+    tmp_path,
+) -> None:
+    target_date = add_months(date.today(), 12)
+    with create_test_client(tmp_path) as client:
+        account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Scenario brokerage",
+                "provider_code": "MANUAL",
+                "account_type": "BROKERAGE",
+                "currency": "EUR",
+                "opening_cash": "1000",
+            },
+        )
+        assert account.status_code == 201, account.text
+        user_id = UUID(client.get("/api/auth/me").json()["id"])
+        with client.app.state.session_factory() as session:
+            instrument = Instrument(
+                symbol="RANGE",
+                name="Range Corp",
+                asset_class=AssetClass.EQUITIES,
+                currency=Currency.EUR,
+                mic="XNAS",
+                exchange="NASDAQ",
+                instrument_type="STOCK",
+                is_demo=False,
+            )
+            session.add(instrument)
+            session.flush()
+            holding = Holding(
+                user_id=user_id,
+                account_id=UUID(account.json()["id"]),
+                funding_subaccount_id=None,
+                instrument_id=instrument.id,
+                quantity=Decimal("2"),
+                average_cost=Decimal("80"),
+                purchase_date=date(2025, 1, 1),
+                risk_tier="Z",
+                expected_annual_return=Decimal("0.10"),
+                funding_cost=Decimal("0"),
+            )
+            session.add(holding)
+            session.flush()
+            holding_id = holding.id
+            session.add(
+                MarketPriceCache(
+                    instrument_id=instrument.id,
+                    price=Decimal("100"),
+                    currency=Currency.EUR,
+                    source="TEST",
+                    feed_type="QUOTE",
+                    observed_at=datetime.now(UTC),
+                )
+            )
+            session.commit()
+
+        payload = {
+            "target_date": target_date.isoformat(),
+            "currency": "EUR",
+            "monthly_contribution": "100",
+            "scope_account_id": account.json()["id"],
+            "include_taxes": True,
+            "annual_inflation_rate": "0.05",
+            "investments": [
+                {
+                    "asset_key": f"holding:{holding_id}",
+                    "asset_type": "holding",
+                    "asset_id": str(holding_id),
+                    "contribution_percentage": "100",
+                    "worst_annual_return": "-0.10",
+                    "best_annual_return": "0.20",
+                },
+                {
+                    "asset_key": "other:private-bond",
+                    "asset_type": "other",
+                    "name": "Private bond",
+                    "current_value": "1000",
+                    "cost_basis": "800",
+                    "tax_rate": "0.15",
+                    "contribution_percentage": "0",
+                    "worst_annual_return": "0",
+                    "best_annual_return": "0.10",
+                },
+            ],
+        }
+        after_tax = client.post("/api/projections/portfolio/range", json=payload)
+        before_tax = client.post(
+            "/api/projections/portfolio/range",
+            json={**payload, "include_taxes": False},
+        )
+        missing_inflation = client.post(
+            "/api/projections/portfolio/range",
+            json={
+                key: value
+                for key, value in payload.items()
+                if key != "annual_inflation_rate"
+            },
+        )
+
+    assert after_tax.status_code == 200, after_tax.text
+    assert before_tax.status_code == 200, before_tax.text
+    assert missing_inflation.status_code == 422
+    after = after_tax.json()
+    before = before_tax.json()
+    assert after["include_taxes"] is True
+    assert len(after["lines"]) == 4
+    assert {line["case"] for line in after["lines"]} == {"worst", "best"}
+    assert Decimal(after["risk_summary"]["risk_mix"]["Z"]) == Decimal("1.0000")
+    assert Decimal(after["risk_summary"]["current_invested_value"]) > 0
+    assert Decimal(after["investments"][0]["contribution_principal"]) == Decimal("1200.00")
+    assert Decimal(after["best_case_projected_net_worth"]) < Decimal(
+        before["best_case_projected_net_worth"]
+    )
+    assert Decimal(after["best_case_real_projected_net_worth"]) < Decimal(
+        after["best_case_projected_net_worth"]
+    )
+    for case in ("worst", "best"):
+        individual_case_total = sum(
+            (
+                Decimal(line["projected_net_worth"])
+                for line in after["lines"]
+                if line["case"] == case
+            ),
+            Decimal("0"),
+        ) - Decimal(after["baseline_projected_net_worth"])
+        combined_case_total = Decimal(after[f"{case}_case_projected_net_worth"])
+        assert abs(individual_case_total - combined_case_total) <= Decimal("0.02")
+
+
+def test_portfolio_projection_taxes_fixed_deposit_interest_when_enabled(tmp_path) -> None:
+    start_date = date.today()
+    target_date = add_months(start_date, 12)
+    with create_test_client(tmp_path) as client:
+        account = client.post(
+            "/api/accounts",
+            json={
+                "display_name": "Projection savings",
+                "provider_code": "MANUAL",
+                "account_type": "SAVINGS",
+                "currency": "EUR",
+                "opening_cash": "1500",
+            },
+        )
+        created = client.post(
+            "/api/deposits",
+            json={
+                "account_id": account.json()["id"],
+                "subaccount_id": account.json()["subaccounts"][0]["id"],
+                "name": "Taxed projection deposit",
+                "principal": "1000",
+                "start_date": start_date.isoformat(),
+                "period_months": 12,
+                "annual_profit_rate": "0.10",
+                "capitalization": True,
+            },
+        )
+        params = {
+            "target_date": target_date.isoformat(),
+            "currency": "EUR",
+            "annual_inflation_rate": "0",
+        }
+        after_tax = client.get(
+            "/api/projections/portfolio",
+            params={**params, "include_taxes": "true"},
+        )
+        before_tax = client.get(
+            "/api/projections/portfolio",
+            params={**params, "include_taxes": "false"},
+        )
+
+    assert account.status_code == 201, account.text
+    assert created.status_code == 201, created.text
+    assert after_tax.status_code == 200, after_tax.text
+    assert before_tax.status_code == 200, before_tax.text
+    assert Decimal(after_tax.json()["projected_net_worth"]) < Decimal(
+        before_tax.json()["projected_net_worth"]
+    )
+    assert after_tax.json()["include_taxes"] is True
+    assert before_tax.json()["include_taxes"] is False
+
+
 def test_savings_wallet_credits_monthly_interest_once_and_projects_growth(tmp_path) -> None:
     start_date = add_months(date.today(), -3)
     with create_test_client(tmp_path) as client:
@@ -2026,6 +2208,13 @@ def test_savings_wallet_credits_monthly_interest_once_and_projects_growth(tmp_pa
         projection = client.get(
             f"/api/projections/portfolio?target_date={add_months(date.today(), 12).isoformat()}"
         )
+        projection_before_tax = client.get(
+            "/api/projections/portfolio",
+            params={
+                "target_date": add_months(date.today(), 12).isoformat(),
+                "include_taxes": "false",
+            },
+        )
         account_id = created.json()["id"]
         wallet_id = created.json()["subaccounts"][0]["id"]
         cleared = client.put(
@@ -2044,9 +2233,18 @@ def test_savings_wallet_credits_monthly_interest_once_and_projects_growth(tmp_pa
     )
     assert brokerage.status_code == 422
     assert projection.status_code == 200, projection.text
+    assert projection_before_tax.status_code == 200, projection_before_tax.text
     expected_growth = Decimal("1236.36") * ((Decimal("1.01") ** 12) - 1)
     projected_cash = Decimal(projection.json()["accounts"][0]["projected_cash_value"])
-    assert abs(projected_cash - (Decimal("1236.36") + expected_growth)) < Decimal("0.02")
+    projected_cash_before_tax = Decimal(
+        projection_before_tax.json()["accounts"][0]["projected_cash_value"]
+    )
+    assert abs(
+        projected_cash - (Decimal("1236.36") + expected_growth * Decimal("0.9"))
+    ) < Decimal("0.02")
+    assert abs(
+        projected_cash_before_tax - (Decimal("1236.36") + expected_growth)
+    ) < Decimal("0.02")
     assert cleared.status_code == 200
     assert cleared.json()["annual_interest_rate"] is None
     assert Decimal(stopped.json()["accounts"][0]["subaccounts"][0]["cash_balance"]) == Decimal(

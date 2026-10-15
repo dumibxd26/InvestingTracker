@@ -59,10 +59,12 @@ export function GoalInsightsPanel({ insights }: GoalInsightsPanelProps) {
         <FanChart
           points={simulation.yearly_schedule}
           inflation={goal.tax_profile.annual_inflation_rate}
+          inflationFactors={goal.inflation_factors}
+          realTarget={goal.tax_profile.is_target_in_todays_dollars ? goal.target_amount : undefined}
           currency={currency}
         />
         <p className="quiet-copy">
-          Simple projection at {pct(bands.expected_rate)} a year: {amount(bands.projected_value_expected, currency)}
+          Simple nominal projection at {pct(bands.expected_rate)} a year: {amount(bands.projected_value_expected, currency)}
           {" "}(range {amount(bands.projected_value_conservative, currency)} to {amount(bands.projected_value_optimistic, currency)}).
         </p>
       </section>
@@ -247,10 +249,12 @@ function RecoveryOptions({ recovery }: { recovery: GoalInsightsRecovery }) {
 interface FanChartProps {
   points: GoalInsightsYearPoint[];
   inflation: number;
+  inflationFactors?: number[] | null;
+  realTarget?: number;
   currency: Currency;
 }
 
-function FanChart({ points, inflation, currency }: FanChartProps) {
+function FanChart({ points, inflation, inflationFactors, realTarget, currency }: FanChartProps) {
   const [basis, setBasis] = useState<"real" | "nominal">("real");
   if (points.length < 2) return <p className="quiet-copy">Not enough years to draw a projection.</p>;
 
@@ -259,33 +263,34 @@ function FanChart({ points, inflation, currency }: FanChartProps) {
   const margin = { top: 14, right: 18, bottom: 28, left: 56 };
   const innerWidth = width - margin.left - margin.right;
   const innerHeight = height - margin.top - margin.bottom;
-  const lastYear = points[points.length - 1].year;
+  const lastMonth = Math.max(1, ...points.map(point => point.month_offset ?? point.year * 12));
 
   const series = points.map((point) => {
-    const deflator = (1 + inflation) ** point.year;
+    const month = point.month_offset ?? point.year * 12;
+    const deflator = inflationFactors?.[month] ?? (1 + inflation) ** (month / 12);
     const values = basis === "real" ? point.real_todays_dollars : point.nominal_after_tax;
     return {
-      year: point.year,
+      month,
       p10: values.p10,
       p50: values.p50,
       p90: values.p90,
-      target: basis === "real" ? point.inflated_target_at_year / deflator : point.inflated_target_at_year,
+      target: basis === "real" ? realTarget ?? point.inflated_target_at_year / deflator : point.inflated_target_at_year,
     };
   });
   const top = Math.max(1, ...series.map((item) => Math.max(item.p90, item.target))) * 1.05;
-  const x = (year: number) => margin.left + (year / lastYear) * innerWidth;
+  const x = (month: number) => margin.left + (month / lastMonth) * innerWidth;
   const y = (value: number) => margin.top + innerHeight - (value / top) * innerHeight;
   const path = (valueOf: (item: (typeof series)[number]) => number) =>
     series
-      .map((item, index) => `${index === 0 ? "M" : "L"}${x(item.year).toFixed(1)},${y(valueOf(item)).toFixed(1)}`)
+      .map((item, index) => `${index === 0 ? "M" : "L"}${x(item.month).toFixed(1)},${y(valueOf(item)).toFixed(1)}`)
       .join(" ");
   const band = [
-    ...series.map((item) => `${x(item.year).toFixed(1)},${y(item.p90).toFixed(1)}`),
-    ...[...series].reverse().map((item) => `${x(item.year).toFixed(1)},${y(item.p10).toFixed(1)}`),
+    ...series.map((item) => `${x(item.month).toFixed(1)},${y(item.p90).toFixed(1)}`),
+    ...[...series].reverse().map((item) => `${x(item.month).toFixed(1)},${y(item.p10).toFixed(1)}`),
   ].join(" ");
   const yTicks = [0, 0.5, 1].map((fraction) => (top / 1.05) * fraction);
-  const step = Math.max(1, Math.ceil(lastYear / 6));
-  const xTicks = series.filter((item) => item.year % step === 0);
+  const step = Math.max(12, Math.ceil(lastMonth / 72) * 12);
+  const xTicks = series.filter((item, index) => item.month % step === 0 || index === series.length - 1);
 
   return (
     <div className="goal-fan-chart">
@@ -297,7 +302,7 @@ function FanChart({ points, inflation, currency }: FanChartProps) {
           Nominal
         </button>
       </div>
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Projected after-tax value range by year">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Projected after-tax value range over time">
         {yTicks.map((tick) => (
           <g key={tick}>
             <line className="fan-grid" x1={margin.left} x2={width - margin.right} y1={y(tick)} y2={y(tick)} />
@@ -305,8 +310,8 @@ function FanChart({ points, inflation, currency }: FanChartProps) {
           </g>
         ))}
         {xTicks.map((item) => (
-          <text className="fan-axis" key={item.year} x={x(item.year)} y={height - 8} textAnchor="middle">
-            {item.year === 0 ? "Now" : `Y${item.year}`}
+          <text className="fan-axis" key={item.month} x={x(item.month)} y={height - 8} textAnchor="middle">
+            {item.month === 0 ? "Now" : item.month % 12 === 0 ? `Y${item.month / 12}` : `${item.month}mo`}
           </text>
         ))}
         <polygon className="fan-band" points={band} />

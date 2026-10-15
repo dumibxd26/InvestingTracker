@@ -1,6 +1,7 @@
 import json
 from collections.abc import Generator
 from datetime import UTC, date
+from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from app.config import get_settings
 from app.database import SessionFactory, get_session
 from app.gbi.schemas import GoalInsightsResponse
 from app.models import Currency, User
+from app.planning import ContributionSchedule, FinancialPlanPayload
 from app.schemas import (
     AccountCreate,
     AccountSubaccountCreate,
@@ -51,6 +53,8 @@ from app.schemas import (
     MarketSymbolSearchResponse,
     PolicyResponse,
     PolicyUpdate,
+    PortfolioProjectionRangeRequest,
+    PortfolioProjectionRangeResponse,
     PortfolioProjectionResponse,
     PortfolioProjectionScenarioRequest,
     PortfolioProjectionScenarioResponse,
@@ -89,8 +93,10 @@ from app.services import (
     delete_holding,
     delete_purchase_plan,
     delete_vesting_grant,
+    get_financial_plan,
     get_policy_response,
     get_profile,
+    goal_contribution_schedule,
     goal_insights,
     import_broker_history,
     initialize_portfolio,
@@ -103,6 +109,7 @@ from app.services import (
     logout_user,
     market_data_status,
     portfolio_projection,
+    portfolio_projection_range,
     portfolio_projection_scenario,
     preview_broker_import,
     preview_recommendation,
@@ -114,6 +121,7 @@ from app.services import (
     transfer_cash,
     transfer_stock,
     update_account_tax_profile,
+    update_financial_plan,
     update_fixed_shares,
     update_goal,
     update_holding,
@@ -241,8 +249,30 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
         target_date: date,
         currency: Currency | None = None,
+        include_taxes: bool = True,
+        annual_inflation_rate: Annotated[
+            Decimal, Query(ge=Decimal("-0.99"), le=Decimal("10"))
+        ] = Decimal("0"),
     ) -> PortfolioProjectionResponse:
-        return portfolio_projection(session, current_user.id, target_date, currency)
+        return portfolio_projection(
+            session,
+            current_user.id,
+            target_date,
+            currency,
+            include_taxes=include_taxes,
+            annual_inflation_rate=annual_inflation_rate,
+        )
+
+    @app.post(
+        "/api/projections/portfolio/range",
+        response_model=PortfolioProjectionRangeResponse,
+    )
+    def post_portfolio_projection_range(
+        payload: PortfolioProjectionRangeRequest,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> PortfolioProjectionRangeResponse:
+        return portfolio_projection_range(session, current_user.id, payload)
 
     @app.post(
         "/api/projections/portfolio/scenario",
@@ -538,6 +568,21 @@ def create_app(
         delete_vesting_grant(session, current_user.id, grant_id)
         return None
 
+    @app.get("/api/financial-plan", response_model=FinancialPlanPayload)
+    def get_plan(
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> FinancialPlanPayload:
+        return get_financial_plan(session, current_user.id)
+
+    @app.put("/api/financial-plan", response_model=FinancialPlanPayload)
+    def put_plan(
+        payload: FinancialPlanPayload,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> FinancialPlanPayload:
+        return update_financial_plan(session, current_user.id, payload)
+
     @app.get("/api/goals", response_model=list[GoalResponse])
     def get_goals(
         current_user: Annotated[User, Depends(get_current_user)],
@@ -587,6 +632,15 @@ def create_app(
         session: Annotated[Session, Depends(get_session)],
     ) -> GoalInsightsResponse:
         return goal_insights(session, current_user.id, goal_id)
+
+    @app.get("/api/goals/{goal_id}/contributions", response_model=ContributionSchedule)
+    def get_goal_contributions(
+        goal_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+        months: Annotated[int, Query(ge=1, le=1200)] = 120,
+    ) -> ContributionSchedule:
+        return goal_contribution_schedule(session, current_user.id, goal_id, months)
 
     @app.post("/api/deposits", response_model=FixedDepositCreateResponse, status_code=201)
     def post_deposit(

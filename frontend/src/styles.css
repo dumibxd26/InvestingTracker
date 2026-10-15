@@ -52,6 +52,10 @@
   padding-left: 12px;
 }
 
+.projection-summary.projection-range-summary {
+  grid-template-columns: 1fr 1fr;
+}
+
 .projection-account-select {
   grid-column: 1 / -1;
 }
@@ -96,7 +100,7 @@
 
 .account-deposit-balance small {
   color: #929e95;
-  font-size: 8px;
+  font-size: 11px;
 }
 
 html[data-theme="dark"] .custom-tranche-editor,
@@ -1563,6 +1567,46 @@ a:focus-visible {
   gap: 10px;
 }
 
+.heatmap-size-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid #e3eae4;
+  border-radius: 9px;
+  color: #849188;
+  background: #f7f9f7;
+  font-size: 8px;
+}
+
+.heatmap-size-toggle > span {
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
+.heatmap-size-toggle button {
+  min-height: 29px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 6px;
+  color: #718077;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  white-space: nowrap;
+}
+
+.heatmap-size-toggle button.is-selected {
+  color: #355440;
+  background: #e4eee5;
+  font-weight: 700;
+}
+
+.heatmap-size-toggle button:focus-visible {
+  outline: 2px solid #60856a;
+  outline-offset: 1px;
+}
+
 .heatmap-expand-button {
   display: inline-flex;
   align-items: center;
@@ -1666,6 +1710,13 @@ a:focus-visible {
   gap: 16px;
 }
 
+.heatmap-fullscreen-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
 .heatmap-fullscreen-heading h2 {
   margin: 3px 0 0;
   color: var(--ink);
@@ -1746,7 +1797,7 @@ a:focus-visible {
 
 .ticker-detail-summary {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 10px;
   margin: 10px 0 16px;
 }
@@ -1859,7 +1910,7 @@ a:focus-visible {
 
 .projection-controls {
   display: grid;
-  grid-template-columns: minmax(130px, 0.7fr) minmax(160px, 0.8fr) auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: end;
   gap: 10px;
   padding: 16px 19px 12px;
@@ -1873,6 +1924,57 @@ a:focus-visible {
   min-height: 38px;
 }
 
+.projection-tax-toggle > span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
+.projection-tax-toggle [role="group"] {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 38px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--canvas);
+}
+
+.projection-tax-toggle button {
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ink-muted);
+  background: transparent;
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.projection-tax-toggle button.is-selected {
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: 0 1px 3px rgb(20 35 25 / 12%);
+}
+
+.projection-inflation-note {
+  display: grid;
+  gap: 3px;
+  margin: 0 19px 12px;
+  color: var(--ink-muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.projection-inflation-note [role="status"] {
+  color: #996a19;
+}
+
+.projection-inflation-note [role="alert"] {
+  color: #b4532a;
+}
+
 .projection-scenario-controls,
 .projection-scenario-results {
   display: grid;
@@ -1882,6 +1984,13 @@ a:focus-visible {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--canvas);
+}
+
+.projection-scenario-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .projection-scenario-heading h3,
@@ -1908,9 +2017,51 @@ a:focus-visible {
   margin: 0;
 }
 
+.projection-allocation-status {
+  grid-column: 1 / -1;
+  color: var(--ink-muted);
+  font-size: 9px;
+}
+
 .projection-investment-list {
   display: grid;
   gap: 6px;
+}
+
+.projection-investment-list-scroll {
+  max-height: 360px;
+  overflow: auto;
+  padding: 2px 5px 2px 0;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--line) transparent;
+  scrollbar-width: thin;
+}
+
+.projection-investment-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink-muted);
+  background: var(--panel);
+}
+
+.projection-investment-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+}
+
+.projection-investment-search input::placeholder {
+  color: var(--ink-muted);
 }
 
 .projection-investment-header {
@@ -1961,6 +2112,13 @@ a:focus-visible {
   gap: 3px;
 }
 
+.projection-investment-label {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+
 .projection-investment-choice strong {
   overflow: hidden;
   font-size: 9px;
@@ -1968,10 +2126,46 @@ a:focus-visible {
   white-space: nowrap;
 }
 
+.projection-investment-label > input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--panel);
+  font-size: 10px;
+}
+
 .projection-investment-choice small,
 .projection-investment-assumptions > label > span:first-child {
   color: var(--ink-muted);
   font-size: 8px;
+}
+
+.projection-investment-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.projection-investment-fields > label {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  color: var(--ink-muted);
+  font-size: 8px;
+}
+
+.projection-investment-fields input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--panel);
+  font-size: 10px;
 }
 
 .projection-investment-assumptions {
@@ -2017,6 +2211,10 @@ a:focus-visible {
   align-items: center;
   gap: 10px;
   padding: 8px 19px 12px;
+}
+
+.projection-summary.projection-range-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .projection-summary > div {
@@ -2066,6 +2264,13 @@ a:focus-visible {
   stroke-linejoin: round;
 }
 
+.projection-range-line {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .projection-scenario-line {
   fill: none;
   stroke: #cc7a32;
@@ -2104,6 +2309,12 @@ a:focus-visible {
   font-size: 8px;
 }
 
+.projection-chart-legend-scroll {
+  max-height: 90px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
 .projection-chart-legend span {
   display: inline-flex;
   align-items: center;
@@ -2120,6 +2331,29 @@ a:focus-visible {
 
 .projection-legend-scenario {
   background: #cc7a32;
+}
+
+.projection-legend-range-worst,
+.projection-legend-range-best {
+  width: 17px;
+  height: 3px;
+  flex: 0 0 auto;
+  border-radius: 3px;
+}
+
+.projection-legend-range-worst {
+  background-image: repeating-linear-gradient(
+    90deg,
+    transparent 0 4px,
+    var(--panel) 4px 7px
+  );
+}
+
+.projection-chart-caption {
+  margin: 5px 7px 7px;
+  color: var(--ink-muted);
+  font-size: 8px;
+  line-height: 1.5;
 }
 
 .projection-baseline-caption {
@@ -2184,6 +2418,30 @@ a:focus-visible {
 .projection-risk-x { border-left: 3px solid #5c9a73; }
 .projection-risk-y { border-left: 3px solid #c49a49; }
 .projection-risk-z { border-left: 3px solid #c66b61; }
+
+.projection-range-results-list {
+  display: grid;
+  max-height: 340px;
+  gap: 6px;
+  overflow-y: auto;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+}
+
+.projection-range-result {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 9px;
+}
+
+.projection-range-result > span,
+.projection-range-result > small {
+  color: var(--ink-muted);
+  line-height: 1.5;
+}
 
 .projection-investment-results {
   display: grid;
@@ -5978,6 +6236,21 @@ html[data-theme="dark"] .schedule-row {
   background: linear-gradient(145deg, #1a2a20, #18231d);
 }
 
+html[data-theme="dark"] .heatmap-size-toggle {
+  border-color: #2d4435;
+  color: #9dafa3;
+  background: #19251d;
+}
+
+html[data-theme="dark"] .heatmap-size-toggle button {
+  color: #b3c1b7;
+}
+
+html[data-theme="dark"] .heatmap-size-toggle button.is-selected {
+  color: #e5eee8;
+  background: #314b38;
+}
+
 html[data-theme="dark"] .page-intro h1,
 html[data-theme="dark"] .panel-heading h2,
 html[data-theme="dark"] .section-heading h2,
@@ -7023,8 +7296,20 @@ html[data-theme="dark"] .purchase-plan-values small {
     grid-template-columns: 1fr;
   }
 
+  .projection-investment-list-scroll {
+    max-height: 300px;
+  }
+
   .projection-investment-assumptions {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .projection-investment-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .projection-scenario-heading {
+    flex-direction: column;
   }
 
   .heatmap-fullscreen-backdrop {
@@ -7039,4 +7324,55 @@ html[data-theme="dark"] .purchase-plan-values small {
   .heatmap-fullscreen-heading p {
     font-size: 8px;
   }
+
+  .heatmap-fullscreen-heading {
+    flex-wrap: wrap;
+  }
+
+  .heatmap-fullscreen-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+.planning-editor {
+  padding: 20px;
+}
+
+.planning-editor > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.planning-editor form,
+.planning-source {
+  display: grid;
+  gap: 12px;
+}
+
+.planning-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.planning-source {
+  min-width: 0;
+  border: 1px solid var(--border, #dce2e8);
+  border-radius: 10px;
+  padding: 14px;
+  margin: 12px 0;
+}
+
+.contribution-chart {
+  width: 100%;
+  height: 120px;
+  margin: 16px 0;
+  color: var(--primary, #49775a);
+}
+
+.contribution-table {
+  max-height: 360px;
+  overflow: auto;
 }

@@ -1,6 +1,28 @@
 export type Currency = "EUR" | "USD" | "RON";
 export type AssetClass = "equities" | "fixed_income" | "satellite";
-export type FundingRule = "priority_first" | "proportional" | "fixed_percentages";
+export type FundingRule = "proportional" | "fixed_percentages";
+export type MoneyBasis = "real" | "nominal";
+export interface InflationChange { effective_date: string; annual_rate: string }
+export interface IncomeSource {
+  id: string; name: string; kind: "salary" | "bonus"; amount: string;
+  currency: Currency; recurrence: Recurrence; start_date: string; end_date: string | null;
+  money_basis: MoneyBasis; annual_growth_rate: string;
+  salary_source_id: string | null; salary_percentage: string | null;
+}
+export interface FinancialPlanPayload {
+  anchor_date: string; annual_inflation_rate: string; inflation_changes: InflationChange[];
+  income_sources: IncomeSource[]; monthly_expenses: string | null; expenses_currency: Currency;
+}
+export interface ContributionRule {
+  source_kind?: "salary" | "bonus" | null;
+  source_id: string | null; calculation: "fixed" | "percentage"; value: string;
+  recurrence: Recurrence; start_date: string; end_date: string | null; money_basis: MoneyBasis;
+}
+export interface ContributionSchedule {
+  anchor_date: string; currency: Currency; warnings: string[];
+  months: { date: string; nominal_contribution: string; real_contribution: string;
+    nominal_income: string; nominal_expenses: string; inflation_factor: string }[];
+}
 export type AccountType = "BROKERAGE" | "BANK" | "SAVINGS" | "EMPLOYER_PLAN";
 export type TaxReportingMethod =
   | "legacy_manual"
@@ -37,7 +59,9 @@ export interface GoalSummary {
   currency: Currency;
   progress_percent: string;
   target_date: string | null;
-  priority: number;
+  target_money_basis: MoneyBasis;
+  annual_inflation_rate: string | null;
+  contribution_rules: ContributionRule[] | null;
   risk_level: "low" | "moderate" | "high";
   monthly_contribution: string;
   visualization_budget_amount: string | null;
@@ -64,7 +88,9 @@ export interface GoalRecord {
   current_annual_income: string;
   target_currency: Currency;
   target_date: string | null;
-  priority: number;
+  target_money_basis: MoneyBasis;
+  annual_inflation_rate: string | null;
+  contribution_rules: ContributionRule[] | null;
   risk_level: "low" | "moderate" | "high";
   monthly_contribution: string;
   visualization_budget_amount: string | null;
@@ -136,6 +162,7 @@ export interface HoldingSummary {
   purchase_date: string;
   risk_tier: "X" | "Y" | "Z";
   expected_annual_return: string;
+  annual_return_volatility_assumption: string;
   funding_currency: Currency | null;
   funding_cost: string;
   price: string;
@@ -559,8 +586,11 @@ export interface Deposit {
   principal: string;
   accrued_interest: string;
   current_value: string;
+  current_value_base: string;
+  principal_value_base: string;
   currency: Currency;
   annual_rate: string;
+  annual_return_volatility_assumption: string;
   rate_basis: "nominal_apr" | "effective_apy";
   compounding: "daily" | "monthly" | "quarterly" | "annual" | "at_maturity";
   period_months: number;
@@ -687,6 +717,7 @@ export interface ProjectionAccountValue {
   projected_holdings_value: string;
   projected_deposit_value: string;
   projected_total_value: string;
+  real_projected_total_value: string | null;
 }
 
 export interface ProjectionPoint {
@@ -694,6 +725,7 @@ export interface ProjectionPoint {
   label: string;
   total_value: string;
   accounts: ProjectionAccountValue[];
+  real_total_value: string | null;
 }
 
 export interface PortfolioProjection {
@@ -703,6 +735,9 @@ export interface PortfolioProjection {
   current_net_worth: string;
   projected_net_worth: string;
   estimated_change: string;
+  real_projected_net_worth: string | null;
+  include_taxes: boolean;
+  annual_inflation_rate: string;
   accounts: ProjectionAccountValue[];
   timeline: ProjectionPoint[];
   warnings: string[];
@@ -762,6 +797,92 @@ export interface PortfolioProjectionScenario {
   assumptions: string[];
 }
 
+export type ProjectionRangeAssetType = "holding" | "deposit" | "other";
+
+export interface ProjectionRangeInvestmentInput {
+  asset_key: string;
+  asset_type: ProjectionRangeAssetType;
+  asset_id?: string;
+  name?: string;
+  current_value?: string;
+  cost_basis?: string;
+  tax_rate?: string;
+  contribution_percentage: string;
+  worst_annual_return: string;
+  best_annual_return: string;
+}
+
+export interface PortfolioProjectionRangePayload {
+  target_date: string;
+  currency: Currency;
+  monthly_contribution: string;
+  scope_account_id: string | null;
+  include_taxes: boolean;
+  annual_inflation_rate: string;
+  investments: ProjectionRangeInvestmentInput[];
+}
+
+export interface ProjectionRangeLinePoint {
+  date: string;
+  label: string;
+  nominal_value: string;
+  real_value: string;
+}
+
+export interface ProjectionRangeInvestmentResult {
+  asset_key: string;
+  asset_type: ProjectionRangeAssetType;
+  name: string;
+  risk_tier: "X" | "Y" | "Z" | null;
+  annual_return_volatility_assumption: string | null;
+  current_value: string;
+  contribution_percentage: string;
+  monthly_contribution: string;
+  contribution_principal: string;
+  worst_annual_return: string;
+  best_annual_return: string;
+  estimated_tax_rate: string;
+  worst_projected_gross_value: string;
+  best_projected_gross_value: string;
+  worst_estimated_tax: string;
+  best_estimated_tax: string;
+  worst_projected_value: string;
+  best_projected_value: string;
+  worst_real_projected_value: string;
+  best_real_projected_value: string;
+}
+
+export interface ProjectionRangeLine {
+  asset_key: string;
+  asset_name: string;
+  case: "worst" | "best";
+  annual_return_assumption: string;
+  projected_net_worth: string;
+  real_projected_net_worth: string;
+  points: ProjectionRangeLinePoint[];
+}
+
+export interface PortfolioProjectionRange {
+  baseline: PortfolioProjection;
+  scenario_baseline_timeline: ProjectionRangeLinePoint[];
+  scenario_current_net_worth: string;
+  baseline_projected_net_worth: string;
+  baseline_real_projected_net_worth: string;
+  worst_case_projected_net_worth: string;
+  best_case_projected_net_worth: string;
+  worst_case_real_projected_net_worth: string;
+  best_case_real_projected_net_worth: string;
+  monthly_contribution: string;
+  scope_account_id: string | null;
+  include_taxes: boolean;
+  annual_inflation_rate: string;
+  risk_summary: ProjectionScenarioRiskSummary;
+  investments: ProjectionRangeInvestmentResult[];
+  lines: ProjectionRangeLine[];
+  assumptions: string[];
+  warnings: string[];
+}
+
 export interface GoalCreatePayload {
   name: string;
   goal_type: GoalType;
@@ -769,7 +890,9 @@ export interface GoalCreatePayload {
   target_annual_income?: string;
   target_currency: Currency;
   target_date?: string;
-  priority: number;
+  target_money_basis?: MoneyBasis;
+  annual_inflation_rate?: string | null;
+  contribution_rules?: ContributionRule[] | null;
   risk_level: "low" | "moderate" | "high";
   monthly_contribution: string;
   fixed_percent?: string;
@@ -808,6 +931,8 @@ export interface GoalInsightsGoal {
   risk_profile: "CONSERVATIVE" | "MODERATE" | "AGGRESSIVE";
   target_success_probability: number;
   tax_profile: GoalInsightsTaxProfile;
+  monthly_contributions?: number[] | null;
+  inflation_factors?: number[] | null;
 }
 
 export interface GoalInsightsBucketDrift {
@@ -931,6 +1056,7 @@ export interface GoalInsightsRebalance {
 
 export interface GoalInsightsYearPoint {
   year: number;
+  month_offset?: number | null;
   nominal_after_tax: Record<"p10" | "p25" | "p50" | "p75" | "p90", number>;
   real_todays_dollars: Record<"p10" | "p25" | "p50" | "p75" | "p90", number>;
   inflated_target_at_year: number;

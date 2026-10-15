@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import date
 from typing import Any
+
+
+def validate_schedules(
+    monthly_contributions: tuple[float, ...] | None,
+    inflation_factors: tuple[float, ...] | None,
+) -> None:
+    """Validate nominal month-end deposits and positive today-relative price indices."""
+    if monthly_contributions is not None and any(
+        not math.isfinite(value) or value < 0 for value in monthly_contributions
+    ):
+        raise ValueError("monthly_contributions must contain finite nonnegative amounts")
+    if inflation_factors is not None:
+        if not inflation_factors or inflation_factors[0] != 1.0:
+            raise ValueError("inflation_factors must start with 1.0 at month zero")
+        if any(not math.isfinite(value) or value <= 0 for value in inflation_factors):
+            raise ValueError("inflation_factors must contain finite positive factors")
 
 
 @dataclass(frozen=True)
@@ -57,6 +74,12 @@ class TaxInflationProfile:
 
 @dataclass(frozen=True)
 class GoalSpec:
+    """A scalar savings plan or explicit nominal month-end deposits (month one at index zero).
+
+    Inflation factors are relative to today: index zero is 1.0, index k is month k.
+    Explicit schedules are never indexed again or extrapolated beyond supplied months.
+    """
+
     goal_id: str
     name: str
     base_currency: str
@@ -66,6 +89,11 @@ class GoalSpec:
     risk_profile: str
     tax_profile: TaxInflationProfile
     target_success_probability: float = 0.80
+    monthly_contributions: tuple[float, ...] | None = None
+    inflation_factors: tuple[float, ...] | None = None
+
+    def __post_init__(self) -> None:
+        validate_schedules(self.monthly_contributions, self.inflation_factors)
 
 
 @dataclass
@@ -213,6 +241,7 @@ class YearlyPercentileSchedulePoint:
     nominal_after_tax: dict[str, float]
     real_todays_dollars: dict[str, float]
     inflated_target_at_year: float
+    month_offset: int | None = None
 
 
 @dataclass

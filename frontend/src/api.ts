@@ -25,6 +25,8 @@ import type {
   GoalInsights,
   GoalRecord,
   GoalUpdatePayload,
+  FinancialPlanPayload,
+  ContributionSchedule,
   FixedDepositCreatePayload,
   FixedDepositCreated,
   ProfileUpdatePayload,
@@ -35,6 +37,8 @@ import type {
   MarketRefreshResult,
   MarketSymbol,
   PortfolioProjection,
+  PortfolioProjectionRange,
+  PortfolioProjectionRangePayload,
   PortfolioProjectionScenario,
   PortfolioProjectionScenarioPayload,
   StockPurchasePlanPayload,
@@ -112,6 +116,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         typeof payload.detail === "string"
       ) {
         message = payload.detail;
+      } else if (typeof payload === "object" && payload !== null && "detail" in payload && Array.isArray(payload.detail)) {
+        message = payload.detail.map((item: unknown) =>
+          typeof item === "object" && item !== null && "msg" in item ? String(item.msg) : "Invalid input",
+        ).join("; ");
       }
     } catch {
       // Keep the HTTP status message when the server did not send JSON.
@@ -144,6 +152,11 @@ function brokerImportForm(
 }
 
 export const api = {
+  financialPlan: () => request<FinancialPlanPayload>("/financial-plan"),
+  saveFinancialPlan: (payload: FinancialPlanPayload) =>
+    request<FinancialPlanPayload>("/financial-plan", { method: "PUT", body: JSON.stringify(payload) }),
+  goalContributions: (id: string, months = 120) =>
+    request<ContributionSchedule>(`/goals/${id}/contributions?months=${months}`),
   register: async (payload: RegisterPayload) => {
     const response = await request<AuthResponse>("/auth/register", {
       method: "POST",
@@ -186,6 +199,16 @@ export const api = {
       `/projections/portfolio?target_date=${encodeURIComponent(targetDate)}&currency=${currency}`,
       { signal },
     ),
+
+  portfolioProjectionRange: (
+    payload: PortfolioProjectionRangePayload,
+    signal?: AbortSignal,
+  ) =>
+    request<PortfolioProjectionRange>("/projections/portfolio/range", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal,
+    }),
 
   portfolioProjectionScenario: (
     payload: PortfolioProjectionScenarioPayload,

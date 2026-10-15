@@ -21,6 +21,7 @@ from app.models import (
     RiskLevel,
     TaxReportingMethod,
 )
+from app.planning import ContributionRule, MoneyBasis
 
 
 class RegisterRequest(BaseModel):
@@ -322,9 +323,13 @@ class GoalCreate(BaseModel):
     current_annual_income: Decimal = Field(default=Decimal("0"), ge=0)
     target_currency: Currency = Currency.EUR
     target_date: date | None = None
-    priority: int = Field(ge=1, le=10)
     risk_level: RiskLevel
-    monthly_contribution: Decimal = Field(ge=0)
+    monthly_contribution: Decimal = Field(default=Decimal("0"), ge=0)
+    target_money_basis: MoneyBasis = "real"
+    annual_inflation_rate: Decimal | None = Field(
+        default=None, ge=Decimal("-0.5"), le=Decimal("1")
+    )
+    contribution_rules: list[ContributionRule] | None = Field(default=None, max_length=100)
     visualization_budget_amount: Decimal | None = Field(default=None, ge=0)
     visualization_budget_period: Literal["monthly", "yearly"] | None = None
     fixed_percent: Decimal | None = Field(default=None, ge=0, le=1)
@@ -373,9 +378,11 @@ class GoalResponse(BaseModel):
     current_annual_income: Decimal
     target_currency: Currency
     target_date: date | None
-    priority: int
     risk_level: RiskLevel
     monthly_contribution: Decimal
+    target_money_basis: MoneyBasis
+    annual_inflation_rate: Decimal | None
+    contribution_rules: list[ContributionRule] | None
     visualization_budget_amount: Decimal | None
     visualization_budget_period: Literal["monthly", "yearly"] | None
     fixed_percent: Decimal | None
@@ -563,9 +570,11 @@ class GoalSummary(BaseModel):
     currency: Currency
     progress_percent: Decimal
     target_date: date | None
-    priority: int
     risk_level: RiskLevel
     monthly_contribution: Decimal
+    target_money_basis: MoneyBasis = "real"
+    annual_inflation_rate: Decimal | None = None
+    contribution_rules: list[ContributionRule] | None = None
     visualization_budget_amount: Decimal | None
     visualization_budget_period: Literal["monthly", "yearly"] | None
     fixed_percent: Decimal | None
@@ -594,6 +603,7 @@ class HoldingSummary(BaseModel):
     purchase_date: date
     risk_tier: Literal["X", "Y", "Z"]
     expected_annual_return: Decimal
+    annual_return_volatility_assumption: Decimal = Decimal("0")
     funding_currency: Currency | None
     funding_cost: Decimal
     price: Decimal
@@ -700,6 +710,7 @@ class ProjectionAccountValue(BaseModel):
     projected_holdings_value: Decimal
     projected_deposit_value: Decimal
     projected_total_value: Decimal
+    real_projected_total_value: Decimal | None = None
 
 
 class ProjectionPoint(BaseModel):
@@ -707,6 +718,7 @@ class ProjectionPoint(BaseModel):
     label: str
     total_value: Decimal
     accounts: list[ProjectionAccountValue]
+    real_total_value: Decimal | None = None
 
 
 class PortfolioProjectionResponse(BaseModel):
@@ -719,6 +731,9 @@ class PortfolioProjectionResponse(BaseModel):
     accounts: list[ProjectionAccountValue]
     timeline: list[ProjectionPoint]
     warnings: list[str]
+    real_projected_net_worth: Decimal | None = None
+    include_taxes: bool = True
+    annual_inflation_rate: Decimal = Decimal("0")
 
 
 class ProjectionScenarioInvestmentInput(BaseModel):
@@ -786,6 +801,140 @@ class PortfolioProjectionScenarioResponse(BaseModel):
     assumptions: list[str]
 
 
+class ProjectionRangeInvestmentInput(BaseModel):
+    asset_key: str = Field(min_length=1, max_length=100)
+    asset_type: Literal["holding", "deposit", "other"]
+    asset_id: UUID | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    current_value: Decimal | None = Field(default=None, ge=0, le=Decimal("1000000000"))
+    cost_basis: Decimal | None = Field(default=None, ge=0, le=Decimal("1000000000"))
+    tax_rate: Decimal | None = Field(default=None, ge=0, le=1)
+    contribution_percentage: Decimal = Field(default=Decimal("0"), ge=0, le=100)
+    worst_annual_return: Decimal = Field(gt=Decimal("-1"), le=1)
+    best_annual_return: Decimal = Field(gt=Decimal("-1"), le=1)
+
+    @model_validator(mode="after")
+    def validate_asset_inputs(self) -> "ProjectionRangeInvestmentInput":
+        if self.worst_annual_return > self.best_annual_return:
+            raise ValueError("Worst-case annual return must not exceed best-case return")
+        if self.asset_type == "other":
+            if self.asset_id is not None:
+                raise ValueError("Custom investments cannot reference a tracked asset")
+            if (
+                self.name is None
+                or self.current_value is None
+                or self.cost_basis is None
+                or self.tax_rate is None
+            ):
+                raise ValueError(
+                    "Custom investments require a name, current value, cost basis, and tax rate"
+                )
+        elif self.asset_id is None:
+            raise ValueError("Tracked investments require an asset ID")
+        return self
+
+
+class PortfolioProjectionRangeRequest(BaseModel):
+    target_date: date
+    currency: Currency
+    monthly_contribution: Decimal = Field(
+        default=Decimal("0"), ge=0, le=Decimal("100000000")
+    )
+    scope_account_id: UUID | None = None
+    include_taxes: bool = True
+    annual_inflation_rate: Decimal = Field(ge=Decimal("-0.99"), le=Decimal("10"))
+    investments: list[ProjectionRangeInvestmentInput] = Field(
+        default_factory=list, max_length=100
+    )
+
+    @model_validator(mode="after")
+    def validate_range_scenario(self) -> "PortfolioProjectionRangeRequest":
+        asset_keys = [investment.asset_key for investment in self.investments]
+        if len(asset_keys) != len(set(asset_keys)):
+            raise ValueError("Investment scenario keys must be unique")
+        tracked_assets = [
+            (investment.asset_type, investment.asset_id)
+            for investment in self.investments
+            if investment.asset_type != "other"
+        ]
+        if len(tracked_assets) != len(set(tracked_assets)):
+            raise ValueError("A tracked investment can only be selected once")
+        if self.monthly_contribution > 0:
+            if not self.investments:
+                raise ValueError(
+                    "Select at least one investment to allocate monthly contributions"
+                )
+            if sum(
+                (investment.contribution_percentage for investment in self.investments),
+                Decimal("0"),
+            ) != Decimal("100"):
+                raise ValueError(
+                    "Monthly contribution percentages must sum to 100"
+                )
+        return self
+
+
+class ProjectionRangeLinePoint(BaseModel):
+    date: date
+    label: str
+    nominal_value: Decimal
+    real_value: Decimal
+
+
+class ProjectionRangeInvestmentResult(BaseModel):
+    asset_key: str
+    asset_type: Literal["holding", "deposit", "other"]
+    name: str
+    risk_tier: Literal["X", "Y", "Z"] | None
+    annual_return_volatility_assumption: Decimal | None
+    current_value: Decimal
+    contribution_percentage: Decimal
+    monthly_contribution: Decimal
+    contribution_principal: Decimal
+    worst_annual_return: Decimal
+    best_annual_return: Decimal
+    estimated_tax_rate: Decimal
+    worst_projected_gross_value: Decimal
+    best_projected_gross_value: Decimal
+    worst_estimated_tax: Decimal
+    best_estimated_tax: Decimal
+    worst_projected_value: Decimal
+    best_projected_value: Decimal
+    worst_real_projected_value: Decimal
+    best_real_projected_value: Decimal
+
+
+class ProjectionRangeLine(BaseModel):
+    asset_key: str
+    asset_name: str
+    case: Literal["worst", "best"]
+    annual_return_assumption: Decimal
+    projected_net_worth: Decimal
+    real_projected_net_worth: Decimal
+    points: list[ProjectionRangeLinePoint]
+
+
+class PortfolioProjectionRangeResponse(BaseModel):
+    baseline: PortfolioProjectionResponse
+    scenario_baseline_timeline: list[ProjectionRangeLinePoint]
+    scenario_current_net_worth: Decimal
+    baseline_projected_net_worth: Decimal
+    baseline_real_projected_net_worth: Decimal
+    worst_case_projected_net_worth: Decimal
+    best_case_projected_net_worth: Decimal
+    worst_case_real_projected_net_worth: Decimal
+    best_case_real_projected_net_worth: Decimal
+    monthly_contribution: Decimal
+    scope_account_id: UUID | None
+    include_taxes: bool
+    annual_inflation_rate: Decimal
+    risk_summary: ProjectionScenarioRiskSummary
+    investments: list[ProjectionRangeInvestmentResult]
+    lines: list[ProjectionRangeLine]
+    assumptions: list[str]
+    warnings: list[str]
+
+
 class MarketRefreshResponse(BaseModel):
     updated_symbols: list[str]
     updated_fx_pairs: list[str]
@@ -816,8 +965,11 @@ class DepositSummary(BaseModel):
     principal: Decimal
     accrued_interest: Decimal
     current_value: Decimal
+    current_value_base: Decimal
+    principal_value_base: Decimal
     currency: Currency
     annual_rate: Decimal
+    annual_return_volatility_assumption: Decimal = Decimal("0")
     rate_basis: RateBasis
     compounding: CompoundingFrequency
     period_months: int
