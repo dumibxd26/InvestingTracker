@@ -3,7 +3,9 @@ import { api } from "../api";
 import { amount } from "../format";
 import type { ContributionSchedule } from "../types";
 
-export function ContributionPreview({ goalId, revision }: { goalId: string; revision: unknown }) {
+export function ContributionPreview({ goalId, revision, onEdit, editing }: {
+  goalId: string; revision: unknown; onEdit: () => void; editing: boolean;
+}) {
   const [schedule, setSchedule] = useState<ContributionSchedule | null>(null);
   const [error, setError] = useState("");
   const [months, setMonths] = useState(120);
@@ -16,11 +18,18 @@ export function ContributionPreview({ goalId, revision }: { goalId: string; revi
   }, [goalId, revision, months]);
   const max = Math.max(1, ...(schedule?.months.map(m => Number(m.nominal_contribution)) ?? []));
   return <section className="goal-insight-block"><h3>Contribution schedule preview</h3>
+    <button type="button" className="button button-secondary" onClick={onEdit} disabled={editing}>
+      {editing ? "Loading goal…" : "Edit contributions"}
+    </button>
     <label>Projection months (1–1200) <input type="number" min="1" max="1200" value={months} onChange={e => { const n = Number(e.target.value); if (Number.isInteger(n) && n >= 1 && n <= 1200) setMonths(n); }} /></label>
     {error && <p role="alert">{error}</p>}
     {!schedule && !error && <p>Loading contribution schedule…</p>}
     {schedule && <>
       <p>Today's-money reference: {schedule.anchor_date}. Each row covers (today, +1 month], then the following monthly window. Forecast only; no wallet transactions.</p>
+      <p className="quiet-copy">Income is shown for context, not automatically invested. Only this goal's saved monthly amount or contribution rules feed the contribution columns and projected value chart.</p>
+      {schedule.months.every(month => Number(month.nominal_contribution) === 0) && <p role="status">
+        No contributions are scheduled for this goal in the selected {months} months. The value projection uses existing savings and investments only. Choose Edit contributions to assign a monthly amount or a percentage of salary/bonuses, then save the goal.
+      </p>}
       {schedule.warnings.map((w, i) => <p className="inline-error" role="alert" key={i}>{w}</p>)}
       <svg className="contribution-chart" role="img" aria-label="Nominal monthly contribution forecast; exact values in table below" viewBox="0 0 600 120" preserveAspectRatio="none">
         <polyline fill="none" stroke="currentColor" strokeWidth="2" points={schedule.months.map((m, i) => `${i * 600 / Math.max(1, schedule.months.length - 1)},${115 - Number(m.nominal_contribution) / max * 110}`).join(" ")} />

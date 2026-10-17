@@ -569,6 +569,9 @@ export interface CashFlowSchedule {
   account_id: string | null;
   subaccount_id: string | null;
   auto_post: boolean;
+  annual_growth_rate: string;
+  salary_schedule_id: string | null;
+  salary_percentage: string | null;
 }
 
 export interface VestingTranche {
@@ -1182,7 +1185,7 @@ export interface AccountTaxProfileUpdatePayload {
 export interface CashFlowSchedulePayload {
   label: string;
   kind: FlowKind;
-  amount: string;
+  amount?: string;
   currency: Currency;
   recurrence: Recurrence;
   start_date: string;
@@ -1190,6 +1193,9 @@ export interface CashFlowSchedulePayload {
   account_id?: string;
   subaccount_id?: string;
   auto_post?: boolean;
+  annual_growth_rate?: string;
+  salary_schedule_id?: string;
+  salary_percentage?: string;
 }
 
 export interface VestingGrantPayload {

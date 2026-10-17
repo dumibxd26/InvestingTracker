@@ -44,8 +44,9 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
   const [error, setError] = useState("");
 
   async function archiveSchedule(schedule: CashFlowSchedule) {
-    const action = schedule.auto_post ? "automatic credits and forecasts" : "future forecasts";
-    if (!window.confirm(`Stop future ${action} for “${schedule.label}”? Already posted entries will remain.`)) return;
+    const action = schedule.auto_post ? "automatic credits and forecasts" : "forecasts";
+    const linkedNotice = schedule.kind === "salary" ? " Any linked bonus schedules will also stop." : "";
+    if (!window.confirm(`Stop future ${action} for “${schedule.label}”?${linkedNotice} Already posted entries will remain.`)) return;
     setArchivingId(schedule.id);
     setError("");
     try {
@@ -184,12 +185,16 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
                   <small>
                     {schedule.kind} · {recurrenceLabel[schedule.recurrence]} · starts {dateLabel(schedule.start_date)}
                     {schedule.end_date ? ` · through ${dateLabel(schedule.end_date)}` : ""}
+                    {Number(schedule.annual_growth_rate) !== 0 ? ` · ${(Number(schedule.annual_growth_rate) * 100).toFixed(2)}% expected annual raise` : ""}
+                    {schedule.salary_schedule_id ? ` · linked to ${data.cash_flow_schedules.find(item => item.id === schedule.salary_schedule_id)?.label ?? "salary"} · follows salary raises` : ""}
                     {schedule.auto_post
                       ? ` · credits ${data.accounts.find((account) => account.id === schedule.account_id)?.display_name ?? "selected account"}`
                       : " · forecast only"}
                   </small>
                 </span>
-                <strong className="schedule-amount">{amount(schedule.amount, schedule.currency)}</strong>
+                <strong className="schedule-amount">{schedule.salary_schedule_id
+                  ? `${Number(schedule.salary_percentage) * 100}% of annual salary`
+                  : amount(schedule.amount, schedule.currency)}</strong>
                 <button
                   className="schedule-stop-button"
                   type="button"
@@ -210,6 +215,7 @@ export function CashFlowView({ data, currency, onChanged }: CashFlowViewProps) {
         <CashFlowDialog
           accounts={data.accounts}
           currency={currency}
+          schedules={data.cash_flow_schedules}
           onClose={() => setDialogOpen(false)}
           onCreated={onChanged}
         />

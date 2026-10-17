@@ -6,9 +6,9 @@ export const today = () => {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 };
-export function newIncome(currency: Currency, start: string): IncomeSource {
-  return { id: `income_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, name: "Salary", kind: "salary",
-    amount: "0", currency, recurrence: "monthly", start_date: start, end_date: null,
+export function newIncome(currency: Currency, start: string, kind: IncomeSource["kind"] = "salary"): IncomeSource {
+  return { id: `income_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, name: kind === "salary" ? "Salary" : "Bonus", kind,
+    amount: "0", currency, recurrence: kind === "salary" ? "monthly" : "annual", start_date: start, end_date: null,
     money_basis: "real", annual_growth_rate: "0", salary_source_id: null, salary_percentage: null };
 }
 export function newRule(start = today()): ContributionRule {

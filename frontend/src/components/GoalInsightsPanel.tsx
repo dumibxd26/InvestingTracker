@@ -64,7 +64,8 @@ export function GoalInsightsPanel({ insights }: GoalInsightsPanelProps) {
           currency={currency}
         />
         <p className="quiet-copy">
-          Simple nominal projection at {pct(bands.expected_rate)} a year: {amount(bands.projected_value_expected, currency)}
+          Separate analytical estimate (always nominal, not the chart's percentile range)
+          {" "}at {pct(bands.expected_rate)} a year: {amount(bands.projected_value_expected, currency)}
           {" "}(range {amount(bands.projected_value_conservative, currency)} to {amount(bands.projected_value_optimistic, currency)}).
         </p>
       </section>
@@ -265,19 +266,30 @@ function FanChart({ points, inflation, inflationFactors, realTarget, currency }:
   const innerHeight = height - margin.top - margin.bottom;
   const lastMonth = Math.max(1, ...points.map(point => point.month_offset ?? point.year * 12));
 
-  const series = points.map((point) => {
+  const projections = points.map((point) => {
     const month = point.month_offset ?? point.year * 12;
     const deflator = inflationFactors?.[month] ?? (1 + inflation) ** (month / 12);
-    const values = basis === "real" ? point.real_todays_dollars : point.nominal_after_tax;
     return {
       month,
-      p10: values.p10,
-      p50: values.p50,
-      p90: values.p90,
-      target: basis === "real" ? realTarget ?? point.inflated_target_at_year / deflator : point.inflated_target_at_year,
+      real: {
+        ...point.real_todays_dollars,
+        target: realTarget ?? point.inflated_target_at_year / deflator,
+      },
+      nominal: {
+        ...point.nominal_after_tax,
+        target: point.inflated_target_at_year,
+      },
     };
   });
-  const top = Math.max(1, ...series.map((item) => Math.max(item.p90, item.target))) * 1.05;
+  const series = projections.map(point => ({ month: point.month, ...point[basis] }));
+  const top = Math.max(1, ...projections.map(point => Math.max(
+    point.real.p90, point.real.target, point.nominal.p90, point.nominal.target,
+  ))) * 1.05;
+  const terminal = series[series.length - 1];
+  const inflationChangesValues = projections.some(point =>
+    Math.abs(point.nominal.p90 - point.real.p90) >= 0.01 ||
+    Math.abs(point.nominal.target - point.real.target) >= 0.01,
+  );
   const x = (month: number) => margin.left + (month / lastMonth) * innerWidth;
   const y = (value: number) => margin.top + innerHeight - (value / top) * innerHeight;
   const path = (valueOf: (item: (typeof series)[number]) => number) =>
@@ -324,6 +336,17 @@ function FanChart({ points, inflation, inflationFactors, realTarget, currency }:
         <span><i className="swatch target" /> Target</span>
         <span className="quiet-copy">{basis === "real" ? "Values in today's money" : `Values in ${currency}, not adjusted for inflation`}</span>
       </div>
+      <p className="quiet-copy" aria-live="polite">
+        At deadline ({basis === "real" ? "today's money" : "nominal"}): median {amount(terminal.p50, currency)}
+        {" "}(10th–90th percentile {amount(terminal.p10, currency)} to {amount(terminal.p90, currency)}).
+        {" "}Target: {amount(terminal.target, currency)}.
+      </p>
+      <p className="quiet-copy">
+        Both views use the same vertical scale so inflation's effect stays visible.
+        {" "}{inflationChangesValues
+          ? "Today's money removes projected inflation; nominal shows future currency amounts."
+          : "Inflation does not change the displayed values for this projection, so the views coincide."}
+      </p>
     </div>
   );
 }

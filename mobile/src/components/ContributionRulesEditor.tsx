@@ -6,16 +6,16 @@ import type { ContributionRule, Currency, IncomeSource } from "../types";
 import { newRule, ruleExplanation } from "../planning";
 import { basisOptions, PercentField, recurrenceOptions } from "./PlanningEditor";
 
-export function ContributionRulesEditor({ rules, onChange, currency }: {
-  rules: ContributionRule[] | null; onChange: (rules: ContributionRule[] | null) => void; currency: Currency;
+export function ContributionRulesEditor({ rules, onChange, currency, incomeRevision = 0 }: {
+  rules: ContributionRule[] | null; onChange: (rules: ContributionRule[] | null) => void; currency: Currency; incomeRevision?: number;
 }) {
   const [sources, setSources] = useState<IncomeSource[]>([]);
   const [error, setError] = useState("");
   useEffect(() => {
     let active = true;
-    api.financialPlan().then(p => { if (active) setSources(p.income_sources); }).catch(e => { if (active) setError(String(e)); });
+    api.financialPlan().then(p => { if (active) { setSources(p.income_sources); setError(""); } }).catch(e => { if (active) setError(String(e)); });
     return () => { active = false; };
-  }, []);
+  }, [incomeRevision]);
   function update(i: number, patch: Partial<ContributionRule>) {
     onChange((rules ?? []).map((r, j) => j === i ? { ...r, ...patch } : r));
   }
@@ -28,8 +28,9 @@ export function ContributionRulesEditor({ rules, onChange, currency }: {
         <Text>Contribution rule {i + 1}</Text>
         <ChoiceGroup label="Income source" value={r.source_kind ? `kind:${r.source_kind}` : r.source_id ?? ""} options={[
           { label: "Independent fixed contribution", value: "" },
-          { label: "All salary income (including future jobs)", value: "kind:salary" },
-          { label: "All bonus income", value: "kind:bonus" },
+          ...(sources.some(s => s.kind === "salary") ? [{ label: "All salary income (including future jobs)", value: "kind:salary" }] : []),
+          ...(sources.some(s => s.kind === "bonus") ? [{ label: "All bonus income", value: "kind:bonus" }] : []),
+          ...(r.source_kind && !sources.some(s => s.kind === r.source_kind) ? [{ label: `Unavailable income type (${r.source_kind})`, value: `kind:${r.source_kind}` }] : []),
           ...(r.source_id && !sources.some(s => s.id === r.source_id) ? [{ label: `Unavailable source (${r.source_id})`, value: r.source_id }] : []),
           ...sources.map(s => ({ label: `${s.name} · ${s.start_date}`, value: s.id })),
         ]} onChange={v => update(i, {
@@ -37,6 +38,7 @@ export function ContributionRulesEditor({ rules, onChange, currency }: {
           source_kind: v.startsWith("kind:") ? v.slice(5) as "salary" | "bonus" : null,
           ...(v ? { recurrence: "monthly" as const } : { calculation: "fixed" as const }),
         })} />
+        {!sources.length && <Text>No salary or bonus is saved yet. Add and save income in the financial timeline above before choosing an income-linked contribution.</Text>}
         <ChoiceGroup label="Calculation" value={r.calculation} options={(r.source_id || r.source_kind ? ["fixed", "percentage"] : ["fixed"]).map(v => ({ label: v === "fixed" ? "Fixed amount" : "Percentage of source event", value: v }))} onChange={v => update(i, { calculation: v as ContributionRule["calculation"], value: "0" })} />
         {r.calculation === "percentage" ? <PercentField label="Share of source event (%)" rate={r.value} onChange={v => update(i, { value: v })} /> : <Field label={`Fixed amount (${currency})`} keyboardType="decimal-pad" value={r.value} onChangeText={v => update(i, { value: v })} />}
         {r.source_id || r.source_kind ? <Text>Applies on every matching source event; rule recurrence is ignored. All-salary rules follow future job changes.</Text> : <ChoiceGroup label="Recurrence" value={r.recurrence} options={recurrenceOptions} onChange={v => update(i, { recurrence: v as ContributionRule["recurrence"], ...(v === "one_time" ? { end_date: null } : {}) })} />}

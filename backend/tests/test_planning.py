@@ -71,6 +71,62 @@ def test_zero_salary_growth_loses_purchasing_power() -> None:
     assert float(D("4000") / inflation_factor(plan, future)) == pytest.approx(3883.50, abs=0.2)
 
 
+def test_salary_and_bonus_increases_compound_independently_in_goal_contributions() -> None:
+    source = salary(annual_growth_rate="0.05")
+    bonus = IncomeSource(
+        id="bonus",
+        name="Annual bonus",
+        kind="bonus",
+        amount=D("10000"),
+        currency=Currency.EUR,
+        recurrence=Recurrence.ANNUAL,
+        start_date=ANCHOR,
+        annual_growth_rate=D("0.10"),
+        money_basis="nominal",
+    )
+    plan = FinancialPlanPayload(anchor_date=ANCHOR, income_sources=[source, bonus])
+    rules = [
+        rule(source_kind="salary", calculation="percentage", value="0.15"),
+        rule(source_kind="bonus", calculation="percentage", value="0.5"),
+        rule(value="200", money_basis="nominal"),
+    ]
+    points = contribution_months(plan, rules, D("0"), Currency.EUR, ANCHOR, 24, convert)
+    for offset in (11, 23):
+        at = points[offset].date
+        years = D((at - ANCHOR).days) / D("365.25")
+        expected_salary = D("4000") * D("1.05") ** years
+        expected_bonus = D("10000") * D("1.10") ** years
+        assert points[offset].nominal_contribution == (
+            expected_salary * D("0.15") + expected_bonus * D("0.5") + D("200")
+        )
+        assert points[offset].nominal_income == expected_salary + expected_bonus
+    assert float(points[11].nominal_contribution) == pytest.approx(6330, abs=1)
+    assert float(points[23].nominal_contribution) == pytest.approx(6911.5, abs=1)
+
+
+def test_salary_percentage_bonus_inherits_salary_growth_only_once() -> None:
+    source = salary(annual_growth_rate="0.05")
+    bonus = IncomeSource(
+        id="bonus",
+        name="Salary-based bonus",
+        kind="bonus",
+        amount=D("0"),
+        currency=Currency.EUR,
+        recurrence=Recurrence.ANNUAL,
+        start_date=ANCHOR,
+        salary_source_id="salary",
+        salary_percentage=D("0.1"),
+    )
+    plan = FinancialPlanPayload(
+        anchor_date=ANCHOR, annual_inflation_rate=D("0.10"), income_sources=[source, bonus]
+    )
+    at = date(2028, 1, 1)
+    assert income_amount(bonus, at, plan, convert) == (
+        income_amount(source, at, plan, convert) * D("12") * D("0.1")
+    )
+    assert float(income_amount(bonus, at, plan, convert)) == pytest.approx(5292, abs=1)
+
+
 def test_future_salary_in_todays_money_is_inflated_once_then_nominal_growth_applies() -> None:
     start = date(2030, 1, 1)
     old = salary(end_date=date(2029, 12, 31), annual_growth_rate="0.20")

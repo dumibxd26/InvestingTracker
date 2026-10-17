@@ -491,7 +491,7 @@ class FlowResponse(BaseModel):
 class CashFlowScheduleCreate(BaseModel):
     label: str = Field(min_length=2, max_length=100)
     kind: FlowKind
-    amount: Decimal = Field(gt=0, le=Decimal("100000000"))
+    amount: Decimal | None = Field(default=None, gt=0, le=Decimal("100000000"))
     currency: Currency
     recurrence: Recurrence
     start_date: date
@@ -499,6 +499,11 @@ class CashFlowScheduleCreate(BaseModel):
     account_id: UUID | None = None
     subaccount_id: UUID | None = None
     auto_post: bool = False
+    annual_growth_rate: Decimal = Field(
+        default=Decimal("0"), ge=Decimal("-0.5"), le=Decimal("1")
+    )
+    salary_schedule_id: UUID | None = None
+    salary_percentage: Decimal | None = Field(default=None, gt=0, le=1)
 
     @field_validator("label")
     @classmethod
@@ -510,6 +515,21 @@ class CashFlowScheduleCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_schedule(self) -> "CashFlowScheduleCreate":
+        if (self.salary_schedule_id is None) != (self.salary_percentage is None):
+            raise ValueError("A salary-based bonus needs both a salary schedule and a percentage")
+        if self.salary_schedule_id is not None:
+            if self.kind != FlowKind.BONUS or self.recurrence != Recurrence.ANNUAL:
+                raise ValueError("Salary-based bonuses must be annual bonus schedules")
+            if self.annual_growth_rate:
+                raise ValueError("Salary-based bonuses already grow with the linked salary")
+            if self.amount is not None:
+                raise ValueError("A salary-based bonus uses a percentage, not a fixed amount")
+        elif self.amount is None:
+            raise ValueError("Enter an amount for a fixed cash-flow schedule")
+        if self.annual_growth_rate and (
+            self.kind != FlowKind.SALARY or self.recurrence == Recurrence.ONE_TIME
+        ):
+            raise ValueError("Annual salary growth requires a recurring salary schedule")
         if self.end_date is not None and self.end_date < self.start_date:
             raise ValueError("Schedule end date cannot be before its start date")
         if self.recurrence == Recurrence.ONE_TIME and self.end_date is not None:
@@ -539,6 +559,9 @@ class CashFlowScheduleResponse(BaseModel):
     account_id: UUID | None
     subaccount_id: UUID | None
     auto_post: bool
+    annual_growth_rate: Decimal
+    salary_schedule_id: UUID | None
+    salary_percentage: Decimal | None
 
 
 class CashReceiptCreate(BaseModel):

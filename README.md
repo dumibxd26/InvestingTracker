@@ -36,11 +36,50 @@ For this personal MVP, Python makes the calculation and AI integration layers st
 - Dark mode with the selected preference saved in the browser.
 - FastAPI Swagger UI at `/docs`.
 
+## Cash-flow salary raises and annual bonuses
+
+On **Cash flow**, recurring salaries support an **Expected annual salary increase (%)**.
+Enter net salary in nominal money at the first payment date. The raise is before inflation:
+5% means the salary itself grows by 5%, without adding inflation again. Growth compounds using
+elapsed days / 365.25, including partial years. Existing schedules default to 0% growth.
+
+For a bonus, choose a fixed amount or **Percentage of annual salary**, then select a recurring
+salary schedule and a bonus percentage. Salary-linked bonuses are annual and use the salary
+at each bonus payment date, annualized as monthly × 12, quarterly × 4, or annual × 1.
+For example, EUR 4,000 monthly salary and a 10% bonus yield EUR 4,800 initially; after a full
+year at 5% growth, the bonus is approximately EUR 5,040. This is not a percentage of the
+actual income earned during the preceding calendar year. Cross-currency bonuses use the
+configured FX rates and fail explicitly if conversion is unavailable.
+
+Forecasts and optional automatic tracked-wallet credits use the same calculations. Automatic
+credits are bookkeeping only, not bank transfers or confirmation of actual income. Use
+forecast-only mode when actual payments need manual confirmation. Bonuses are not projected
+outside the linked salary's active dates; stopping a salary also stops its linked bonuses.
+Already posted payments remain unchanged. These schedules remain separate from the financial
+timeline used by goals, so creating them does not duplicate income in goal projections.
+
+Existing databases need the latest migration: run `alembic upgrade head` from `backend`
+using the project's Python environment before starting the updated API.
+
 ## Financial timeline and goal planning
 
 Goals & plan includes a shared **forecast-only financial timeline**. Its salary and bonus assumptions
 do not create cash-flow entries, credit wallets, or place trades. Existing cash-flow schedules and
 automatic salary credits remain separate tracking features.
+
+You can also add or edit salary and bonus income directly in the financial timeline inside the
+create/edit goal form. Save the timeline first; the goal's income-source choices refresh without
+closing the form or losing its contribution rules. Then select all salaries, all bonuses, or a
+specific source and set the fixed amount or percentage to invest. Only that assigned contribution
+enters the goal projection, not the full income payment.
+
+In the goal form, **How will you contribute to this goal?** selects either a **Fixed amount
+each month** or **Salary/bonus percentages or scheduled amounts**. The active mode alone drives
+the projection; the two modes are not added together. A fixed contribution stays unchanged when
+salary grows; a percentage follows its income source. Save the goal to refresh the contribution
+table and value chart. **Edit contributions** beside the preview opens these settings.
+If no contributions are assigned (or none fall inside the preview period), the preview explains
+why its contribution columns are zero even when the Income column shows salary and bonuses.
 
 - Enter net salary, future job salaries, fixed bonuses, fixed contributions, and targets in the
   purchasing power of the displayed **reference date** by default. This date is fixed when the plan
@@ -49,6 +88,12 @@ automatic salary credits remain separate tracking features.
   and 3% inflation, purchasing power grows by `1.05 / 1.03 - 1`, about 1.94%. The application does
   not add inflation on top of the raise. A 0% raise holds the nominal salary fixed and loses
   purchasing power when inflation is positive.
+- Use **Add salary** and **Add bonus** to enter income separately. Each salary has an
+  **Annual salary increase (%)**; each fixed-amount bonus has an **Annual bonus increase (%)**.
+  Both rates compound independently, prorated for partial years. Salary/bonus percentage
+  contributions automatically follow the growing income amounts, without changing the chosen
+  allocation percentage. A bonus defined as a percentage of salary instead follows that salary's
+  growth automatically, with no additional bonus growth layered on top.
 - A future salary entered in reference-date money is inflated once to its job's start date.
   Subsequent salary growth is nominal. For example, a salary of EUR 5,000 in reference-date money
   starting four years later at 3% inflation begins at approximately EUR 5,628 nominal. New job
@@ -75,6 +120,10 @@ automatic salary credits remain separate tracking features.
   basis, analytical bands, and recovery calculations all consume the same month-by-month nominal
   contribution schedule. Recovery savings are an **additional constant nominal amount per month**,
   not a replacement for bonuses or scheduled changes.
+- The projected value chart uses the same vertical scale for **Today's money** and **Nominal**,
+  making the effect of inflation directly comparable. The deadline median, 10th–90th percentile
+  range, and target below the chart follow the selected basis. The separate simple nominal
+  projection is an analytical estimate, not the chart's percentile range.
 
 Future FX conversions hold current rates constant; unavailable currency conversions are reported
 explicitly. Income and inflation assumptions are deterministic; uncertain bonuses, unemployment

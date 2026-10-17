@@ -28,7 +28,12 @@ from app.calculations import (
     round_money,
     route_funding_to_goals,
 )
-from app.cash_flow_logic import add_months, occurrence_dates
+from app.cash_flow_logic import (
+    MONTHS_PER_OCCURRENCE,
+    add_months,
+    nominal_income_amount,
+    occurrence_dates,
+)
 from app.config import get_settings
 from app.gbi.adapter import build_goal_spec, load_allocated_holdings
 from app.gbi.constants import CMA_CONFIG, MAX_EXTENSION_MONTHS
@@ -75,6 +80,7 @@ from app.models import (
     MarketPriceCache,
     RateBasis,
     Recommendation,
+    Recurrence,
     RiskLevel,
     StockPurchasePlan,
     StockSale,
@@ -3100,6 +3106,45 @@ def list_cash_flow_schedules(
     return [CashFlowScheduleResponse.model_validate(schedule) for schedule in schedules]
 
 
+def _scheduled_income_amount(
+    schedule: CashFlowSchedule,
+    occurrence: date,
+    salaries: dict[uuid.UUID, CashFlowSchedule],
+    convert: Convert,
+) -> Decimal | None:
+    if schedule.salary_schedule_id is None:
+        if schedule.annual_growth_rate == ZERO:
+            return schedule.amount
+        return round_money(nominal_income_amount(
+            schedule.amount, schedule.annual_growth_rate, schedule.start_date, occurrence
+        ))
+    salary = salaries.get(schedule.salary_schedule_id)
+    if salary is None or salary.kind != FlowKind.SALARY:
+        raise HTTPException(status_code=409, detail="The bonus's linked salary is unavailable.")
+    if not salary.is_active or occurrence < salary.start_date or (
+        salary.end_date is not None and occurrence > salary.end_date
+    ):
+        return None
+    if salary.recurrence not in MONTHS_PER_OCCURRENCE or schedule.salary_percentage is None:
+        raise HTTPException(status_code=409, detail="The bonus has an invalid salary reference.")
+    annual_salary = nominal_income_amount(
+        salary.amount, salary.annual_growth_rate, salary.start_date, occurrence
+    ) * Decimal(12) / Decimal(MONTHS_PER_OCCURRENCE[salary.recurrence])
+    return round_money(convert(
+        annual_salary * schedule.salary_percentage, salary.currency, schedule.currency
+    ))
+
+
+def _salary_schedules(session: Session, user_id: uuid.UUID) -> dict[uuid.UUID, CashFlowSchedule]:
+    return {
+        schedule.id: schedule for schedule in session.scalars(
+            select(CashFlowSchedule).where(
+                CashFlowSchedule.user_id == user_id, CashFlowSchedule.kind == FlowKind.SALARY
+            )
+        )
+    }
+
+
 def _post_due_cash_flow_schedules(
     session: Session, user_id: uuid.UUID, as_of: date | None = None
 ) -> None:
@@ -3117,6 +3162,9 @@ def _post_due_cash_flow_schedules(
             .with_for_update()
         )
     )
+    user = _get_user(session, user_id)
+    salaries = _salary_schedules(session, user_id)
+    convert = _planning_convert(session, user)
     changed = False
     for schedule in schedules:
         if schedule.account_id is None or schedule.subaccount_id is None:
@@ -3161,6 +3209,9 @@ def _post_due_cash_flow_schedules(
             )
             if existing is not None:
                 continue
+            payment_amount = _scheduled_income_amount(schedule, occurrence, salaries, convert)
+            if payment_amount is None:
+                continue
             subaccount = session.scalar(
                 select(AccountSubaccount)
                 .where(
@@ -3181,7 +3232,7 @@ def _post_due_cash_flow_schedules(
             occurred_at = datetime.combine(occurrence, datetime.min.time(), tzinfo=UTC) + timedelta(
                 hours=12
             )
-            subaccount.cash_balance += schedule.amount
+            subaccount.cash_balance += payment_amount
             session.add(
                 CashFlow(
                     user_id=user_id,
@@ -3191,7 +3242,7 @@ def _post_due_cash_flow_schedules(
                     label=schedule.label,
                     kind=schedule.kind,
                     status=FlowStatus.CONFIRMED,
-                    amount=schedule.amount,
+                    amount=payment_amount,
                     currency=schedule.currency,
                     expected_date=occurrence,
                     occurred_at=occurred_at,
@@ -3280,6 +3331,25 @@ def create_cash_flow_schedule(
     session: Session, user_id: uuid.UUID, payload: CashFlowScheduleCreate
 ) -> CashFlowScheduleResponse:
     user = _get_user(session, user_id)
+    salary = None
+    if payload.salary_schedule_id is not None:
+        salary = session.scalar(select(CashFlowSchedule).where(
+            CashFlowSchedule.id == payload.salary_schedule_id,
+            CashFlowSchedule.user_id == user.id,
+            CashFlowSchedule.is_active.is_(True),
+            CashFlowSchedule.kind == FlowKind.SALARY,
+        ).with_for_update())
+        if salary is None:
+            raise HTTPException(status_code=404, detail="Active salary schedule was not found.")
+        if salary.recurrence == Recurrence.ONE_TIME:
+            raise HTTPException(status_code=422, detail="Link the bonus to a recurring salary.")
+        if payload.start_date < salary.start_date or (
+            salary.end_date is not None and payload.start_date > salary.end_date
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="The first bonus must fall within the salary's active period.",
+            )
     if payload.account_id is not None or payload.subaccount_id is not None:
         if payload.account_id is None or payload.subaccount_id is None:
             raise HTTPException(
@@ -3332,6 +3402,20 @@ def create_cash_flow_schedule(
             status_code=409, detail="Archive an existing schedule before adding another"
         )
     schedule = CashFlowSchedule(user_id=user.id, **payload.model_dump())
+    if salary is not None:
+        initial_amount = _scheduled_income_amount(
+            schedule, payload.start_date, {salary.id: salary}, _planning_convert(session, user)
+        )
+        if (
+            initial_amount is None
+            or initial_amount <= ZERO
+            or initial_amount > Decimal("100000000")
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="The calculated first bonus must be between 0.01 and 100,000,000.",
+            )
+        schedule.amount = initial_amount
     session.add(schedule)
     session.commit()
     session.refresh(schedule)
@@ -3482,6 +3566,13 @@ def archive_cash_flow_schedule(
     )
     if schedule is None:
         raise HTTPException(status_code=404, detail="Active cash-flow schedule not found")
+    if schedule.kind == FlowKind.SALARY:
+        for bonus in session.scalars(select(CashFlowSchedule).where(
+            CashFlowSchedule.user_id == user.id,
+            CashFlowSchedule.salary_schedule_id == schedule.id,
+            CashFlowSchedule.is_active.is_(True),
+        )):
+            bonus.is_active = False
     schedule.is_active = False
     session.commit()
     session.refresh(schedule)
@@ -3534,6 +3625,11 @@ def _project_cash_flows(
             )
         )
 
+    salaries = _salary_schedules(session, user_id)
+
+    def convert(value: Decimal, source: Currency, destination: Currency) -> Decimal:
+        return _to_base(value, source, destination, usd_per_eur, fx_rates)
+
     schedules = session.scalars(
         select(CashFlowSchedule).where(
             CashFlowSchedule.user_id == user_id,
@@ -3549,6 +3645,9 @@ def _project_cash_flows(
             forecast_start,
             through_date,
         ):
+            payment_amount = _scheduled_income_amount(schedule, occurrence, salaries, convert)
+            if payment_amount is None:
+                continue
             entries.append(
                 FlowResponse(
                     id=uuid.uuid5(schedule.id, f"occurrence:{occurrence.isoformat()}"),
@@ -3556,13 +3655,13 @@ def _project_cash_flows(
                     kind=schedule.kind,
                     direction=_flow_direction(schedule.kind),
                     status=FlowStatus.FORECAST,
-                    amount=schedule.amount,
+                    amount=payment_amount,
                     currency=schedule.currency,
                     expected_date=occurrence,
                     occurred_at=None,
                     reporting_amount=round_money(
                         _to_base(
-                            schedule.amount,
+                            payment_amount,
                             schedule.currency,
                             base_currency,
                             usd_per_eur,
@@ -3648,9 +3747,20 @@ def _validate_contribution_sources(
                 continue
             applicable = matching_sources(rule, plan)
             if not applicable:
+                detail = (
+                    "The selected income source is missing from the financial plan. Restore it "
+                    "in the financial timeline, choose an available source, or select "
+                    "Independent fixed contribution."
+                    if rule.source_id is not None
+                    else (
+                        f"No {rule.source_kind} income source is saved in the financial plan. "
+                        f"Add and save a {rule.source_kind} in the financial timeline, or "
+                        "choose Independent fixed contribution."
+                    )
+                )
                 raise HTTPException(
                     status_code=422,
-                    detail="A contribution references income missing from this plan.",
+                    detail=detail,
                 )
             if rule.calculation != "percentage":
                 continue

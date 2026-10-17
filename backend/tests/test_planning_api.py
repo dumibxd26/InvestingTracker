@@ -55,6 +55,99 @@ def save_plan(client, **changes) -> dict:
     return response.json()
 
 
+def test_saved_goal_contribution_changes_update_preview_and_value_projection(tmp_path) -> None:
+    with create_test_client(tmp_path) as client:
+        save_plan(client, income_sources=[source_payload(money_basis="nominal")])
+        created = client.post("/api/goals", json=goal_payload(
+            monthly_contribution="0", contribution_rules=None,
+        ))
+        assert created.status_code == 201, created.text
+        goal_id = created.json()["id"]
+        before = client.get(f"/api/goals/{goal_id}/contributions?months=24").json()
+        assert all(D(point["nominal_income"]) == 4000 for point in before["months"])
+        assert all(D(point["nominal_contribution"]) == 0 for point in before["months"])
+        zero_insights = client.get(f"/api/goals/{goal_id}/insights").json()
+        assert zero_insights["available"]
+        zero_median = zero_insights["simulation"]["yearly_schedule"][-1]["nominal_after_tax"]["p50"]
+
+        updated = client.put(f"/api/goals/{goal_id}", json=goal_payload(
+            monthly_contribution="500", contribution_rules=None,
+        ))
+        assert updated.status_code == 200, updated.text
+        fixed = client.get(f"/api/goals/{goal_id}/contributions?months=24").json()
+        assert all(D(point["nominal_contribution"]) == 500 for point in fixed["months"])
+        fixed_insights = client.get(f"/api/goals/{goal_id}/insights").json()
+        assert fixed_insights["goal"]["monthly_contributions"][:24] == [500] * 24
+        fixed_median = fixed_insights["simulation"]["yearly_schedule"][-1][
+            "nominal_after_tax"
+        ]["p50"]
+        assert fixed_median > zero_median
+
+        updated = client.put(f"/api/goals/{goal_id}", json=goal_payload(
+            monthly_contribution="500",
+            contribution_rules=[
+                rule_payload(source_kind="salary", calculation="percentage", value="0.2"),
+            ],
+        ))
+        assert updated.status_code == 200, updated.text
+        percentage = client.get(f"/api/goals/{goal_id}/contributions?months=24").json()
+        assert all(D(point["nominal_contribution"]) == 800 for point in percentage["months"])
+        percentage_insights = client.get(f"/api/goals/{goal_id}/insights").json()
+        assert percentage_insights["goal"]["monthly_contributions"][:24] == [800] * 24
+        percentage_median = percentage_insights["simulation"]["yearly_schedule"][-1][
+            "nominal_after_tax"
+        ]["p50"]
+        assert percentage_median > fixed_median
+
+
+def test_independent_annual_salary_and_bonus_growth_reaches_goal_simulation(tmp_path) -> None:
+    today = date.today()
+    with create_test_client(tmp_path) as client:
+        saved = save_plan(
+            client,
+            annual_inflation_rate="0.03",
+            income_sources=[
+                source_payload(annual_growth_rate="0.05", money_basis="nominal"),
+                source_payload(
+                    id="bonus",
+                    name="Annual bonus",
+                    kind="bonus",
+                    amount="10000",
+                    recurrence="annual",
+                    annual_growth_rate="0.10",
+                    money_basis="nominal",
+                ),
+            ],
+        )
+        assert [D(source["annual_growth_rate"]) for source in saved["income_sources"]] == [
+            D("0.05"),
+            D("0.10"),
+        ]
+        created = client.post(
+            "/api/goals",
+            json=goal_payload(
+                contribution_rules=[
+                    rule_payload(source_kind="salary", calculation="percentage", value="0.15"),
+                    rule_payload(source_kind="bonus", calculation="percentage", value="0.5"),
+                ]
+            ),
+        )
+        assert created.status_code == 201, created.text
+        goal_id = created.json()["id"]
+        response = client.get(f"/api/goals/{goal_id}/contributions?months=24")
+        assert response.status_code == 200, response.text
+        points = response.json()["months"]
+        for index in (11, 23):
+            at = add_months(today, index + 1)
+            years = D((at - today).days) / D("365.25")
+            expected = D("600") * D("1.05") ** years + D("5000") * D("1.10") ** years
+            assert abs(D(points[index]["nominal_contribution"]) - expected) < D("0.01")
+        insights = client.get(f"/api/goals/{goal_id}/insights")
+        assert insights.status_code == 200, insights.text
+        projected = insights.json()["goal"]["monthly_contributions"]
+        assert projected[:24] == [float(point["nominal_contribution"]) for point in points]
+
+
 def test_financial_plan_roundtrip_is_persistent_and_never_credits_cash(tmp_path) -> None:
     with create_test_client(tmp_path) as client:
         before = client.get("/api/dashboard").json()["totals"]["available_cash"]
@@ -151,6 +244,28 @@ def test_salary_percentages_cannot_overallocate_source_across_goals(tmp_path) ->
         assert removal.status_code == 422
         assert "missing" in removal.json()["detail"]
         assert len(client.get("/api/goals").json()) == 1
+
+
+def test_missing_bonus_source_error_explains_how_to_resolve_it(tmp_path) -> None:
+    with create_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/goals",
+            json=goal_payload(
+                contribution_rules=[
+                    rule_payload(
+                        source_kind="bonus",
+                        calculation="percentage",
+                        value="1",
+                    )
+                ]
+            ),
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "No bonus income source is saved in the financial plan. Add and save a bonus in the "
+        "financial timeline, or choose Independent fixed contribution."
+    )
 
 
 def test_salary_category_follows_future_jobs_and_checks_specific_source_shares(tmp_path) -> None:

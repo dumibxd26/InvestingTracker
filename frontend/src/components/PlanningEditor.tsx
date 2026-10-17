@@ -37,7 +37,7 @@ export function PercentField({ label, rate, onChange, min = -50, max = 100 }: {
     setEntry({ rate: next, text: e.target.value }); onChange(next);
   }} /></PlanField>;
 }
-export function PlanningEditor({ currency, onSaved }: { currency: Currency; onSaved: () => Promise<void> }) {
+export function PlanningEditor({ currency, onSaved, revision }: { currency: Currency; onSaved: () => Promise<void>; revision?: unknown }) {
   const [plan, setPlan] = useState<FinancialPlanPayload | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -47,7 +47,7 @@ export function PlanningEditor({ currency, onSaved }: { currency: Currency; onSa
     api.financialPlan().then(value => { if (active) setPlan(value); })
       .catch(error => { if (active) setError(String(error)); });
     return () => { active = false; };
-  }, []);
+  }, [revision]);
   function update(patch: Partial<FinancialPlanPayload>) { setPlan(p => p && ({ ...p, ...patch })); }
   function source(index: number, patch: Partial<IncomeSource>) {
     if (plan) update({ income_sources: plan.income_sources.map((s, i) => i === index ? { ...s, ...patch } : s) });
@@ -88,15 +88,20 @@ export function PlanningEditor({ currency, onSaved }: { currency: Currency; onSa
           {s.kind === "bonus" && <PlanField label="Bonus basis"><select value={s.salary_source_id ?? ""} onChange={e => source(i, { salary_source_id: e.target.value || null, salary_percentage: e.target.value ? "0.1" : null, annual_growth_rate: "0" })}>
             <option value="">Fixed amount</option>{plan.income_sources.filter(p => p.kind === "salary").map(p => <option key={p.id} value={p.id}>{p.name} · {p.start_date}</option>)}
           </select></PlanField>}
-          {s.salary_source_id ? <PercentField label="Annualized salary share (%)" min={0.01} rate={s.salary_percentage} onChange={v => source(i, { salary_percentage: v })} /> : <>
+          {s.salary_source_id ? <>
+            <PercentField label="Annualized salary share (%)" min={0.01} rate={s.salary_percentage} onChange={v => source(i, { salary_percentage: v })} />
+            <p className="quiet-copy">This bonus grows automatically with the linked salary. Its salary share stays constant; no separate bonus increase is added.</p>
+          </> : <>
             <PlanField label="Amount per event"><input type="number" required min="0" step="any" value={s.amount} onChange={e => source(i, { amount: e.target.value })} /></PlanField>
             <PlanSelect label="Amount basis" value={s.money_basis} options={["real", "nominal"]} onChange={v => source(i, { money_basis: v as IncomeSource["money_basis"] })} />
-            <PercentField label="Total annual nominal raise (%)" rate={s.annual_growth_rate} onChange={v => source(i, { annual_growth_rate: v })} />
+            <PercentField label={s.kind === "salary" ? "Annual salary increase (%)" : "Annual bonus increase (%)"} rate={s.annual_growth_rate} onChange={v => source(i, { annual_growth_rate: v })} />
+            <p className="quiet-copy">Compounded annually, prorated for partial years, before inflation. For example, 5% grows 1,000 to 1,050 after one year and 1,102.50 after two. A goal's percentage of this income grows with it; a fixed contribution does not.</p>
           </>}
         </div>
         <button type="button" onClick={() => update({ income_sources: plan.income_sources.filter((_, j) => j !== i) })}>Remove source</button>
       </fieldset>)}
-      <button type="button" onClick={() => update({ income_sources: [...plan.income_sources, newIncome(currency, plan.anchor_date)] })}>Add salary or bonus</button>
+      <button type="button" onClick={() => update({ income_sources: [...plan.income_sources, newIncome(currency, plan.anchor_date, "salary")] })}>Add salary</button>
+      <button type="button" onClick={() => update({ income_sources: [...plan.income_sources, newIncome(currency, plan.anchor_date, "bonus")] })}>Add bonus</button>
       <button className="button button-primary" disabled={busy} type="submit">{busy ? "Saving…" : "Save financial timeline"}</button>
       {message && <p role="status">{message}</p>}
     </form>}

@@ -493,6 +493,18 @@ class CashFlowSchedule(Base):
             "AND account_id IS NOT NULL AND subaccount_id IS NOT NULL)",
             name="ck_cash_flow_schedules_auto_post_destination",
         ),
+        CheckConstraint(
+            "annual_growth_rate >= -0.5 AND annual_growth_rate <= 1",
+            name="ck_cash_flow_schedules_growth_rate",
+        ),
+        CheckConstraint(
+            "(salary_schedule_id IS NULL AND salary_percentage IS NULL) OR "
+            "(salary_schedule_id IS NOT NULL AND salary_percentage IS NOT NULL "
+            "AND salary_percentage > 0 "
+            "AND salary_percentage <= 1 AND kind = 'bonus' AND recurrence = 'annual' "
+            "AND annual_growth_rate = 0)",
+            name="ck_cash_flow_schedules_salary_bonus",
+        ),
         Index("ix_cash_flow_schedules_user_active", "user_id", "is_active"),
     )
 
@@ -522,6 +534,13 @@ class CashFlowSchedule(Base):
     end_date: Mapped[date | None] = mapped_column(Date)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     auto_post: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    annual_growth_rate: Mapped[Decimal] = mapped_column(
+        Numeric(12, 8), default=Decimal("0"), nullable=False
+    )
+    salary_schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("cash_flow_schedules.id")
+    )
+    salary_percentage: Mapped[Decimal | None] = mapped_column(Numeric(12, 8))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )

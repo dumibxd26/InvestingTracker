@@ -1,5 +1,6 @@
 from calendar import monthrange
 from datetime import date
+from decimal import Decimal
 
 from app.models import Recurrence
 
@@ -8,6 +9,13 @@ MONTHS_PER_OCCURRENCE = {
     Recurrence.QUARTERLY: 3,
     Recurrence.ANNUAL: 12,
 }
+
+
+def nominal_income_amount(
+    amount: Decimal, annual_growth_rate: Decimal, start_date: date, at: date
+) -> Decimal:
+    years = max(Decimal(0), Decimal((at - start_date).days) / Decimal("365.25"))
+    return amount * (Decimal(1) + annual_growth_rate) ** years
 
 
 def add_months(value: date, months: int) -> date:

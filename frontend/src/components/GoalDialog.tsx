@@ -3,9 +3,8 @@ import { X } from "lucide-react";
 import { api, ApiError } from "../api";
 import { amount, dateLabel, number } from "../format";
 import { ContributionRulesEditor } from "./ContributionRulesEditor";
-import { PlanField, PlanSelect } from "./PlanningEditor";
+import { PlanField, PlanSelect, PlanningEditor } from "./PlanningEditor";
 import type { ContributionRule, MoneyBasis } from "../types";
-import { newRule } from "../planning";
 import type {
   AccountSummary,
   Currency,
@@ -104,7 +103,9 @@ export function GoalDialog({
   >(goal?.visualization_budget_period ?? "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [rules, setRules] = useState<ContributionRule[] | null>(() => goal ? goal.contribution_rules ?? null : [newRule()]);
+  const [incomeRevision, setIncomeRevision] = useState(0);
+  const [rules, setRules] = useState<ContributionRule[] | null>(goal?.contribution_rules ?? null);
+  const [monthlyContribution, setMonthlyContribution] = useState(goal?.monthly_contribution ?? "0");
   const [targetBasis, setTargetBasis] = useState<MoneyBasis>(goal?.target_money_basis ?? "real");
   const [inflation, setInflation] = useState(goal?.annual_inflation_rate == null ? "" : String(Number(goal.annual_inflation_rate) * 100));
 
@@ -177,7 +178,7 @@ export function GoalDialog({
       annual_inflation_rate: inflation === "" ? null : String(Number(inflation) / 100),
       contribution_rules: rules,
       risk_level: riskLevel as GoalCreatePayload["risk_level"],
-      monthly_contribution: String(form.get("monthlyContribution") || "0"),
+      monthly_contribution: monthlyContribution || "0",
       flexibility: flexibility as GoalCreatePayload["flexibility"],
       current_amount: goalType === "passive_income" ? "0" : currentAmount,
       current_annual_income: goalType === "passive_income" ? currentAnnualIncome : "0",
@@ -233,6 +234,15 @@ export function GoalDialog({
         <p className="modal-intro">
           Goals describe what the money is for. You choose the deadline and risk comfort.
         </p>
+        <p className="quiet-copy">
+          Add your net salary and bonuses in the financial timeline below, save it, then choose
+          the percentage or fixed amount to invest in this goal under Contribution timeline.
+          Income is shared across goals; saving it does not invest the full amount.
+        </p>
+        <PlanningEditor currency={targetCurrency} onSaved={async () => {
+          setIncomeRevision(revision => revision + 1);
+          await onCreated();
+        }} />
         <form className="goal-form" onSubmit={handleSubmit}>
           <label className="form-field">
             <span>Goal name</span>
@@ -435,16 +445,12 @@ export function GoalDialog({
               <span>Target date <small>optional</small></span>
               <input name="targetDate" type="date" defaultValue={goal?.target_date ?? ""} />
             </label>
-            <label className="form-field">
-              <span>Fixed monthly amount ({targetCurrency}; nominal; used only in fixed monthly mode)</span>
-              <input name="monthlyContribution" type="number" min="0" step="0.01" defaultValue={goal?.monthly_contribution ?? "0"} placeholder="0" readOnly={rules !== null} />
-            </label>
           </div>
           <PlanSelect label="Target amount basis" value={targetBasis} options={["real", "nominal"]} onChange={v => setTargetBasis(v as MoneyBasis)} />
           <p className="quiet-copy">Real targets are expressed in reference-date purchasing power. Nominal targets are fixed future currency amounts.</p>
           <PlanField label="Target-cost annual inflation override (%; blank uses timeline)"><input type="number" min="-50" max="100" step="any" value={inflation} onChange={e => setInflation(e.target.value)} /></PlanField>
           <p className="quiet-copy">This override changes target-cost inflation only. Income and contributions always use the global financial timeline.</p>
-          <ContributionRulesEditor rules={rules} onChange={setRules} currency={targetCurrency} />
+          <ContributionRulesEditor rules={rules} onChange={setRules} currency={targetCurrency} monthlyAmount={monthlyContribution} onMonthlyAmountChange={setMonthlyContribution} incomeRevision={incomeRevision} />
           <div className="form-row">
             <label className="form-field">
               <span>Visualization-only budget <small>optional</small></span>

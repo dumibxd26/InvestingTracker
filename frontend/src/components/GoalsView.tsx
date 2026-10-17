@@ -193,7 +193,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
           <p>Set a deadline and comfort with risk. You can keep investments together at your broker while tracking different goals here.</p>
         </div>
       </section>
-      <PlanningEditor currency={currency} onSaved={async () => { setPlanRevision(r => r + 1); await onSaved(); }} />
+      <PlanningEditor currency={currency} revision={data} onSaved={async () => { setPlanRevision(r => r + 1); await onSaved(); }} />
 
       <section className="panel goals-list-panel">
         <div className="panel-heading">
@@ -278,7 +278,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
               </article>
               {insightsGoalId === goal.id && (
                 <div className="goal-insights-wrap">
-                  <ContributionPreview goalId={goal.id} revision={`${planRevision}:${JSON.stringify(data.goals)}`} />
+                  <ContributionPreview goalId={goal.id} revision={`${planRevision}:${JSON.stringify(data.goals)}`} onEdit={() => void editGoal(goal.id)} editing={loadingGoalId === goal.id} />
                   {insights?.goalId === goal.id ? (
                     <GoalInsightsPanel insights={insights.data} />
                   ) : insightsError ? (

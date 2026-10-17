@@ -210,7 +210,7 @@ export function GoalsScreen() {
             stay together while you track different purposes.
           </Text>
         </Card>
-        <PlanningEditor currency={currency} onSaved={async () => { setRevision(r => r + 1); await reload(); }} />
+        <PlanningEditor currency={currency} revision={revision} onSaved={async () => { setRevision(r => r + 1); await reload(); }} />
         <ActionButton
           label="Add a goal"
           onPress={() => {
@@ -327,6 +327,11 @@ export function GoalsScreen() {
         subtitle="You choose the purpose, target, and contribution timeline."
         onClose={() => setCreateOpen(false)}
       >
+        <Text>Add and save your net salary and bonuses below, then choose how much of each income payment to invest in this goal. Income is shared across goals; it is not invested automatically.</Text>
+        <PlanningEditor currency={targetCurrency} onSaved={async () => {
+          setRevision(value => value + 1);
+          await reload();
+        }} />
         <Field
           label="Goal name"
           value={name}
@@ -374,7 +379,7 @@ export function GoalsScreen() {
         <ChoiceGroup label="Target amount basis" options={basisOptions} value={targetBasis} onChange={v => setTargetBasis(v as MoneyBasis)} />
         <Text>Real targets use reference-date purchasing power; nominal targets are fixed future amounts.</Text>
         <Field label="Target-cost annual inflation override (%; optional)" value={inflation} onChangeText={setInflation} keyboardType="numbers-and-punctuation" helper="Target cost only. Income and contributions use the global timeline." />
-        <ContributionRulesEditor rules={rules} onChange={setRules} currency={targetCurrency} />
+        <ContributionRulesEditor rules={rules} onChange={setRules} currency={targetCurrency} incomeRevision={revision} />
         <ChoiceGroup
           label="Risk comfort"
           options={riskOptions}

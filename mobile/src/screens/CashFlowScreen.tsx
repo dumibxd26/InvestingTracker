@@ -31,6 +31,7 @@ import {
   SectionHeading,
 } from "../ui";
 import { useWorkspace } from "../workspace";
+import { PercentField } from "../components/PlanningEditor";
 
 type CashFlowAction = "schedule" | "cash" | null;
 const EMPTY_ACCOUNTS: Dashboard["accounts"] = [];
@@ -73,6 +74,10 @@ export function CashFlowScreen() {
   const [forecastCurrency, setForecastCurrency] = useState<Currency>(currency);
   const [autoPost, setAutoPost] = useState(true);
   const [scheduleWalletId, setScheduleWalletId] = useState("");
+  const [annualGrowth, setAnnualGrowth] = useState("0");
+  const [salaryBonus, setSalaryBonus] = useState(false);
+  const [salaryScheduleId, setSalaryScheduleId] = useState("");
+  const [salaryPercentage, setSalaryPercentage] = useState("0.1");
 
   const [cashSource, setCashSource] = useState("");
   const [cashAmount, setCashAmount] = useState("");
@@ -112,6 +117,10 @@ export function CashFlowScreen() {
     .reduce((sum, flow) => sum + Number(flow.reporting_amount ?? "0"), 0);
   const salaryOrBonus = kind === "salary" || kind === "bonus";
   const shouldAutoPost = salaryOrBonus && autoPost;
+  const isSalaryBonus = kind === "bonus" && salaryBonus;
+  const salaries = (dashboard?.cash_flow_schedules ?? []).filter(schedule =>
+    schedule.kind === "salary" && schedule.is_active && schedule.recurrence !== "one_time",
+  );
 
   function openSchedule() {
     const wallet =
@@ -121,6 +130,10 @@ export function CashFlowScreen() {
     setLabel("");
     setKind("salary");
     setAmount("");
+    setAnnualGrowth("0");
+    setSalaryBonus(false);
+    setSalaryScheduleId("");
+    setSalaryPercentage("0.1");
     setRecurrence("monthly");
     setStartDate(localDateValue());
     setEndDate("");
@@ -143,16 +156,31 @@ export function CashFlowScreen() {
   }
 
   async function createSchedule() {
-    if (label.trim().length < 2 || !amount.trim()) {
-      setFormError("Enter a label and amount.");
+    if (label.trim().length < 2 || (!isSalaryBonus && !amount.trim())) {
+      setFormError("Enter a label and, for fixed payments, an amount.");
       return;
     }
-    if (
+    if (!isSalaryBonus && (
       !Number.isFinite(Number(amount)) ||
       Number(amount) <= 0 ||
       Number(amount) > 100_000_000
-    ) {
+    )) {
       setFormError("Enter an amount greater than zero and at most 100,000,000.");
+      return;
+    }
+    if (kind === "salary" && recurrence !== "one_time" && (
+      !annualGrowth.trim() || !Number.isFinite(Number(annualGrowth)) ||
+      Number(annualGrowth) < -0.5 || Number(annualGrowth) > 1
+    )) {
+      setFormError("Expected annual salary increase must be between -50% and 100%.");
+      return;
+    }
+    if (isSalaryBonus && (
+      !salaryScheduleId || !salaryPercentage.trim() ||
+      !Number.isFinite(Number(salaryPercentage)) ||
+      Number(salaryPercentage) <= 0 || Number(salaryPercentage) > 1
+    )) {
+      setFormError("Choose a salary and a bonus percentage greater than 0% and at most 100%.");
       return;
     }
     if (shouldAutoPost && !scheduleWallet) {
@@ -177,7 +205,11 @@ export function CashFlowScreen() {
       await api.createCashFlowSchedule({
         label: label.trim(),
         kind,
-        amount: amount.trim(),
+        ...(isSalaryBonus ? {
+          salary_schedule_id: salaryScheduleId,
+          salary_percentage: salaryPercentage,
+        } : { amount: amount.trim() }),
+        annual_growth_rate: kind === "salary" && recurrence !== "one_time" ? annualGrowth : "0",
         currency: shouldAutoPost && scheduleWallet
           ? scheduleWallet.subaccount.currency
           : forecastCurrency,
@@ -248,7 +280,7 @@ export function CashFlowScreen() {
   function archiveSchedule(id: string, scheduleLabel: string, auto: boolean) {
     Alert.alert(
       "Stop this schedule?",
-      `Stop future ${auto ? "automatic credits and forecasts" : "forecasts"} for "${scheduleLabel}"? Already posted entries will remain.`,
+      `Stop future ${auto ? "automatic credits and forecasts" : "forecasts"} for "${scheduleLabel}"? Any linked bonus schedules will also stop. Already posted entries will remain.`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -396,10 +428,14 @@ export function CashFlowScreen() {
                     <Text style={styles.cardMeta}>
                       {schedule.kind}  |  {schedule.recurrence.replace("_", " ")}
                       {schedule.auto_post ? "  |  Automatic tracked credit" : ""}
+                      {Number(schedule.annual_growth_rate) !== 0 ? `  |  ${Number(schedule.annual_growth_rate) * 100}% expected annual raise` : ""}
+                      {schedule.salary_schedule_id ? `  |  Follows ${dashboard.cash_flow_schedules.find(item => item.id === schedule.salary_schedule_id)?.label ?? "linked salary"} raises` : ""}
                     </Text>
                   </View>
                   <Badge
-                    label={`${formatMoney(schedule.amount, schedule.currency)} / ${schedule.recurrence === "one_time" ? "once" : schedule.recurrence}`}
+                    label={schedule.salary_schedule_id
+                      ? `${Number(schedule.salary_percentage) * 100}% of annual salary`
+                      : `${formatMoney(schedule.amount, schedule.currency)} / ${schedule.recurrence === "one_time" ? "once" : schedule.recurrence}`}
                   />
                 </View>
                 <Text style={styles.cardMeta}>
@@ -455,15 +491,44 @@ export function CashFlowScreen() {
           label="Type"
           options={flowOptions}
           value={kind}
-          onChange={(value) => setKind(value as FlowKind)}
+          onChange={(value) => {
+            setKind(value as FlowKind);
+            setSalaryBonus(false); setSalaryScheduleId("");
+            if (value === "bonus") setRecurrence("annual");
+          }}
         />
-        <Field
+        {!isSalaryBonus && <Field
           label="Amount"
           value={amount}
           onChangeText={setAmount}
           placeholder="0"
           keyboardType="decimal-pad"
-        />
+        />}
+        {kind === "salary" && recurrence !== "one_time" && <>
+          <PercentField label="Expected annual salary increase (%)" rate={annualGrowth} onChange={setAnnualGrowth} />
+          <Notice tone="info">Enter net salary and the total nominal raise before inflation. Growth compounds from the first payment date, prorated for partial years. Forecasts and opted-in credits use the increased amount.</Notice>
+        </>}
+        {kind === "bonus" && <>
+          <ChoiceGroup label="Bonus calculation" value={salaryBonus ? "salary" : "fixed"} options={[
+            { label: "Fixed amount", value: "fixed" },
+            { label: "% of annual salary", value: "salary" },
+          ]} onChange={value => {
+            setSalaryBonus(value === "salary");
+            if (value === "salary") setRecurrence("annual");
+          }} />
+          {isSalaryBonus && <>
+            {salaries.length ? <ChoiceGroup label="Linked salary schedule"
+              value={salaryScheduleId}
+              options={salaries.map(salary => ({ label: `${salary.label} (${salary.currency})`, value: salary.id }))}
+              onChange={value => {
+                setSalaryScheduleId(value);
+                const salary = salaries.find(item => item.id === value);
+                if (salary && startDate < salary.start_date) setStartDate(salary.start_date);
+              }} /> : <Notice>Add a recurring salary schedule first, then add its annual bonus.</Notice>}
+            <PercentField label="Bonus share of annual salary (%)" rate={salaryPercentage} onChange={setSalaryPercentage} />
+            <Notice tone="info">Uses annualized salary at each bonus payment date: monthly × 12 or quarterly × 4, including expected salary raises once. Payments stop outside the salary period. Stopping the salary also stops linked bonuses.</Notice>
+          </>}
+        </>}
         {salaryOrBonus ? (
           <>
             <ChoiceGroup
@@ -485,7 +550,9 @@ export function CashFlowScreen() {
               onChange={(value) => setAutoPost(value === "yes")}
             />
           </>
-        ) : (
+        ) : null}
+        {shouldAutoPost && <Notice tone="info">Automatic credits use expected raises and calculated bonus amounts. Choose forecast only if actual payments need manual confirmation.</Notice>}
+        {!shouldAutoPost && (
           <ChoiceGroup
             label="Forecast currency"
             options={currencies}
@@ -495,7 +562,7 @@ export function CashFlowScreen() {
         )}
         <ChoiceGroup
           label="How often?"
-          options={recurrenceOptions}
+          options={isSalaryBonus ? recurrenceOptions.filter(option => option.value === "annual") : recurrenceOptions}
           value={recurrence}
           onChange={(value) => setRecurrence(value as Recurrence)}
         />
@@ -517,7 +584,7 @@ export function CashFlowScreen() {
           label="Save schedule"
           onPress={() => void createSchedule()}
           loading={busy}
-          disabled={!label.trim() || !amount.trim()}
+          disabled={!label.trim() || (isSalaryBonus ? !salaryScheduleId : !amount.trim())}
         />
       </FormSheet>
 

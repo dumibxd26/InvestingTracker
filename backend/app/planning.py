@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.cash_flow_logic import add_months, occurrence_dates
+from app.cash_flow_logic import add_months, nominal_income_amount, occurrence_dates
 from app.models import Currency, Recurrence
 
 ZERO = Decimal("0")
@@ -181,8 +181,7 @@ def income_amount(
             source.currency,
         )
     growth_start = max(source.start_date, plan.anchor_date)
-    years = max(ZERO, Decimal((at - growth_start).days) / Decimal("365.25"))
-    value = source.amount * (ONE + source.annual_growth_rate) ** years
+    value = nominal_income_amount(source.amount, source.annual_growth_rate, growth_start, at)
     if source.money_basis == "real":
         value *= inflation_factor(plan, max(plan.anchor_date, source.start_date))
     return value

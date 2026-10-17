@@ -25,7 +25,7 @@ export function PercentField({ label, rate, onChange }: {
   }} />;
 }
 
-export function PlanningEditor({ currency, onSaved }: { currency: Currency; onSaved: () => Promise<void> }) {
+export function PlanningEditor({ currency, onSaved, revision }: { currency: Currency; onSaved: () => Promise<void>; revision?: number }) {
   const [open, setOpen] = useState(false);
   const [plan, setPlan] = useState<FinancialPlanPayload | null>(null);
   const [error, setError] = useState("");
@@ -35,7 +35,7 @@ export function PlanningEditor({ currency, onSaved }: { currency: Currency; onSa
     let active = true;
     api.financialPlan().then(p => { if (active) setPlan(p); }).catch(e => { if (active) setError(String(e)); });
     return () => { active = false; };
-  }, []);
+  }, [revision]);
   function update(patch: Partial<FinancialPlanPayload>) { setPlan(p => p && ({ ...p, ...patch })); }
   function source(index: number, patch: Partial<IncomeSource>) {
     if (plan) update({ income_sources: plan.income_sources.map((s, i) => i === index ? { ...s, ...patch } : s) });
@@ -72,14 +72,19 @@ export function PlanningEditor({ currency, onSaved }: { currency: Currency; onSa
           <DateField label="Start / payment date" value={s.start_date} onChange={v => source(i, { start_date: v })} />
           {s.recurrence !== "one_time" && <DateField optional label="End date (inclusive)" value={s.end_date ?? ""} onChange={v => source(i, { end_date: v || null })} />}
           {s.kind === "bonus" && <ChoiceGroup label="Bonus basis" value={s.salary_source_id ?? ""} options={[{ label: "Fixed amount", value: "" }, ...plan.income_sources.filter(p => p.kind === "salary").map(p => ({ label: `${p.name} · ${p.start_date}`, value: p.id }))]} onChange={v => source(i, { salary_source_id: v || null, salary_percentage: v ? "0.1" : null, annual_growth_rate: "0" })} />}
-          {s.salary_source_id ? <PercentField label="Annualized salary share (%)" rate={s.salary_percentage} onChange={v => source(i, { salary_percentage: v })} /> : <>
+          {s.salary_source_id ? <>
+            <PercentField label="Annualized salary share (%)" rate={s.salary_percentage} onChange={v => source(i, { salary_percentage: v })} />
+            <Text>This bonus grows automatically with the linked salary. Its salary share stays constant; no separate bonus increase is added.</Text>
+          </> : <>
             <Field label="Amount per event" keyboardType="decimal-pad" value={s.amount} onChangeText={v => source(i, { amount: v })} />
             <ChoiceGroup label="Amount basis" value={s.money_basis} options={basisOptions} onChange={v => source(i, { money_basis: v as IncomeSource["money_basis"] })} />
-            <PercentField label="Total annual nominal raise (%)" rate={s.annual_growth_rate} onChange={v => source(i, { annual_growth_rate: v })} />
+            <PercentField label={s.kind === "salary" ? "Annual salary increase (%)" : "Annual bonus increase (%)"} rate={s.annual_growth_rate} onChange={v => source(i, { annual_growth_rate: v })} />
+            <Text>Compounded annually, prorated for partial years, before inflation. For example, 5% grows 1,000 to 1,050 after one year and 1,102.50 after two. A goal&apos;s percentage of this income grows with it; a fixed contribution does not.</Text>
           </>}
           <ActionButton label="Remove source" onPress={() => update({ income_sources: plan.income_sources.filter((_, j) => j !== i) })} />
         </Card>)}
-        <ActionButton label="Add salary or bonus" onPress={() => update({ income_sources: [...plan.income_sources, newIncome(currency, plan.anchor_date)] })} />
+        <ActionButton label="Add salary" onPress={() => update({ income_sources: [...plan.income_sources, newIncome(currency, plan.anchor_date, "salary")] })} />
+        <ActionButton label="Add bonus" onPress={() => update({ income_sources: [...plan.income_sources, newIncome(currency, plan.anchor_date, "bonus")] })} />
         <ActionButton label="Save financial timeline" loading={busy} onPress={() => void save()} />
         {message ? <Text accessibilityRole="alert">{message}</Text> : null}
       </>}
