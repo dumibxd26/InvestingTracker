@@ -25,6 +25,11 @@ import type {
   GoalInsights,
   GoalRecord,
   GoalUpdatePayload,
+  RetirementHistory,
+  RetirementSettings,
+  RetirementProjection,
+  RetirementReturnSuggestion,
+  RetirementInflationSuggestion,
   FinancialPlanPayload,
   ContributionSchedule,
   FixedDepositCreatePayload,
@@ -370,6 +375,30 @@ export const api = {
 
   goalInsights: (goalId: string) =>
     request<GoalInsights>(`/goals/${encodeURIComponent(goalId)}/insights`),
+
+  retirementProjection: (goalId: string) =>
+    request<RetirementProjection>(`/goals/${encodeURIComponent(goalId)}/retirement`),
+
+  saveRetirement: (goalId: string, payload: RetirementSettings) =>
+    request<RetirementProjection>(`/goals/${encodeURIComponent(goalId)}/retirement`, {
+      method: "PUT", body: JSON.stringify(payload),
+    }),
+
+  retirementHistory: () => request<RetirementHistory[]>("/retirement/history"),
+  importRetirementHistory: (payload: {
+    name: string; currency: Currency; source: string; license: string;
+    personal_storage_permitted: boolean; total_return_confirmed: boolean; csv: string;
+  }) => request<RetirementHistory>("/retirement/history", {
+    method: "POST", body: JSON.stringify(payload),
+  }),
+  deleteRetirementHistory: (historyId: string) =>
+    request<void>(`/retirement/history/${encodeURIComponent(historyId)}`, { method: "DELETE" }),
+  retirementReturnSuggestion: (historyId: string, targetDate: string) =>
+    request<RetirementReturnSuggestion>(`/retirement/history/${encodeURIComponent(historyId)}/suggestion?target_date=${encodeURIComponent(targetDate)}`),
+  retirementInflation: (targetDate: string) =>
+    request<RetirementInflationSuggestion>(`/retirement/inflation?target_date=${encodeURIComponent(targetDate)}`),
+  goalAssetImpact: (kind: "holding" | "deposit", assetId: string) =>
+    request<{ name: string; percentage: string }[]>(`/retirement/asset-impact/${kind}/${encodeURIComponent(assetId)}`),
 
   updateGoal: (goalId: string, payload: GoalUpdatePayload) =>
     request<GoalRecord>(`/goals/${encodeURIComponent(goalId)}`, {

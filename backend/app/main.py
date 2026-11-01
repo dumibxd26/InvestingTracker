@@ -2,21 +2,40 @@ import json
 from collections.abc import Generator
 from datetime import UTC, date
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.broker_imports import MAX_BROKER_IMPORT_BYTES
+from app.cash_flow_logic import add_months
 from app.config import get_settings
 from app.database import SessionFactory, get_session
 from app.gbi.schemas import GoalInsightsResponse
-from app.models import Currency, User
+from app.models import Currency, RetirementHistory, User
 from app.planning import ContributionSchedule, FinancialPlanPayload
+from app.retirement import (
+    HistoryImport,
+    RetirementSettings,
+    historical_suggestion,
+    monthly_timeline,
+)
+from app.retirement_services import (
+    calculate_retirement,
+    delete_retirement_history,
+    goal_asset_impact,
+    history_summary,
+    import_retirement_history,
+    list_retirement_history,
+    retirement_goal,
+    retirement_inflation,
+    saved_retirement_settings,
+)
 from app.schemas import (
     AccountCreate,
     AccountSubaccountCreate,
@@ -652,6 +671,104 @@ def create_app(
         months: Annotated[int, Query(ge=1, le=1200)] = 120,
     ) -> ContributionSchedule:
         return goal_contribution_schedule(session, current_user.id, goal_id, months)
+
+    @app.get("/api/retirement/history")
+    def get_retirement_history(
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> list[dict]:
+        return list_retirement_history(session, current_user.id)
+
+    @app.post("/api/retirement/history", status_code=201)
+    def post_retirement_history(
+        payload: HistoryImport,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict:
+        return import_retirement_history(session, current_user.id, payload)
+
+    @app.delete("/api/retirement/history/{history_id}", status_code=204)
+    def remove_retirement_history(
+        history_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> None:
+        delete_retirement_history(session, current_user.id, history_id)
+
+    @app.get("/api/retirement/history/{history_id}/suggestion")
+    def get_retirement_return_suggestion(
+        history_id: UUID,
+        target_date: date,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict:
+        if not date.today() < target_date:
+            raise HTTPException(422, "Choose a future horizon")
+        if (target_date - date.today()).days > 36525:
+            raise HTTPException(422, "Historical suggestions support at most 100 years")
+        history = session.scalar(select(RetirementHistory).where(
+            RetirementHistory.id == history_id, RetirementHistory.user_id == current_user.id,
+            RetirementHistory.currency != "WLD",
+        ))
+        if history is None:
+            raise HTTPException(404, "History was not found")
+        timeline = monthly_timeline(date.today(), target_date)
+        months = len(timeline) - 1
+        final_fraction = Decimal((timeline[-1] - timeline[-2]).days) / Decimal(
+            (add_months(date.today(), months) - add_months(date.today(), months - 1)).days
+        )
+        return {
+            **historical_suggestion(
+                history.observations, months, final_fraction,
+                Decimal((target_date - date.today()).days) / Decimal("365.25"),
+            ),
+            "dataset": history_summary(history),
+        }
+
+    @app.get("/api/retirement/inflation")
+    async def get_retirement_inflation(
+        target_date: date,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict:
+        return await retirement_inflation(session, current_user.id, target_date)
+
+    @app.get("/api/retirement/asset-impact/{kind}/{asset_id}")
+    def get_retirement_asset_impact(
+        kind: Literal["holding", "deposit"],
+        asset_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> list[dict]:
+        return goal_asset_impact(session, current_user.id, kind, asset_id)
+
+    @app.get("/api/goals/{goal_id}/retirement")
+    def get_retirement_projection(
+        goal_id: UUID,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict:
+        goal = retirement_goal(session, current_user.id, goal_id)
+        if goal.retirement_settings is None:
+            return {
+                "available": False,
+                "reason": "Set your retirement contribution split and returns",
+            }
+        return {"available": True, **calculate_retirement(
+            session, current_user.id, goal_id,
+            saved_retirement_settings(session, goal),
+        )}
+
+    @app.put("/api/goals/{goal_id}/retirement")
+    def put_retirement_projection(
+        goal_id: UUID,
+        payload: RetirementSettings,
+        current_user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[Session, Depends(get_session)],
+    ) -> dict:
+        return {"available": True, **calculate_retirement(
+            session, current_user.id, goal_id, payload, persist=True,
+        )}
 
     @app.post("/api/deposits", response_model=FixedDepositCreateResponse, status_code=201)
     def post_deposit(

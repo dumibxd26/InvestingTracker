@@ -442,11 +442,29 @@ class Goal(Base):
     target_money_basis: Mapped[str] = mapped_column(String(10), default="real", nullable=False)
     annual_inflation_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 8))
     contribution_rules: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    retirement_settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     visualization_budget_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     visualization_budget_period: Mapped[str | None] = mapped_column(String(8))
     fixed_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 6))
     flexibility: Mapped[str] = mapped_column(String(16), default="flexible", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+
+
+class RetirementHistory(Base):
+    __tablename__ = "retirement_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    source: Mapped[str] = mapped_column(String(500), nullable=False)
+    license: Mapped[str] = mapped_column(String(200), nullable=False)
+    observations: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
     )

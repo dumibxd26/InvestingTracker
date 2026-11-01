@@ -2246,6 +2246,31 @@ def _broker_transaction_preview(
     )
 
 
+def _broker_goal_warnings(
+    session: Session, user_id: uuid.UUID, account_id: uuid.UUID, has_closed_positions: bool
+) -> list[str]:
+    if not has_closed_positions:
+        return []
+    names = list(session.scalars(
+        select(Goal.name)
+        .join(GoalHoldingAllocation, GoalHoldingAllocation.goal_id == Goal.id)
+        .join(Holding, Holding.id == GoalHoldingAllocation.holding_id)
+        .where(
+            Goal.user_id == user_id, Goal.is_active.is_(True), Holding.account_id == account_id
+        )
+        .distinct()
+    ))
+    if not names:
+        return []
+    return [
+        "This report contains closed positions in an account with goal-linked assets: "
+        + ", ".join(names)
+        + ". History imports do not change current holdings. Record matching sales separately "
+        "to update retirement values; then explicitly link replacement investments. "
+        "Returned account cash is not automatically assigned to retirement."
+    ]
+
+
 def preview_broker_import(
     session: Session,
     user_id: uuid.UUID,
@@ -2276,6 +2301,10 @@ def preview_broker_import(
         )
     )
     warnings = list(report.warnings)
+    warnings.extend(_broker_goal_warnings(
+        session, user_id, account.id,
+        any(transaction.event_type == "closed_position" for transaction in report.transactions),
+    ))
     warnings.append(
         "Preview is read-only. Import saves history rows only; it does not change account "
         "balances or current holdings."
@@ -2419,7 +2448,10 @@ def import_broker_history(
         imported_count=len(new_transactions),
         duplicate_count=duplicate_count,
         stocks_etfs_only=stocks_etfs_only,
-        warnings=list(report.warnings),
+        warnings=list(report.warnings) + _broker_goal_warnings(
+            session, user.id, account.id,
+            any(transaction.event_type == "closed_position" for transaction in new_transactions),
+        ),
     )
 
 

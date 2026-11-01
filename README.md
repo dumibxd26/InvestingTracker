@@ -63,6 +63,96 @@ using the project's Python environment before starting the updated API.
 
 ## Financial timeline and goal planning
 
+### Simplified retirement projections
+
+For a retirement goal, open its projection in **Goals & plan**. Retirement now uses an
+independent accumulation calculator rather than the shared salary timeline, Monte Carlo
+success probabilities, glide paths, recovery options, or rebalancing proposals. Other goal
+types and the overview's portfolio projections retain their existing behavior.
+
+1. Link the current holdings/deposits and their goal shares through **Edit goal**. A retirement
+   target amount is optional. Explicit manual savings are counted once; broker/bank cash is
+   not implicitly earmarked.
+2. Set the retirement date, currency, and a monthly or yearly future investment amount.
+   Payments occur **after growth on each plan anniversary**, not at the beginning of the
+   period. A partial last period does not bring a payment forward.
+3. Choose future stocks, ETFs, manually modeled bonds/bond funds, or new deposits. Set their
+   contribution shares to exactly 100%. These shares apply only to **new contributions**;
+   existing assets are not sold or rebalanced. Future destinations can start at zero.
+4. Enter lower/upper effective annual total-return assumptions for each investment and
+   confirm an annual worldwide inflation assumption for this horizon. The optional World
+   Bank suggestion is the median annualized compounded inflation over complete matching
+   historical windows, not a forecast or your personal cost-of-living measure. Partial years
+   are geometrically interpolated. Source: World Bank WDI / IMF,
+   [FP.CPI.TOTL.ZG](https://data.worldbank.org/indicator/FP.CPI.TOTL.ZG?locations=1W),
+   [CC BY 4.0](https://datacatalog.worldbank.org/public-licenses).
+5. Compare **historical minimum/maximum** results with **your lower/upper return** results.
+   Historical lines replay synchronized monthly total-return observations for your actual
+   selected investments and contributions. They are pointwise envelopes across observed
+   matching windows, not a continuous historical path or guaranteed future bounds.
+   A separate historical reference return shows a lump sum held in your planned contribution
+   percentages without rebalancing, before tax. It is not the return of the contribution-aware
+   chart; individual investment suggestions remain editable.
+
+The calculation is `next value = current value × (1 + annual return)^elapsed years + payment`.
+Purchasing power is `nominal value / (1 + selected annual inflation)^elapsed years`, using
+elapsed days / 365.25. Contributions reconcile to cents. User scenarios assume entered returns
+already include fees and reinvested income; future FX uses current valuation rates.
+Historical data must already include historical FX in the projection currency. A partial final
+month is geometrically interpolated and explicitly distinguished from observed daily returns.
+
+Existing deposits use their actual compounding and contractual maturity, then remain scenario
+cash at 0% nominal growth. They cannot receive hypothetical top-ups. Each planned new deposit
+is a separate term investment without assumed renewal. Tax views use existing account/holding
+gain and deposit-interest tax estimates, or a user-entered rate for future modeled investments.
+They estimate hypothetical horizon liquidation; separate annual dividend withholding and
+future tax-law changes are not modeled. Do not treat these as filing-ready tax calculations.
+
+Before a goal-linked stock sale or deposit removal, the app identifies affected goals. Actual
+proceeds remain in the broker/bank wallet under existing ledger behavior; deposit removal
+restores principal only when a source wallet exists, not estimated interest. Returned cash
+is **not automatically assigned to retirement**. Partial sales retain the same earmark of the
+remaining position. After a full disposal, zero-contribution assets drop out of the calculation;
+if a future contribution destination was disposed, the plan requires explicit review.
+Purchase and link replacement investments yourself. Broker-report imports remain history-only
+and warn that matching sales must be recorded separately to update current goal assets.
+
+#### Compact local historical datasets and licensing
+
+No proprietary investment history is bundled with this repository. Personal use, local hosting,
+or a private fork does **not** automatically grant rights to copy, retain, or redistribute a
+provider's data. Import only a dataset whose license permits your intended retention/use.
+Each import requires source attribution, a license/permission reference, and confirmation that
+local storage is permitted. The app validates format, not legal rights or data methodology.
+Fork users must obtain their own permitted datasets; do not distribute private database dumps.
+
+Under **Local historical data and usage rights**, import an ascending, gap-free monthly CSV:
+
+```csv
+date,total_return_index
+2000-01-31,100
+2000-02-29,101
+```
+
+This example is synthetic, not market evidence. Use completed month-end dates and positive
+indices including reinvested dividends/coupons, in the chosen currency. A benchmark proxy
+must be selected explicitly and identified in the dataset name/source; an individual stock
+is not automatically assigned index returns. Deposit/bond histories must represent the
+actual product or explicitly modeled strategy, not a coupon or today's APY extrapolated.
+
+Datasets are tenant-private in local PostgreSQL, limited to 2,401 observations each (200 years)
+and 200 datasets per user. World CPI is cached locally for one day with attribution. Keep
+source CSVs under the already Git-ignored `data/` folder. Git ignores local database files;
+PostgreSQL volume contents must never be committed. Dataset deletion is available unless an
+active goal still references it. History is reused without contacting market providers.
+Absent complete synchronized history, historical lines remain explicitly unavailable while
+manual projections still work. The calculator caps replay work at 2,000,000 asset-month
+evaluations and reports when a plan/sample needs simplifying.
+
+Apply the new database migration with `alembic upgrade head` from `backend` before starting
+the updated API. Existing retirement goals require explicitly setting these new inputs;
+old salary rules and visualization-only budgets are not silently converted.
+
 Goals & plan includes a shared **forecast-only financial timeline**. Its salary and bonus assumptions
 do not create cash-flow entries, credit wallets, or place trades. Existing cash-flow schedules and
 automatic salary credits remain separate tracking features.

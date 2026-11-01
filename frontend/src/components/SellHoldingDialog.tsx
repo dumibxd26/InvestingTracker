@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { X } from "lucide-react";
 import { ApiError, api } from "../api";
 import { amount } from "../format";
@@ -21,6 +21,17 @@ export function SellHoldingDialog({ holding, onClose, onSaved }: SellHoldingDial
   const [quantity, setQuantity] = useState(holding.quantity);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [goalImpacts, setGoalImpacts] = useState<{ name: string; percentage: string }[] | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    api.goalAssetImpact("holding", holding.id).then(value => {
+      if (active) setGoalImpacts(value);
+    }).catch(cause => {
+      if (active) setError(cause instanceof ApiError ? cause.message : "Goal links could not be checked. Reopen this dialog before selling.");
+    });
+    return () => { active = false; };
+  }, [holding.id]);
 
   const parsedPrice = Number(sellPrice);
   const parsedQuantity = Number(quantity);
@@ -75,6 +86,12 @@ export function SellHoldingDialog({ holding, onClose, onSaved }: SellHoldingDial
           Leave the share count at the full position to sell everything; a smaller number keeps the
           rest of the position.
         </p>
+        {goalImpacts && goalImpacts.length > 0 && <p className="inline-error" role="alert">
+          This stock funds {goalImpacts.map(goal => `${goal.name} (${goal.percentage}%)`).join(", ")}.
+          Selling reduces those goals' linked investments. Cash stays in the broker wallet and is
+          not automatically assigned to retirement. Explicitly link replacement investments later.
+          A partial sale keeps the same goal share of the remaining position.
+        </p>}
         <form className="goal-form" onSubmit={submit}>
           <div className="form-row">
             <label className="form-field">
@@ -128,7 +145,7 @@ export function SellHoldingDialog({ holding, onClose, onSaved }: SellHoldingDial
             <button className="button button-secondary" type="button" onClick={onClose}>
               Cancel
             </button>
-            <button className="button button-primary" type="submit" disabled={saving}>
+            <button className="button button-primary" type="submit" disabled={saving || goalImpacts === null}>
               {saving ? "Recording…" : "Record sale"}
             </button>
           </div>

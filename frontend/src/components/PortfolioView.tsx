@@ -187,7 +187,17 @@ export function PortfolioView({ data, currency, onSaved }: PortfolioViewProps) {
   }
 
   async function deleteDeposit(depositId: string, depositName: string) {
-    if (!window.confirm(`Remove “${depositName}” from this tracker and restore its principal to the source wallet? Interest is an estimate and will not be credited.`)) {
+    let affected: { name: string; percentage: string }[];
+    try {
+      affected = await api.goalAssetImpact("deposit", depositId);
+    } catch (cause) {
+      setDepositError(cause instanceof ApiError ? cause.message : "Goal links could not be checked.");
+      return;
+    }
+    const warning = affected.length
+      ? `\n\nThis deposit funds ${affected.map(goal => `${goal.name} (${goal.percentage}%)`).join(", ")}. Those goals lose this deposit. Returned bank cash is not automatically assigned to retirement. Link replacement investments explicitly.`
+      : "";
+    if (!window.confirm(`Remove “${depositName}” from this tracker and restore its principal to the source wallet? Interest is an estimate and will not be credited.${warning}`)) {
       return;
     }
     setDeletingDepositId(depositId);

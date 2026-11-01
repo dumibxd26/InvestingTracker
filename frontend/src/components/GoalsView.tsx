@@ -7,6 +7,7 @@ import { GoalDialog } from "./GoalDialog";
 import { GoalInsightsPanel } from "./GoalInsightsPanel";
 import { PlanningEditor } from "./PlanningEditor";
 import { ContributionPreview } from "./ContributionPreview";
+import { RetirementPanel } from "./RetirementPanel";
 
 interface GoalsViewProps {
   data: Dashboard;
@@ -58,7 +59,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
   useEffect(() => {
     let active = true;
     setInsights(null); setInsightsError("");
-    if (insightsGoalId) {
+    if (insightsGoalId && data.goals.find(goal => goal.id === insightsGoalId)?.goal_type !== "retirement") {
       api.goalInsights(insightsGoalId).then(value => {
         if (active) setInsights({ goalId: insightsGoalId, data: value });
       }).catch(cause => { if (active) setInsightsError(String(cause)); });
@@ -278,6 +279,9 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
               </article>
               {insightsGoalId === goal.id && (
                 <div className="goal-insights-wrap">
+                  {goal.goal_type === "retirement" ? (
+                    <RetirementPanel goalId={goal.id} data={data} onSaved={onSaved} />
+                  ) : <>
                   <ContributionPreview goalId={goal.id} revision={`${planRevision}:${JSON.stringify(data.goals)}`} onEdit={() => void editGoal(goal.id)} editing={loadingGoalId === goal.id} />
                   {insights?.goalId === goal.id ? (
                     <GoalInsightsPanel insights={insights.data} />
@@ -286,6 +290,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
                   ) : (
                     <p className="quiet-copy">Loading goal insights…</p>
                   )}
+                  </>}
                 </div>
               )}
               </Fragment>

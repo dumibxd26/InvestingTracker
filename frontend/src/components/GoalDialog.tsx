@@ -149,7 +149,7 @@ export function GoalDialog({
     const targetDate = String(form.get("targetDate") ?? "");
     const riskLevel = String(form.get("riskLevel") ?? "");
     const flexibility = String(form.get("flexibility") ?? "");
-    if (!goalType || !riskLevel || !flexibility || !target) {
+    if (!goalType || !riskLevel || !flexibility || (!target && goalType !== "retirement")) {
       setError("Complete the goal type, target, risk comfort, and deadline flexibility.");
       setSaving(false);
       return;
@@ -194,7 +194,7 @@ export function GoalDialog({
     const fixedPercent = String(form.get("fixedPercent") ?? "").trim();
     if (fixedPercent) payload.fixed_percent = String(Number(fixedPercent) / 100);
     if (goalType === "passive_income") payload.target_annual_income = target;
-    else payload.target_amount = target;
+    else if (target) payload.target_amount = target;
     if (targetDate) payload.target_date = targetDate;
 
     try {
@@ -234,15 +234,15 @@ export function GoalDialog({
         <p className="modal-intro">
           Goals describe what the money is for. You choose the deadline and risk comfort.
         </p>
-        <p className="quiet-copy">
+        {goalType !== "retirement" && <p className="quiet-copy">
           Add your net salary and bonuses in the financial timeline below, save it, then choose
           the percentage or fixed amount to invest in this goal under Contribution timeline.
           Income is shared across goals; saving it does not invest the full amount.
-        </p>
-        <PlanningEditor currency={targetCurrency} onSaved={async () => {
+        </p>}
+        {goalType !== "retirement" && <PlanningEditor currency={targetCurrency} onSaved={async () => {
           setIncomeRevision(revision => revision + 1);
           await onCreated();
-        }} />
+        }} />}
         <form className="goal-form" onSubmit={handleSubmit}>
           <label className="form-field">
             <span>Goal name</span>
@@ -263,11 +263,11 @@ export function GoalDialog({
               </select>
             </label>
             <label className="form-field">
-              <span>{goalType === "passive_income" ? "Annual income target" : "Target amount"}</span>
+              <span>{goalType === "passive_income" ? "Annual income target" : goalType === "retirement" ? "Target amount (optional)" : "Target amount"}</span>
               <input
                 name="target"
                 type="number"
-                required
+                required={goalType !== "retirement"}
                 min="0.01"
                 step="0.01"
                 value={target}
@@ -446,6 +446,7 @@ export function GoalDialog({
               <input name="targetDate" type="date" defaultValue={goal?.target_date ?? ""} />
             </label>
           </div>
+          {goalType === "retirement" ? <p className="quiet-copy">Save this goal, then open its retirement projection to set worldwide inflation, monthly/yearly contributions, investment splits, and historical/user return ranges. These are independent of the salary timeline.</p> : <>
           <PlanSelect label="Target amount basis" value={targetBasis} options={["real", "nominal"]} onChange={v => setTargetBasis(v as MoneyBasis)} />
           <p className="quiet-copy">Real targets are expressed in reference-date purchasing power. Nominal targets are fixed future currency amounts.</p>
           <PlanField label="Target-cost annual inflation override (%; blank uses timeline)"><input type="number" min="-50" max="100" step="any" value={inflation} onChange={e => setInflation(e.target.value)} /></PlanField>
@@ -484,7 +485,8 @@ export function GoalDialog({
             above drives projections and funding needs: either the fixed monthly amount or your
             scheduled contribution rules, including planned bonuses.
           </p>
-          <div className="form-row">
+          </>}
+          {goalType === "retirement" ? <input type="hidden" name="riskLevel" value={goal?.risk_level ?? "moderate"} /> : <div className="form-row">
             <label className="form-field">
               <span>Risk comfort</span>
               <select name="riskLevel" required defaultValue={goal?.risk_level ?? ""}>
@@ -494,7 +496,7 @@ export function GoalDialog({
                 <option value="high">Higher</option>
               </select>
             </label>
-          </div>
+          </div>}
           <div className="form-row">
             <label className="form-field">
               <span>Deadline flexibility</span>

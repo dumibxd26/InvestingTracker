@@ -91,6 +91,7 @@ export interface GoalRecord {
   target_money_basis: MoneyBasis;
   annual_inflation_rate: string | null;
   contribution_rules: ContributionRule[] | null;
+  retirement_settings?: RetirementSettings | null;
   risk_level: "low" | "moderate" | "high";
   monthly_contribution: string;
   visualization_budget_amount: string | null;
@@ -928,6 +929,91 @@ export interface GoalCreatePayload {
 export interface GoalUpdatePayload extends GoalCreatePayload {
   current_amount: string;
   current_annual_income: string;
+}
+
+export interface RetirementInvestment {
+  key: string;
+  kind: "holding" | "deposit" | "stock" | "etf" | "bond" | "future_deposit" | "cash";
+  asset_id: string | null;
+  name: string;
+  history_id: string | null;
+  contribution_percentage: string;
+  lower_return: string;
+  upper_return: string;
+  tax_rate: string | null;
+  deposit_term_months: number;
+}
+
+export interface RetirementSettings {
+  target_date: string;
+  currency: Currency;
+  contribution_amount: string;
+  contribution_frequency: "monthly" | "yearly";
+  annual_inflation_rate: string;
+  include_taxes: boolean;
+  investments: RetirementInvestment[];
+}
+
+export interface RetirementHistory {
+  id: string;
+  name: string;
+  currency: Currency;
+  source: string;
+  license: string;
+  sample_start: string;
+  sample_end: string;
+  observations: number;
+  created_at: string;
+}
+
+export interface RetirementReturnSuggestion {
+  available: boolean;
+  reason?: string;
+  lower_return?: number;
+  upper_return?: number;
+  median_return?: number;
+  windows?: number;
+  matching_months?: number;
+  dataset?: RetirementHistory;
+}
+
+export interface RetirementInflationSuggestion {
+  available: boolean;
+  suggested_rate: number | null;
+  lower_rate: number | null;
+  upper_rate: number | null;
+  windows: number;
+  source: string;
+  license: string;
+  sample_start: string;
+  sample_end: string;
+  method: string;
+  reason: string | null;
+}
+
+export interface RetirementPoint {
+  date: string;
+  nominal_value: string;
+  real_value: string;
+}
+
+export interface RetirementProjection {
+  available: boolean;
+  reason?: string;
+  settings?: RetirementSettings;
+  current_value?: string;
+  contributions_paid?: string;
+  lines?: Record<"historical_lower" | "historical_upper" | "user_lower" | "user_upper", RetirementPoint[] | null>;
+  historical_windows?: number;
+  historical_min_start?: string | null;
+  historical_max_start?: string | null;
+  warnings?: string[];
+  assumptions?: string[];
+  suggestions?: Record<string, RetirementReturnSuggestion>;
+  split_suggestion?: {
+    available: boolean; lower_return: number | null; upper_return: number | null;
+    median_return: number | null; method: string;
+  };
 }
 
 export interface GoalInsightsTaxProfile {

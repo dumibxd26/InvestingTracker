@@ -342,7 +342,10 @@ class GoalCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_target(self) -> "GoalCreate":
-        if self.target_amount is None and self.target_annual_income is None:
+        if (
+            self.target_amount is None and self.target_annual_income is None
+            and self.goal_type != GoalType.RETIREMENT
+        ):
             raise ValueError("Set a target amount or an annual income target")
         if self.goal_type == GoalType.PASSIVE_INCOME and self.target_annual_income is None:
             raise ValueError("Passive income goals need a target annual income")
@@ -383,6 +386,7 @@ class GoalResponse(BaseModel):
     target_money_basis: MoneyBasis
     annual_inflation_rate: Decimal | None
     contribution_rules: list[ContributionRule] | None
+    retirement_settings: dict | None = None
     visualization_budget_amount: Decimal | None
     visualization_budget_period: Literal["monthly", "yearly"] | None
     fixed_percent: Decimal | None
