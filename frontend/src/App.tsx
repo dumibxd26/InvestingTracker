@@ -91,6 +91,12 @@ export default function App() {
   const [allocationOpen, setAllocationOpen] = useState(false);
   const [darkMode, setDarkMode] = useState(initialDarkMode);
   const hasData = useRef(false);
+  const scrollArea = useRef<HTMLDivElement>(null);
+
+  function navigate(view: View) {
+    setActiveView(view);
+    scrollArea.current?.scrollTo({ top: 0, behavior: "instant" });
+  }
 
   useEffect(() => {
     let active = true;
@@ -185,13 +191,18 @@ export default function App() {
   }
 
   async function handleLogout() {
-    await api.logout();
-    setProfile(null);
-    setData(null);
-    hasData.current = false;
-    setError("");
-    setActiveView("overview");
-    setAuthChecking(false);
+    try {
+      await api.logout();
+      setError("");
+    } catch (cause) {
+      setError(`Signed out on this device, but the server session could not be revoked: ${cause instanceof ApiError ? cause.message : "Check your connection."}`);
+    } finally {
+      setProfile(null);
+      setData(null);
+      hasData.current = false;
+      setActiveView("overview");
+      setAuthChecking(false);
+    }
   }
 
   async function handleGoalCreated() {
@@ -234,13 +245,14 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content">Skip to content</a>
       <Sidebar
         activeView={activeView}
-        onNavigate={setActiveView}
+        onNavigate={navigate}
         profile={profile}
         onLogout={() => void handleLogout()}
       />
-      <main className="main-area">
+      <main className="main-area" id="main-content" tabIndex={-1}>
         <header className="topbar">
           <div className="breadcrumbs">
             <span>@{profile.username}</span>
@@ -262,6 +274,7 @@ export default function App() {
               className={`icon-button refresh-button ${refreshing ? "is-refreshing" : ""}`}
               type="button"
               aria-label="Refresh wealth snapshot"
+              title={activeView === "settings" ? "Snapshot refresh is available on portfolio and planning pages" : refreshing ? "Refreshing your snapshot…" : "Refresh your snapshot"}
               onClick={() => void reload()}
               disabled={refreshing || loading || activeView === "settings"}
             >
@@ -297,7 +310,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="main-scroll">
+        <div className="main-scroll" ref={scrollArea}>
           {data?.sample_data && (
             <div className="sample-banner">
               <AlertTriangle size={15} />
@@ -333,9 +346,9 @@ export default function App() {
                   currency={currency}
                   onAddGoal={() => setGoalDialogOpen(true)}
                   onPreview={() => setAllocationOpen(true)}
-                  onOpenGoals={() => setActiveView("goals")}
-                  onOpenCashFlow={() => setActiveView("cashflow")}
-                  onOpenPortfolio={() => setActiveView("portfolio")}
+                  onOpenGoals={() => navigate("goals")}
+                  onOpenCashFlow={() => navigate("cashflow")}
+                  onOpenPortfolio={() => navigate("portfolio")}
                 />
               )}
               {activeView === "portfolio" && (

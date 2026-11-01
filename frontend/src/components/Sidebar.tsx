@@ -30,6 +30,7 @@ const mobileItems: NavigationItem[] = [
   { label: "Portfolio", view: "portfolio", icon: ChartNoAxesCombined },
   { label: "Goals", view: "goals", icon: Target },
   { label: "Cash flow", view: "cashflow", icon: ArrowLeftRight },
+  { label: "Equity", view: "compensation", icon: Gift },
   { label: "Assistant", view: "assistant", icon: Sparkles },
   { label: "Settings", view: "settings", icon: Settings2 },
 ];
@@ -79,7 +80,7 @@ export function Sidebar({ activeView, onNavigate, profile, onLogout }: SidebarPr
           <span>AI assistant</span>
           <span className="nav-new">NEW</span>
         </button>
-        <button className={`nav-item ${activeView === "settings" ? "active" : ""}`} onClick={() => onNavigate("settings")}>
+        <button className={`nav-item ${activeView === "settings" ? "active" : ""}`} aria-current={activeView === "settings" ? "page" : undefined} onClick={() => onNavigate("settings")}>
           <Settings2 size={18} strokeWidth={1.8} />
           <span>Profile settings</span>
         </button>

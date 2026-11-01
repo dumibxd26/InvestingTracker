@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { AlertCircle, ArrowRight, Check, Pencil, Plus, Save, SlidersHorizontal, Target, Trash2, TrendingUp } from "lucide-react";
+import { AlertCircle, Check, Pencil, Plus, Save, SlidersHorizontal, Target, Trash2, TrendingUp } from "lucide-react";
 import { api, ApiError } from "../api";
 import { amount, dateLabel, goalLabel } from "../format";
 import type { AssetClass, Currency, Dashboard, FundingRule, GoalInsights, GoalRecord } from "../types";
@@ -216,23 +216,23 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
                     <div className="full-goal-title"><h3>{goal.name}</h3><span className="goal-type">{goalLabel(goal.goal_type)}</span></div>
                     <div className="full-goal-meta">
                       <span>{goal.target_money_basis === "nominal" ? "Nominal target" : "Today's-money target"}</span>
-                      <span>{goal.risk_level} risk comfort</span>
+                      <span>{goal.goal_type === "retirement" ? "Current assets + future savings" : `${goal.risk_level} risk comfort`}</span>
                       <span>{goal.flexibility === "essential" ? "Essential date" : "Flexible date"}</span>
                     </div>
                   </div>
                 </div>
                 <div className="full-goal-progress">
-                  <div className="full-goal-value"><strong>{amount(goal.current_amount, currency)}</strong><span>of {target ? amount(target, currency) : "not set"}</span></div>
+                  <div className="full-goal-value"><strong>{amount(goal.current_amount, currency)}</strong><span>{target ? `of ${amount(target, currency)}` : "No target amount set"}</span></div>
                   <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
                   <small>
-                    {progress.toFixed(0)}% · {label}
+                    {target ? `${progress.toFixed(0)}% · ` : ""}{label}
                     {Number(goal.linked_asset_value) > 0
                       ? ` · ${amount(goal.linked_asset_value, currency)} linked assets`
                       : ""}
                   </small>
                 </div>
                 <div className="full-goal-right">
-                  <span className="monthly-needed">{amount(goal.monthly_contribution, currency)}<small>/ month planned</small></span>
+                  {goal.goal_type !== "retirement" && <span className="monthly-needed">{amount(goal.monthly_contribution, currency)}<small>/ month planned</small></span>}
                   {goal.visualization_budget_amount !== null && goal.visualization_budget_period && (
                     <span className="goal-date">
                       {amount(goal.visualization_budget_amount, currency)} / {goal.visualization_budget_period} · visualization only
@@ -245,14 +245,15 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
                   <span className="goal-date">{goal.target_date ? dateLabel(goal.target_date, { month: "short", year: "numeric" }) : "Ongoing"}</span>
                   <span className="goal-actions">
                     <button
-                      className="icon-button small"
+                      className="button button-secondary goal-projection-button"
                       type="button"
                       aria-label={`Show insights for goal ${goal.name}`}
                       aria-expanded={insightsGoalId === goal.id}
-                      title="Goal insights"
+                      title={goal.goal_type === "retirement" ? "Open retirement planner" : "Open goal insights"}
                       onClick={() => void toggleInsights(goal.id)}
                     >
                       <TrendingUp size={14} />
+                      <span>{insightsGoalId === goal.id ? "Hide projection" : goal.goal_type === "retirement" ? "Plan retirement" : "View projection"}</span>
                     </button>
                     <button
                       className="icon-button small"
@@ -280,7 +281,7 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
               {insightsGoalId === goal.id && (
                 <div className="goal-insights-wrap">
                   {goal.goal_type === "retirement" ? (
-                    <RetirementPanel goalId={goal.id} data={data} onSaved={onSaved} />
+                    <RetirementPanel goalId={goal.id} data={data} onSaved={onSaved} onEditGoal={() => void editGoal(goal.id)} editingGoal={loadingGoalId === goal.id} />
                   ) : <>
                   <ContributionPreview goalId={goal.id} revision={`${planRevision}:${JSON.stringify(data.goals)}`} onEdit={() => void editGoal(goal.id)} editing={loadingGoalId === goal.id} />
                   {insights?.goalId === goal.id ? (
@@ -320,7 +321,8 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
           <p className="policy-help">
             {fundingRule === "proportional"
                 ? "Cash is split in proportion to each goal’s average monthly contributions over the next 12 months, including bonuses and one-off contributions."
-                : "Each active goal receives the share you set below. Shares must total exactly 100%."}
+                : fundingRule === "fixed_percentages" ? "Each active goal receives the share you set below. Shares must total exactly 100%."
+                : "Choose a funding rule to see how new cash will be divided. Saving these preferences does not move money."}
           </p>
           <div className="fixed-shares-list">
             {data.goals.map((goal) => (
@@ -391,8 +393,10 @@ export function GoalsView({ data, currency, onAddGoal, onSaved }: GoalsViewProps
 
       <section className="panel plan-note">
         <AlertCircle size={17} />
-        <p>Goal progress is sample data entered for this prototype. Assets are not yet assigned to goals, and a goal’s displayed progress should not be treated as an account balance.</p>
-        <span>Learn how it works <ArrowRight size={14} /></span>
+        <div><p>Goals earmark your investments without moving money between accounts.</p>
+        <details><summary>How goal progress works</summary>
+          <p>Progress combines the shares of assets you link with savings you explicitly enter. Do not enter the same savings twice. Projections describe possible outcomes; they do not record contributions, buy investments, or guarantee returns.</p>
+        </details></div>
       </section>
       {editingGoal && (
         <GoalDialog

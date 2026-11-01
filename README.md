@@ -65,6 +65,19 @@ using the project's Python environment before starting the updated API.
 
 ### Simplified retirement projections
 
+The web retirement planner groups inputs into four steps: horizon and contributions,
+inflation, investments and their future split, then comparison. **Plan retirement**
+on a goal opens the planner; **Manage linked assets** opens the goal editor.
+Advanced history/import explanations stay in expandable sections.
+Unsaved edits survive automatic snapshot refreshes. Previously calculated results remain
+visible with an explicit notice until changes are recalculated. Required fields use
+browser validation, unavailable historical actions explain their prerequisites, and
+search offers a clear empty state. Animations and focus styling respect reduced-motion
+and keyboard accessibility preferences; mobile navigation includes equity and deposits.
+Pressing Enter in a future investment's name adds it without submitting the whole plan.
+Calculation errors are brought into view, and datasets selected in a draft must be
+unlinked before deletion.
+
 For a retirement goal, open its projection in **Goals & plan**. Retirement now uses an
 independent accumulation calculator rather than the shared salary timeline, Monte Carlo
 success probabilities, glide paths, recovery options, or rebalancing proposals. Other goal
